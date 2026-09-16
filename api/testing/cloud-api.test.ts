@@ -1,0 +1,2228 @@
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { createHash, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
+import { ReadableStream } from 'node:stream/web';
+import type { ContainerClient } from '@azure/storage-blob';
+import { newRoutine, type FillerRecording } from '../../shared/routine';
+import type { CloudAsset, CloudRoutine } from '../../shared/cloud-contract';
+import type { CloudMusicPlaylist, RevisionReference } from '../../shared/class-plan';
+import { CloudAuth, derivePassword } from '../src/cloud/auth';
+import { ApiError, LIMITS, loadConfig, parsePasswordHash, type Account } from '../src/cloud/config';
+import { AzureBlobStore, BlobConflict, encode, readJson, type BlobStore, type StoredBlob } from '../src/cloud/store';
+import { CloudApi, boundedBody, type ApiRequest } from '../src/cloud/http';
+import { CloudMedia, MEDIA_TYPES, parseAsset, validateSignature } from '../src/cloud/media';
+import { CloudRoutines, revisionHeader } from '../src/cloud/routines';
+import { QuotaBudget } from '../src/cloud/quota';
+import { CloudFillers } from '../src/cloud/fillers';
+import { HEAD_BYTES, HISTORY_LIMIT } from '../src/cloud/documents';
+import type { CloudClassSetup, ResolvedClassSetup } from '../src/cloud/plans';
+
+vi.mock('@azure/functions', () => ({ app: { http: vi.fn() } }));
+
+class FakeBlobStore implements BlobStore {
+  readonly blobs = new Map<string, StoredBlob>();
+  sequence = 0;
+  async verifyPrivate(): Promise<void> {}
+  async get(key: string, maximum: number): Promise<StoredBlob | null> {
+    const blob = this.blobs.get(key);
+    if (!blob) return null;
+    if (blob.bytes.length > maximum) throw new Error('oversized fixture');
+    return { bytes: Buffer.from(blob.bytes), etag: blob.etag };
+  }
+  async put(key: string, bytes: Buffer, expected: string | null): Promise<string> {
+    const old = this.blobs.get(key);
+    if (expected === null ? !!old : old?.etag !== expected) throw new BlobConflict();
+    const etag = `"${++this.sequence}"`;
+    this.blobs.set(key, { bytes: Buffer.from(bytes), etag });
+    return etag;
+  }
+  async delete(key: string, expected: string): Promise<void> {
+    if (this.blobs.get(key)?.etag !== expected) throw new BlobConflict();
+    this.blobs.delete(key);
+  }
+  async list(prefix: string, limit: number, cursor?: string) {
+    const keys = [...this.blobs.keys()].filter(key => key.startsWith(prefix)).sort();
+    const start = cursor ? Number(cursor) : 0;
+    return { keys: keys.slice(start, start + limit), cursor: keys.length > start + limit ? String(start + limit) : undefined };
+  }
+}
+
+let passwordHash: string;
+beforeAll(async () => {
+  const salt = Buffer.alloc(16, 7);
+  passwordHash = `scrypt$32768$8$3$${salt.toString('hex')}$${(await derivePassword('synthetic-test-password', salt)).toString('hex')}`;
+});
+
+function fixture() {
+  const accounts: Account[] = [
+    { id: 'owner', username: 'owner', passwordHash, role: 'owner', enabled: true, authVersion: 1 },
+    { id: 'editor', username: 'editor', passwordHash, role: 'editor', enabled: true, authVersion: 1 },
+    { id: 'player', username: 'player', passwordHash, role: 'player', enabled: true, authVersion: 1 },
+  ];
+  const env = () => ({ FIM_ORIGIN: 'https://example.invalid',
+    FIM_STORAGE_CONNECTION_STRING: `DefaultEndpointsProtocol=https;AccountName=fixture;AccountKey=${Buffer.alloc(64).toString('base64')};EndpointSuffix=core.windows.net`,
+    FIM_STORAGE_CONTAINER: 'private-media', FIM_ACCOUNTS_JSON: JSON.stringify(accounts) });
+  const store = new FakeBlobStore();
+  let now = 1900000000000;
+  const auth = new CloudAuth(store, env, () => now);
+  const loginHeaders = new Headers({ origin: env().FIM_ORIGIN });
+  const login = async (username = 'owner') => {
+    const result = await auth.login(loginHeaders, { username, password: 'synthetic-test-password' });
+    return { result, headers: new Headers({ origin: env().FIM_ORIGIN,
+      cookie: result.setCookie.split(';')[0]!, 'x-csrf-token': result.session.csrfToken }) };
+  };
+  return { store, auth, accounts, env, login, loginHeaders, advance: (ms: number) => { now += ms; } };
+}
+
+function wav(bytes = 2048): Buffer {
+  const buffer = Buffer.alloc(44 + bytes);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(buffer.length - 8, 4);
+  buffer.write('WAVEfmt ', 8);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(44100, 24);
+  buffer.writeUInt32LE(88200, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(bytes, 40);
+  return buffer;
+}
+
+const hashBytes = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
+function adts(repetitions = 4): Buffer {
+  return Buffer.concat(Array.from({ length: repetitions }, () => Buffer.from('fff1508001bffc211004608c1c', 'hex')));
+}
+
+function ebml(id: string, payload: Buffer): Buffer {
+  let length = 1;
+  while (payload.length >= 2 ** (7 * length) - 1) length++;
+  const size = Buffer.alloc(length);
+  size.writeUIntBE(payload.length, 0, length);
+  size[0] = size[0]! | (1 << (8 - length));
+  return Buffer.concat([Buffer.from(id, 'hex'), size, payload]);
+}
+
+function webmTrack(codec = 'A_VORBIS', options: { type?: number; channels?: number; rate?: number; extra?: Buffer; number?: number } = {}): Buffer {
+  const rate = Buffer.alloc(8);
+  rate.writeDoubleBE(options.rate ?? 48000);
+  return ebml('ae', Buffer.concat([
+    ebml('d7', Buffer.from([options.number ?? 1])), ebml('73c5', Buffer.from([1])),
+    ebml('83', Buffer.from([options.type ?? 2])), ebml('86', Buffer.from(codec)),
+    ebml('e1', Buffer.concat([ebml('b5', rate), ebml('9f', Buffer.from([options.channels ?? 2]))])),
+    options.extra ?? Buffer.alloc(0),
+  ]));
+}
+
+function webm(tracks = webmTrack(), options: { unknownSegment?: boolean; beforeTracks?: Buffer; clusterBytes?: number; docType?: string } = {}): Buffer {
+  const header = ebml('1a45dfa3', Buffer.concat([
+    Buffer.from('4286810142f7810142f2810442f38108', 'hex'),
+    ebml('4282', Buffer.from(options.docType ?? 'webm')), Buffer.from('4287810442858102', 'hex'),
+  ]));
+  const segment = Buffer.concat([options.beforeTracks ?? Buffer.alloc(0), ebml('1654ae6b', tracks),
+    ebml('1f43b675', Buffer.concat([Buffer.from('e78100', 'hex'),
+      ebml('a3', Buffer.concat([Buffer.from('81000080', 'hex'), Buffer.alloc(options.clusterBytes ?? 16)]))]))]);
+  return Buffer.concat([header, options.unknownSegment
+    ? Buffer.concat([Buffer.from('1853806701ffffffffffffff', 'hex'), segment]) : ebml('18538067', segment)]);
+}
+
+function atom(kind: string, payload: Buffer = Buffer.alloc(0), extended = false): Buffer {
+  const header = Buffer.alloc(extended ? 16 : 8);
+  header.writeUInt32BE(extended ? 1 : header.length + payload.length);
+  header.write(kind, 4, 'latin1');
+  if (extended) header.writeBigUInt64BE(BigInt(header.length + payload.length), 8);
+  return Buffer.concat([header, payload]);
+}
+
+function mp4(...leading: Buffer[]): Buffer {
+  return Buffer.concat([...leading, atom('ftyp', Buffer.from('4d3441200000000069736f6d6d703432', 'hex')), atom('mdat', Buffer.alloc(16))]);
+}
+
+function signature(bytes: Buffer, contentType: string, assetBytes = bytes.length): void {
+  validateSignature(bytes, { id: 'structural-fixture', bytes: assetBytes, sha256: hashBytes(bytes), contentType });
+}
+
+async function stageAudio(media: CloudMedia, headers: Headers, bytes = wav(), contentType = 'audio/wav') {
+  const upload = await media.initiate(headers, { bytes: bytes.length, sha256: hashBytes(bytes), contentType });
+  for (let index = 0; index < upload.chunkCount; index++) {
+    await media.putChunk(headers, upload.id, index, bytes.subarray(index * LIMITS.chunkBytes, (index + 1) * LIMITS.chunkBytes));
+  }
+  return upload;
+}
+
+async function uploadAudio(media: CloudMedia, headers: Headers, bytes = wav(), contentType = 'audio/wav'): Promise<CloudAsset> {
+  const upload = await stageAudio(media, headers, bytes, contentType);
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const result = await media.complete(headers, upload.id);
+    if (!('pending' in result)) return result;
+  }
+  throw new Error('fixture completion did not converge');
+}
+
+function routine(asset?: CloudAsset): CloudRoutine {
+  const routine = newRoutine();
+  if (asset) routine.tracks.push({ id: 'entry-one', title: '<literal song>', duration: 60, bpm: 120, firstBeat: 0, bodyArea: '',
+    cues: [{ id: 'cue-one', note: '=literal note', anchor: { kind: 'timestamp', seconds: 1 }, beep: true }] });
+  return { routine, media: asset ? { 'entry-one': asset } : {} };
+}
+
+function request(path: string, method: string, headers: Headers, input?: unknown): ApiRequest {
+  const nextHeaders = new Headers(headers);
+  const bytes = input === undefined ? null : Buffer.isBuffer(input) ? input : encode(input);
+  if (input !== undefined && !Buffer.isBuffer(input)) nextHeaders.set('content-type', 'application/json');
+  return { url: `https://example.invalid/api/${path}`, method, headers: nextHeaders,
+    body: bytes === null ? null : new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }) };
+}
+
+function atRevision(headers: Headers, revision: number): Headers {
+  const result = new Headers(headers);
+  result.set('if-match', `"${revision}"`);
+  return result;
+}
+
+function pin(value: { id: string; revision: number; published: boolean }): RevisionReference {
+  return { id: value.id, revision: value.revision, published: value.published };
+}
+
+function musicPlaylist(asset: CloudAsset): CloudMusicPlaylist {
+  const source = routine(asset);
+  return { playlist: { schemaVersion: 1, id: randomUUID(), name: 'Synthetic arrival music', revision: 1, locked: false, published: false,
+    tracks: source.routine.tracks.map(track => ({ ...track, cues: [] })) }, media: source.media };
+}
+
+function classPlan(source: RevisionReference): CloudClassSetup {
+  return { setup: { schemaVersion: 1, id: randomUUID(), name: 'Synthetic teaching setup', revision: 1, locked: false,
+    published: false, routine: source, crossfade: 2 } };
+}
+
+type PlanBody = CloudMusicPlaylist | CloudClassSetup;
+const planState = (body: PlanBody) => 'setup' in body ? body.setup : body.playlist;
+
+async function planFixture(role = 'owner') {
+  const context = fixture();
+  const api = new CloudApi(context.store, context.env, context.auth.now);
+  const { headers } = await context.login(role);
+  const asset = await uploadAudio(api.media, headers);
+  const draft = await api.routines.create(headers, routine(asset));
+  const publication = await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'publish');
+  return { ...context, api, headers, asset, draft, publication };
+}
+
+describe('approved class workflow (persistent services, Blob fake)', () => {
+  it('authorizes archived gap-only audio from the exact publication, never from a newer draft or publication', async () => {
+    const context = await planFixture();
+    const { api, headers, asset } = context;
+    const gapAsset = await uploadAudio(api.media, headers, wav(100));
+    const recording = await api.routines.fillers.create(headers, { name: 'Gap only recording', duration: 10, asset: gapAsset });
+    const input = routine(asset);
+    input.routine.filler.mode = 'none';
+    input.routine.tracks[0]!.after = { mode: 'custom', filler: { mode: 'timed', seconds: 10, bpm: 100, sound: 'recording', recording } };
+    const created = await api.routines.create(headers, input);
+    const publication = await api.routines.mutate(atRevision(headers, 1), created.routine.id, 'publish');
+    const setup = await api.classes.create(headers, classPlan(pin(publication.routine)));
+    await api.classes.mutate(atRevision(headers, 1), setup.setup.id, 'publish');
+    const draft = await api.routines.get(headers, created.routine.id, false);
+    delete draft.routine.tracks[0]!.after;
+    await api.routines.mutate(atRevision(headers, 2), created.routine.id, 'save', draft);
+    await api.routines.mutate(atRevision(headers, 3), created.routine.id, 'publish');
+    await api.routines.fillers.archive(headers, recording.id);
+    const playerHeaders = (await context.login('player')).headers;
+    for (const authority of [`routineId=${created.routine.id}&revision=2`, `classId=${setup.setup.id}&revision=2`]) {
+      const download = await api.handle(request(`media/${gapAsset.id}/chunks/0?${authority}`, 'GET', playerHeaders));
+      expect(download.status).toBe(200);
+      expect(hashBytes(download.body as Buffer)).toBe(gapAsset.sha256);
+    }
+    expect((await api.handle(request(`media/${gapAsset.id}?routineId=${created.routine.id}`, 'GET', playerHeaders))).status).toBe(403);
+    expect((await api.handle(request(`media/${gapAsset.id}?routineId=${created.routine.id}&revision=3`, 'GET', playerHeaders))).status).toBe(404);
+  });
+
+  it('prepares exact published references after republish, archive and tombstones without exposing draft-only assets', async () => {
+    const context = await planFixture();
+    const { api, headers, asset, publication } = context;
+    const loopAsset = await uploadAudio(api.media, headers, wav(96));
+    const recording = await api.routines.fillers.create(headers, { name: 'Retained transition recording', duration: 15, asset: loopAsset });
+    const nextRoutine = await api.routines.get(headers, publication.routine.id, false);
+    nextRoutine.routine.filler.mode = 'none';
+    nextRoutine.routine.tracks[0]!.after = { mode: 'custom', filler: { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording, gain: 0.5 }, crossfade: 1 };
+    await api.routines.mutate(atRevision(headers, 2), publication.routine.id, 'save', nextRoutine);
+    const pinnedRoutine = await api.routines.mutate(atRevision(headers, 3), publication.routine.id, 'publish');
+    const list = await api.playlists.create(headers, musicPlaylist(asset));
+    const pinnedList = await api.playlists.mutate(atRevision(headers, 1), list.playlist.id, 'publish');
+    const input = classPlan(pin(pinnedRoutine.routine));
+    input.setup.walkIn = pin(pinnedList.playlist);
+    input.setup.walkOut = pin(pinnedList.playlist);
+    input.setup.before = { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording };
+    input.setup.after = { ...input.setup.before, gain: 0.25 };
+    const saved = await api.classes.create(headers, input);
+    const pinnedClass = await api.classes.mutate(atRevision(headers, 1), saved.setup.id, 'publish');
+    const playerHeaders = (await context.login('player')).headers;
+    const path = `classes/${saved.setup.id}/prepare?published=true&revision=2`;
+    const first = await api.handle(request(path, 'GET', playerHeaders));
+    expect(first).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+    const prepared = JSON.parse(String(first.body)) as ResolvedClassSetup;
+    expect(prepared).toEqual(JSON.parse(encode({ setup: pinnedClass.setup, routine: pinnedRoutine, walkIn: pinnedList, walkOut: pinnedList }).toString()));
+    const privateAsset = await uploadAudio(api.media, headers, wav(128));
+    const changed = await api.routines.get(headers, pinnedRoutine.routine.id, false);
+    changed.media[changed.routine.tracks[0]!.id] = privateAsset;
+    changed.routine.name = 'Newer private routine';
+    await api.routines.mutate(atRevision(headers, 4), changed.routine.id, 'save', changed);
+    await api.routines.mutate(atRevision(headers, 5), changed.routine.id, 'publish');
+    const changedPlaylist = await api.playlists.get(headers, list.playlist.id, false);
+    changedPlaylist.media[changedPlaylist.playlist.tracks[0]!.id] = privateAsset;
+    await api.playlists.mutate(atRevision(headers, 2), list.playlist.id, 'save', changedPlaylist);
+    await api.playlists.mutate(atRevision(headers, 3), list.playlist.id, 'publish');
+    const changedSetup = await api.classes.get(headers, saved.setup.id, false);
+    changedSetup.setup.routine = { id: changed.routine.id, revision: 6, published: true };
+    changedSetup.setup.walkIn = { id: list.playlist.id, revision: 4, published: true };
+    await api.classes.mutate(atRevision(headers, 2), saved.setup.id, 'save', changedSetup);
+    await api.classes.mutate(atRevision(headers, 3), saved.setup.id, 'publish');
+    const remove = vi.spyOn(api.store, 'delete');
+    await api.routines.fillers.archive(headers, recording.id);
+    await api.playlists.mutate(atRevision(headers, 4), list.playlist.id, 'delete');
+    await api.routines.mutate(atRevision(headers, 6), changed.routine.id, 'delete');
+    expect(remove).not.toHaveBeenCalled();
+    const libraryLookup = vi.spyOn(api.routines.fillers, 'resolve').mockRejectedValue(new ApiError(503, 'storage_unavailable'));
+    expect((await api.handle(request(path, 'GET', playerHeaders))).body).toBe(first.body);
+    expect((await api.handle(request(`classes/${saved.setup.id}/prepare?published=true&revision=1`, 'GET', playerHeaders))).status).toBe(404);
+    for (const retained of [asset, loopAsset]) {
+      const query = `classId=${saved.setup.id}&revision=2`;
+      expect((await api.handle(request(`media/${retained.id}?${query}`, 'GET', playerHeaders))).status).toBe(200);
+      const chunk = await api.handle(request(`media/${retained.id}/chunks/0?${query}`, 'GET', playerHeaders));
+      expect(chunk.status).toBe(200);
+      expect(hashBytes(chunk.body as Buffer)).toBe(retained.sha256);
+    }
+    expect((await api.handle(request(`media/${privateAsset.id}?classId=${saved.setup.id}&revision=2`, 'GET', playerHeaders))).status).toBe(403);
+    expect((await api.handle(request(`playlists/${list.playlist.id}?published=true&revision=2`, 'GET', playerHeaders))).status).toBe(404);
+    expect((await api.handle(request(`routines/${changed.routine.id}?published=true&revision=4`, 'GET', playerHeaders))).status).toBe(404);
+    expect((await api.handle(request(`classes/${saved.setup.id}/prepare?published=false&revision=3`, 'GET', playerHeaders))).status).toBe(403);
+    await expect(api.classes.prepare(headers, saved.setup.id, false, 1)).resolves.toMatchObject({ routine: { routine: { revision: 4 } } });
+    const publicBody = await api.classes.get(headers, saved.setup.id, true, 2);
+    expect(publicBody.setup).toEqual(pinnedClass.setup);
+    expect(libraryLookup).not.toHaveBeenCalled();
+  });
+
+  it('resolves pinned draft revisions for authors only and never upgrades them implicitly on publish', async () => {
+    const context = await planFixture();
+    const { api, headers, draft, publication, asset } = context;
+    const playlist = await api.playlists.create(headers, musicPlaylist(asset));
+    const input = classPlan(pin(draft.routine));
+    input.setup.walkIn = pin(playlist.playlist);
+    const saved = await api.classes.create(headers, input);
+    const newer = await api.routines.get(headers, draft.routine.id, false);
+    newer.routine.name = 'Later content';
+    await api.routines.mutate(atRevision(headers, publication.routine.revision), draft.routine.id, 'save', newer);
+    const prepared = await api.classes.prepare(headers, saved.setup.id, false, 1);
+    expect(prepared.routine.routine).toEqual(draft.routine);
+    expect(prepared.walkIn!.playlist).toEqual(playlist.playlist);
+    await expect(api.classes.mutate(atRevision(headers, 1), saved.setup.id, 'publish')).rejects.toMatchObject({ status: 400 });
+    const playerHeaders = (await context.login('player')).headers;
+    await expect(api.classes.prepare(playerHeaders, saved.setup.id, false, 1)).rejects.toMatchObject({ status: 403 });
+    expect((await api.handle(request(`media/${asset.id}?classId=${saved.setup.id}&revision=1`, 'GET', playerHeaders))).status).toBe(404);
+    expect((await api.handle(request(`media/${asset.id}?playlistId=${playlist.playlist.id}&revision=1`, 'GET', playerHeaders))).status).toBe(404);
+  });
+
+  it('validates every recording in custom gaps and announcements, including dormant and archived rules', async () => {
+    const { api, headers, asset, publication } = await planFixture();
+    const recording = await api.routines.fillers.create(headers, { name: 'Authoritative loop', duration: 10, asset });
+    await api.routines.fillers.archive(headers, recording.id);
+    for (const target of ['default', 'gap', 'before', 'after'] as const) {
+      for (const field of ['name', 'duration', 'id', 'asset']) {
+        const claimed = structuredClone(recording);
+        if (field === 'name') claimed.name = 'Forged loop';
+        if (field === 'duration') claimed.duration = 11;
+        if (field === 'id') claimed.id = 'unknown-loop';
+        if (field === 'asset') claimed.asset.sha256 = 'f'.repeat(64);
+        const filler = { mode: 'hold' as const, seconds: 0, bpm: 100, sound: 'recording' as const, recording: claimed };
+        if (target === 'default' || target === 'gap') {
+          const input = routine(asset);
+          if (target === 'default') input.routine.filler = filler;
+          else input.routine.tracks[0]!.after = { mode: 'custom', filler };
+          await expect(api.routines.create(headers, input)).rejects.toMatchObject({ status: field === 'id' ? 404 : 400 });
+        } else {
+          const input = classPlan(pin(publication.routine));
+          input.setup[target] = filler;
+          await expect(api.classes.create(headers, input)).rejects.toMatchObject({ status: field === 'id' ? 404 : 400 });
+        }
+      }
+    }
+    const input = routine(asset);
+    input.routine.tracks[0]!.after = { mode: 'custom', filler: { mode: 'none', seconds: 0, bpm: 100, sound: 'recording', recording } };
+    const saved = await api.routines.create(headers, input);
+    await expect(api.routines.mutate(atRevision(headers, 1), saved.routine.id, 'publish')).resolves.toMatchObject({ routine: { published: true } });
+    const claimed = classPlan(pin(publication.routine));
+    claimed.setup.before = { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording };
+    const setup = await api.classes.create(headers, claimed);
+    const tamperedRecord = structuredClone(recording);
+    tamperedRecord.duration = 11;
+    const key = `fillers/records/${recording.id}`;
+    await api.store.put(key, encode({ recording: tamperedRecord, archived: true }), (await api.store.get(key, 4096))!.etag);
+    await expect(api.classes.mutate(atRevision(headers, 1), setup.setup.id, 'publish')).rejects.toMatchObject({ status: 400 });
+    await expect(api.routines.mutate(atRevision(headers, 2), saved.routine.id, 'publish')).rejects.toMatchObject({ status: 400 });
+  });
+
+  it.each(['routines', 'playlists', 'classes'] as const)('%s never exposes staged revisions after a failed head CAS', async kind => {
+    const context = await planFixture();
+    const { api, headers, asset, publication } = context;
+    const service = kind === 'routines' ? api.routines : kind === 'playlists' ? api.playlists : api.classes;
+    const input = kind === 'routines' ? routine(asset) : kind === 'playlists' ? musicPlaylist(asset) : classPlan(pin(publication.routine));
+    const body = await service.create(headers, input);
+    const id = 'routine' in body ? body.routine.id : planState(body).id;
+    const protectedHead = context.store.blobs.get(service.headKey(id))!;
+    const put = context.store.put.bind(context.store);
+    const spy = vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key === service.headKey(id)) throw new BlobConflict();
+      return put(key, bytes, expected);
+    });
+    await expect(service.mutate(atRevision(headers, 1), id, 'publish')).rejects.toMatchObject({ status: 412 });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith(service.snapshotPrefix(id, true)))).toHaveLength(1);
+    expect(context.store.blobs.get(service.headKey(id))).toEqual(protectedHead);
+    for (const published of [true, false]) await expect(service.get(headers, id, published, 2)).rejects.toMatchObject({ status: 404, code: 'revision_not_found' });
+    spy.mockRestore();
+    const winner = await service.mutate(atRevision(headers, 1), id, 'save', body);
+    expect(await service.get(headers, id, false, 2)).toEqual(JSON.parse(encode(winner).toString()));
+    await expect(service.get(headers, id, true, 2)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it.each(['save', 'lock', 'publish'] as const)('class %s races use the same head and preserve exact references', async action => {
+    const { api, headers, publication, draft } = await planFixture();
+    const input = classPlan(pin(publication.routine));
+    const body = await api.classes.create(headers, input);
+    const edited = structuredClone(body);
+    edited.setup.name = 'Concurrent draft';
+    edited.setup.routine = pin(draft.routine);
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const tags: (string | null)[] = [];
+    const put = api.store.put.bind(api.store);
+    vi.spyOn(api.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key === api.classes.headKey(body.setup.id)) {
+        tags.push(expected);
+        if (tags.length === 2) release();
+        await barrier;
+      }
+      return put(key, bytes, expected);
+    });
+    const other = action === 'lock' ? 'save' : 'lock';
+    const outcomes = await Promise.allSettled([
+      api.classes.mutate(atRevision(headers, 1), body.setup.id, action, action === 'save' ? edited : undefined),
+      api.classes.mutate(atRevision(headers, 1), body.setup.id, other, other === 'save' ? edited : undefined),
+    ]);
+    expect(tags).toHaveLength(2);
+    expect(tags[0]).toBe(tags[1]);
+    expect(outcomes.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 412 } });
+    const winner = outcomes[0]!.status === 'fulfilled' ? action : other;
+    const current = await api.classes.get(headers, body.setup.id, false, 2);
+    expect(current.setup.locked).toBe(winner === 'lock');
+    expect(current.setup.routine).toEqual(winner === 'save' ? pin(draft.routine) : pin(publication.routine));
+    if (winner !== 'publish') await expect(api.classes.get(headers, body.setup.id, true, 2)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it.each([
+    ['playlists', 'create'], ['classes', 'create'], ['playlists', 'publish'], ['classes', 'publish'],
+  ] as const)('%s %s withdraws author access after staging without committing or refunding', async (kind, action) => {
+    const context = await planFixture('editor');
+    const { api, headers, asset, publication } = context;
+    const service = kind === 'playlists' ? api.playlists : api.classes;
+    const input = kind === 'playlists' ? musicPlaylist(asset) : classPlan(pin(publication.routine));
+    const id = planState(input).id;
+    if (action === 'publish') await service.create(headers, input);
+    const oldHead = context.store.blobs.get(service.headKey(id));
+    const quota = (await readJson<{ bytes: number }>(api.store, 'control/quota'))!.value.bytes;
+    const put = api.store.put.bind(api.store);
+    vi.spyOn(api.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const tag = await put(key, bytes, expected);
+      if (key.startsWith(service.snapshotPrefix(id))) context.accounts[1]!.enabled = false;
+      return tag;
+    });
+    await expect(action === 'create' ? service.create(headers, input)
+      : service.mutate(atRevision(headers, 1), id, 'publish')).rejects.toMatchObject({ status: 401 });
+    expect(context.store.blobs.get(service.headKey(id))).toEqual(oldHead);
+    expect((await readJson<{ bytes: number }>(api.store, 'control/quota'))!.value.bytes).toBeGreaterThan(quota);
+    await expect(api.handle(request(`${kind}/${id}?published=true`, 'GET', headers))).resolves.toMatchObject({ status: 401 });
+  });
+
+  it('retains legacy current/publication pointers but returns 404 for unavailable legacy revisions', async () => {
+    const { api, headers, draft, publication } = await planFixture();
+    const id = draft.routine.id;
+    await api.routines.mutate(atRevision(headers, 2), id, 'lock');
+    await api.routines.mutate(atRevision(headers, 3), id, 'unlock');
+    const current = await api.routines.head(id);
+    const { history: omitted, ...legacy } = current.value;
+    expect(omitted).toHaveLength(4);
+    await api.store.put(api.routines.headKey(id), encode(legacy), current.etag);
+    expect((await api.routines.get(headers, id, false, 4)).routine.revision).toBe(4);
+    expect(await api.routines.get(headers, id, true, 2)).toEqual(JSON.parse(encode(publication).toString()));
+    for (const revision of [1, 3]) await expect(api.routines.get(headers, id, false, revision)).rejects.toMatchObject({ status: 404, code: 'revision_not_found' });
+    await expect(api.classes.create(headers, classPlan({ id, revision: 1, published: false }))).rejects.toMatchObject({ status: 404 });
+    await api.routines.mutate(atRevision(headers, 4), id, 'publish');
+    expect((await api.routines.head(id)).value.history!.map(link => link.revision)).toEqual([2, 4, 5]);
+    await expect(api.routines.get(headers, id, false, 1)).rejects.toMatchObject({ status: 404 });
+    expect((await api.routines.get(headers, id, true, 2)).routine.revision).toBe(2);
+  });
+
+  it('bounds committed history to 128 versions and retains old publications at the limit', async () => {
+    const { api, headers, asset } = await planFixture();
+    const created = await api.playlists.create(headers, musicPlaylist(asset));
+    const id = created.playlist.id;
+    const publication = await api.playlists.mutate(atRevision(headers, 1), id, 'publish');
+    let current = await api.playlists.get(headers, id, false);
+    while (current.playlist.revision < HISTORY_LIMIT) {
+      current = await api.playlists.mutate(atRevision(headers, current.playlist.revision), id, 'save', current);
+    }
+    const stored = (await api.store.get(api.playlists.headKey(id), HEAD_BYTES))!;
+    expect(JSON.parse(stored.bytes.toString()).history).toHaveLength(HISTORY_LIMIT);
+    expect(stored.bytes.length).toBeLessThanOrEqual(HEAD_BYTES);
+    const quota = await api.store.get('control/quota', 65536);
+    await expect(api.playlists.mutate(atRevision(headers, HISTORY_LIMIT), id, 'save', current)).rejects.toMatchObject({ status: 409, code: 'revision_limit_reached' });
+    expect(await api.store.get('control/quota', 65536)).toEqual(quota);
+    expect(await api.store.get(api.playlists.headKey(id), HEAD_BYTES)).toEqual(stored);
+    expect(await api.playlists.get(headers, id, true, 2)).toEqual(JSON.parse(encode(publication).toString()));
+  });
+
+  it('charges the existing bounded lifetime counter across entity types before allocating snapshots', async () => {
+    const { api, headers, asset, publication } = await planFixture();
+    const previous = (await readJson<Record<string, unknown>>(api.store, 'control/quota'))!;
+    await api.store.put('control/quota', encode({ ...previous.value, routines: LIMITS.routines - 1 }), previous.etag);
+    const outcomes = await Promise.allSettled([
+      api.playlists.create(headers, musicPlaylist(asset)), api.classes.create(headers, classPlan(pin(publication.routine))),
+    ]);
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.find(outcome => outcome.status === 'rejected')).toMatchObject({ reason: { status: 507 } });
+    const after = (await readJson<{ routines: number; bytes: number }>(api.store, 'control/quota'))!.value;
+    expect(after.routines).toBe(LIMITS.routines);
+    expect(after.bytes).toBeGreaterThan(64 * 1024 * 1024);
+    await expect(api.routines.create(headers, routine())).rejects.toMatchObject({ status: 507 });
+  });
+
+  it('rejects nonprogressing, duplicate and oversized discovery pages for each collection', async () => {
+    const { api } = await planFixture();
+    for (const service of [api.routines, api.playlists, api.classes]) {
+      for (const keys of [[], [`${service.indexPrefix}same`, `${service.indexPrefix}same`],
+        Array.from({ length: 129 }, (_, index) => `${service.indexPrefix}entry-${index}`)]) {
+        const spy = vi.spyOn(api.store, 'list').mockResolvedValue({ keys, cursor: 'unchanged' });
+        await expect(service.discover()).rejects.toMatchObject({ status: 503 });
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it('strictly parses exact revision/read queries and refuses ambiguous media authority', async () => {
+    const context = await planFixture();
+    const { api, headers, asset, publication } = context;
+    const playlist = await api.playlists.create(headers, musicPlaylist(asset));
+    await api.playlists.mutate(atRevision(headers, 1), playlist.playlist.id, 'publish');
+    const playerHeaders = (await context.login('player')).headers;
+    expect((await api.handle(request(`media/${asset.id}?playlistId=${playlist.playlist.id}&revision=2`, 'GET', playerHeaders))).status).toBe(200);
+    for (const suffix of ['revision=0', 'revision=-1', 'revision=01', 'revision=false', 'revision=1.0', 'revision=9007199254740992',
+      'revision=2&revision=2', 'published=FALSE', 'published=', 'published=true&published=false', 'unknown=true']) {
+      expect((await api.handle(request(`playlists/${playlist.playlist.id}?${suffix}`, 'GET', headers))).status).toBe(400);
+    }
+    for (const path of ['playlists?revision=2', 'classes?revision=2', `routines/${publication.routine.id}/publish?revision=2`]) {
+      expect((await api.handle(request(path, path.includes('/publish') ? 'POST' : 'GET', atRevision(headers, 2)))).status).toBe(400);
+    }
+    for (const suffix of [`playlistId=${playlist.playlist.id}`, 'classId=unknown', 'revision=2', 'routineId=',
+      `routineId=${publication.routine.id}&playlistId=${playlist.playlist.id}&revision=2`,
+      `playlistId=${playlist.playlist.id}&classId=unknown&revision=2`, 'routineId=../remote', 'published=false']) {
+      expect((await api.handle(request(`media/${asset.id}?${suffix}`, 'GET', playerHeaders))).status).toBe(400);
+    }
+    expect((await api.handle(request(`playlists/${playlist.playlist.id}?published=true&revision=1`, 'GET', playerHeaders))).status).toBe(404);
+    expect((await api.handle(request(`playlists/${playlist.playlist.id}/prepare`, 'GET', headers))).status).toBe(404);
+    expect((await api.handle(request('classes', 'PATCH', headers))).status).toBe(404);
+  });
+
+  it.each(['playlists', 'classes'] as const)('%s HTTP lifecycle returns authoritative detached state and enforces locks', async kind => {
+    const context = await planFixture('editor');
+    const { api, headers, asset, publication } = context;
+    const input: PlanBody = kind === 'playlists' ? musicPlaylist(asset) : classPlan(pin(publication.routine));
+    const id = planState(input).id;
+    const path = `${kind}/${id}`;
+    const created = await api.handle(request(kind, 'POST', headers, input));
+    expect(created).toMatchObject({ status: 201, headers: { etag: '"1"' } });
+    expect(JSON.parse(String(created.body))).toEqual(JSON.parse(encode(input).toString()));
+    expect(created.headers['cache-control']).toContain('no-store');
+    const protectedHead = context.store.blobs.get(`${kind}/${id}/head`);
+    const read = await api.handle(request(path, 'GET', headers));
+    const selected = JSON.parse(String(read.body)) as PlanBody;
+    expect(read.headers.etag).toBe('"1"');
+    expect(context.store.blobs.get(`${kind}/${id}/head`)).toEqual(protectedHead);
+    const listed = JSON.parse(String((await api.handle(request(kind, 'GET', headers))).body));
+    expect(listed[kind]).toEqual([planState(selected)]);
+    expect(Object.keys(listed)).toEqual([kind]);
+    planState(selected).name = 'Saved independent content';
+    expect((await api.handle(request(path, 'PUT', headers, selected))).status).toBe(428);
+    const saved = await api.handle(request(path, 'PUT', atRevision(headers, 1), selected));
+    expect(saved).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+    const body = JSON.parse(String(saved.body)) as PlanBody;
+    for (const field of ['locked', 'published'] as const) {
+      const forged = structuredClone(body);
+      planState(forged)[field] = true;
+      expect((await api.handle(request(path, 'PUT', atRevision(headers, 2), forged))).status).toBe(400);
+    }
+    planState(body).name = 'Saved and locked together';
+    const locked = await api.handle(request(`${path}/lock`, 'POST', atRevision(headers, 2), body));
+    expect(locked).toMatchObject({ status: 200, headers: { etag: '"3"' } });
+    const lockedBody = JSON.parse(String(locked.body)) as PlanBody;
+    expect(planState(lockedBody)).toMatchObject({ locked: true, name: 'Saved and locked together', revision: 3 });
+    for (const command of ['save', 'publish', 'delete']) {
+      expect((await api.handle(request(command === 'publish' ? `${path}/publish` : path,
+        command === 'save' ? 'PUT' : command === 'publish' ? 'POST' : 'DELETE', atRevision(headers, 3),
+        command === 'save' ? lockedBody : undefined))).status).toBe(423);
+    }
+    const unlocked = await api.handle(request(`${path}/unlock`, 'POST', atRevision(headers, 3)));
+    expect(unlocked).toMatchObject({ status: 200, headers: { etag: '"4"' } });
+    expect((await api.handle(request(path, 'PUT', atRevision(headers, 2), body))).status).toBe(412);
+    const published = await api.handle(request(`${path}/publish`, 'POST', atRevision(headers, 4)));
+    expect(published).toMatchObject({ status: 200, headers: { etag: '"5"' } });
+    expect(planState(JSON.parse(String(published.body)))).toMatchObject({ revision: 5, published: true, locked: false });
+    const current = JSON.parse(String((await api.handle(request(path, 'GET', headers))).body)) as PlanBody;
+    expect(planState(current)).toMatchObject({ revision: 5, published: false });
+    const historical = await api.handle(request(`${path}?published=false&revision=1`, 'GET', headers));
+    expect(historical.body).toBe(created.body);
+    const duplicate = await api.handle(request(`${path}/duplicate?published=true&revision=5`, 'POST', headers));
+    expect(duplicate.status).toBe(201);
+    const copy = JSON.parse(String(duplicate.body)) as PlanBody;
+    expect(planState(copy)).toMatchObject({ revision: 1, published: false, locked: false });
+    expect(planState(copy).id).not.toBe(id);
+    if ('playlist' in copy && 'playlist' in input) {
+      expect(copy.playlist.tracks[0]!.id).not.toBe(input.playlist.tracks[0]!.id);
+      expect(Object.values(copy.media)).toEqual([asset]);
+    }
+    if ('setup' in copy) expect(copy.setup.routine).toEqual(pin(publication.routine));
+    expect((await api.handle(request(path, 'DELETE', atRevision(headers, 5)))).status).toBe(200);
+    expect((await api.handle(request(`${path}?published=true&revision=5`, 'GET', headers))).status).toBe(404);
+    expect((await api.handle(request(kind, 'POST', headers, input))).status).toBe(409);
+  });
+
+  it.each(['owner', 'editor', 'player'])('uses current account roles, CSRF and origin for both new collections: %s', async role => {
+    const context = await planFixture();
+    const { api, asset, publication } = context;
+    const headers = role === 'owner' ? context.headers : (await context.login(role)).headers;
+    for (const kind of ['playlists', 'classes'] as const) {
+      const input = kind === 'playlists' ? musicPlaylist(asset) : classPlan(pin(publication.routine));
+      const created = await api.handle(request(kind, 'POST', context.headers, input));
+      expect(created.status).toBe(201);
+      const path = `${kind}/${planState(input).id}`;
+      expect((await api.handle(request(`${path}/publish`, 'POST', atRevision(context.headers, 1)))).status).toBe(200);
+      if (role === 'player') {
+        expect((await api.handle(request(kind, 'POST', headers, input))).status).toBe(403);
+        expect((await api.handle(request(path, 'PUT', atRevision(headers, 2), input))).status).toBe(403);
+        expect((await api.handle(request(path, 'DELETE', atRevision(headers, 2)))).status).toBe(403);
+      }
+      expect((await api.handle(request(`${kind}?published=true`, 'GET', headers))).status).toBe(200);
+      expect((await api.handle(request(`${path}?published=true&revision=2`, 'GET', headers))).status).toBe(200);
+      expect((await api.handle(request(kind, 'GET', headers))).status).toBe(role === 'player' ? 403 : 200);
+      expect((await api.handle(request(`${path}?published=false&revision=1`, 'GET', headers))).status).toBe(role === 'player' ? 403 : 200);
+      expect((await api.handle(request(`${path}/duplicate?published=true`, 'POST', headers))).status).toBe(role === 'player' ? 403 : 201);
+      for (const command of ['lock', 'unlock', 'publish']) {
+        const result = await api.handle(request(`${path}/${command}`, 'POST', atRevision(headers, 2)));
+        expect(result.status).toBe(role === 'player' ? 403 : command === 'lock' ? 200 : command === 'publish' ? 423 : 412);
+      }
+      const badHeaders = new Headers(headers);
+      badHeaders.delete('x-csrf-token');
+      expect((await api.handle(request(kind, 'POST', badHeaders, input))).status).toBe(403);
+      badHeaders.set('origin', 'https://other.invalid');
+      expect((await api.handle(request(`${path}/duplicate`, 'POST', badHeaders))).status).toBe(403);
+      expect((await api.handle(request(path, 'GET', new Headers({ 'x-ms-client-principal': 'owner' })))).status).toBe(401);
+    }
+  });
+
+  it('keeps repeated playlist occurrences independent and refuses choreography and descriptor forgery', async () => {
+    const { api, headers, asset } = await planFixture();
+    const input = musicPlaylist(asset);
+    input.playlist.tracks.push({ ...input.playlist.tracks[0]!, id: 'repeat-entry', gain: 0.4 });
+    input.media['repeat-entry'] = asset;
+    expect((await api.playlists.create(headers, input)).playlist.tracks).toHaveLength(2);
+    for (const change of ['duplicate-id', 'cue', 'after', 'missing-media', 'extra-media', 'forged-media']) {
+      const invalid = structuredClone(input);
+      if (change === 'duplicate-id') invalid.playlist.tracks[1]!.id = invalid.playlist.tracks[0]!.id;
+      if (change === 'cue') invalid.playlist.tracks[0]!.cues.push({ id: 'cue', note: 'Rejected', anchor: { kind: 'timestamp', seconds: 1 } });
+      if (change === 'after') invalid.playlist.tracks[0]!.after = { mode: 'none' };
+      if (change === 'missing-media') delete invalid.media['repeat-entry'];
+      if (change === 'extra-media') invalid.media['extra-entry'] = asset;
+      if (change === 'forged-media') invalid.media['repeat-entry'] = { ...asset, bytes: asset.bytes + 1 };
+      await expect(api.playlists.parse(invalid)).rejects.toMatchObject({ status: 400 });
+    }
+  });
+
+  it('requires exact existing references, hold announcements and explicit publication commands', async () => {
+    const { api, headers, publication, draft, asset } = await planFixture();
+    const valid = classPlan(pin(publication.routine));
+    for (const invalid of [
+      { ...valid, role: 'owner' }, { setup: { ...valid.setup, owner: 'owner' } },
+      { setup: { ...valid.setup, locked: true } }, { setup: { ...valid.setup, published: true } },
+      { setup: { ...valid.setup, crossfade: '2' } }, { setup: { ...valid.setup, crossfade: 13 } },
+      { setup: { ...valid.setup, before: { mode: 'timed', seconds: 10, bpm: 100, sound: 'soft' } } },
+      { setup: { ...valid.setup, after: { mode: 'hold', seconds: 0, bpm: 100, sound: 'invalid' } } },
+      ...[null, { id: 'missing' }, { ...valid.setup.routine, revision: '2' }, { ...valid.setup.routine, published: 'true' },
+        { ...valid.setup.routine, id: '../remote' }, { ...valid.setup.routine, extra: true }].map(routine => ({ setup: { ...valid.setup, routine } })),
+    ]) expect((await api.handle(request('classes', 'POST', headers, invalid))).status).toBe(400);
+    const missing = classPlan({ id: 'missing', revision: 1, published: true });
+    expect((await api.handle(request('classes', 'POST', headers, missing))).status).toBe(404);
+    const wrongRevision = classPlan({ ...pin(publication.routine), revision: 1 });
+    expect((await api.handle(request('classes', 'POST', headers, wrongRevision))).status).toBe(404);
+    const draftSetup = await api.classes.create(headers, classPlan(pin(draft.routine)));
+    await expect(api.classes.mutate(atRevision(headers, 1), draftSetup.setup.id, 'publish')).rejects.toMatchObject({ status: 400, code: 'published_references_required' });
+    const playlist = await api.playlists.create(headers, musicPlaylist(asset));
+    const mixed = classPlan(pin(publication.routine));
+    mixed.setup.walkOut = pin(playlist.playlist);
+    const saved = await api.classes.create(headers, mixed);
+    await expect(api.classes.mutate(atRevision(headers, 1), saved.setup.id, 'publish')).rejects.toMatchObject({ status: 400 });
+    const playerHeaders = (await fixture().login('player')).headers;
+    await expect(api.classes.get(playerHeaders, saved.setup.id, false)).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe('shared filler library (Blob fake)', () => {
+  describe('retained filler lookup', () => {
+    it.each(['owner', 'editor'])('returns byte-exact active and archived metadata to %s without changing protected storage', async role => {
+      const context = fixture();
+      const api = new CloudApi(context.store, context.env, context.auth.now);
+      const { headers } = await context.login(role);
+      const asset = await uploadAudio(api.media, headers);
+      const recording = await api.routines.fillers.create(headers, { name: 'Retained <literal> loop', duration: 30, asset });
+      const readHeaders = new Headers({ cookie: headers.get('cookie')! });
+      const path = `fillers/${recording.id}`;
+      const expectedBody = encode(recording).toString();
+      expect(await api.handle(request(path, 'GET', readHeaders))).toMatchObject({ status: 200, body: expectedBody });
+      await api.routines.fillers.archive(headers, recording.id);
+      const key = `fillers/records/${recording.id}`;
+      const protectedRecord = (await context.store.get(key, 4096))!;
+      const signature = hashBytes(protectedRecord.bytes);
+      expect(JSON.parse(protectedRecord.bytes.toString())).toStrictEqual({ recording, archived: true });
+      const put = vi.spyOn(context.store, 'put');
+      const remove = vi.spyOn(context.store, 'delete');
+
+      const response = await api.handle(request(path, 'GET', readHeaders));
+      expect(response).toMatchObject({ status: 200, body: expectedBody });
+      expect(response.headers['cache-control']).toContain('private');
+      expect(response.headers['cache-control']).toContain('no-store');
+      expect(await api.handle(request('fillers', 'GET', readHeaders))).toMatchObject({ status: 200, body: '{"fillers":[]}' });
+      await expect(api.routines.fillers.resolve({ ...recording, name: 'Mismatched name' })).rejects.toMatchObject({ status: 400, code: 'invalid_filler' });
+      expect(await api.routines.fillers.resolve(recording)).toStrictEqual(recording);
+      const after = (await context.store.get(key, 4096))!;
+      expect(after).toStrictEqual(protectedRecord);
+      expect(hashBytes(after.bytes)).toBe(signature);
+      expect(put.mock.calls.every(([storedKey]) => storedKey.startsWith('traffic/'))).toBe(true);
+      expect(remove).not.toHaveBeenCalled();
+    });
+
+    it.each(['owner', 'editor'])('returns filler_not_found for a fresh unknown UUID to %s without allocating a recording', async role => {
+      const context = fixture();
+      const api = new CloudApi(context.store, context.env, context.auth.now);
+      const { headers } = await context.login(role);
+      const put = vi.spyOn(context.store, 'put');
+      expect(await api.handle(request(`fillers/${randomUUID()}`, 'GET', headers))).toMatchObject({
+        status: 404, body: '{"error":"filler_not_found"}',
+      });
+      expect(put.mock.calls.every(([key]) => key.startsWith('traffic/'))).toBe(true);
+      expect([...context.store.blobs.keys()].filter(key => key.startsWith('fillers/'))).toEqual([]);
+    });
+
+    it('denies players before revealing active, archived, unknown or invalid recording IDs', async () => {
+      const context = fixture();
+      const api = new CloudApi(context.store, context.env, context.auth.now);
+      const { headers } = await context.login();
+      const asset = await uploadAudio(api.media, headers);
+      const recording = await api.routines.fillers.create(headers, { name: 'Private loop', duration: 20, asset });
+      const playerHeaders = (await context.login('player')).headers;
+      expect(await api.handle(request(`fillers/${recording.id}`, 'GET', playerHeaders))).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
+      await api.routines.fillers.archive(headers, recording.id);
+      for (const id of [recording.id, randomUUID(), 'invalid!']) {
+        expect(await api.handle(request(`fillers/${id}`, 'GET', playerHeaders))).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
+      }
+    });
+
+    it.each(['invalid!', 'a'.repeat(81)])('rejects an invalid recording ID with 400: %s', async id => {
+      const context = fixture();
+      const api = new CloudApi(context.store, context.env, context.auth.now);
+      const { headers } = await context.login();
+      expect(await api.handle(request(`fillers/${id}`, 'GET', headers))).toMatchObject({ status: 400, body: '{"error":"invalid_id"}' });
+    });
+
+    it('does not authorize lookup from a client principal header', async () => {
+      const context = fixture();
+      const api = new CloudApi(context.store, context.env, context.auth.now);
+      const headers = new Headers({ origin: 'https://example.invalid', 'x-ms-client-principal': 'owner' });
+      expect((await api.handle(request(`fillers/${randomUUID()}`, 'GET', headers))).status).toBe(401);
+    });
+  });
+
+  it('uses the production Blob adapter for conditional insert and archive on the same record', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const asset = await uploadAudio(new CloudMedia(context.store, context.auth), headers);
+    const writes: Array<{ key: string; conditions: { ifMatch?: string; ifNoneMatch?: string } }> = [];
+    const container = {
+      getBlobClient: (key: string) => ({ download: async () => {
+        const stored = context.store.blobs.get(key);
+        if (!stored) throw { statusCode: 404, code: 'BlobNotFound' };
+        return { etag: stored.etag, contentLength: stored.bytes.length, readableStreamBody: Readable.from([stored.bytes]) };
+      } }),
+      getBlockBlobClient: (key: string) => ({ upload: async (bytes: Buffer, length: number, options: {
+        conditions: { ifMatch?: string; ifNoneMatch?: string };
+      }) => {
+        expect(length).toBe(bytes.length);
+        writes.push({ key, conditions: options.conditions });
+        try { return { etag: await context.store.put(key, bytes, options.conditions.ifMatch ?? null) }; }
+        catch (error) { if (error instanceof BlobConflict) throw { statusCode: 412 }; throw error; }
+      } }),
+    } as unknown as ContainerClient;
+    const store = new AzureBlobStore(container);
+    const auth = new CloudAuth(store, context.env, context.auth.now);
+    const fillers = new CloudFillers(store, auth, new CloudMedia(store, auth));
+    const recording = await fillers.create(headers, { name: 'Adapter fixture', duration: 15, asset });
+    const key = `fillers/records/${recording.id}`;
+    const etag = context.store.blobs.get(key)!.etag;
+    expect(writes.map(write => write.key)).toEqual(['control/quota', `fillers/index/${recording.id}`, key]);
+    expect(writes[1]!.conditions).toEqual({ ifNoneMatch: '*' });
+    expect(writes[2]!.conditions).toEqual({ ifNoneMatch: '*' });
+    await expect(store.put(key, encode({ recording, archived: false }), null)).rejects.toBeInstanceOf(BlobConflict);
+    await fillers.archive(headers, recording.id);
+    expect(writes.at(-1)).toEqual({ key, conditions: { ifMatch: etag } });
+    expect(await fillers.resolve(recording)).toStrictEqual(recording);
+    const count = writes.length;
+    await fillers.archive(headers, recording.id);
+    expect(writes).toHaveLength(count);
+  });
+
+  it('enforces owner/editor routes, strict write Origin and CSRF without trusting principal headers', async () => {
+    const context = fixture();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const ownerHeaders = (await context.login()).headers;
+    const asset = await uploadAudio(api.media, ownerHeaders);
+    const input = { name: 'Household loop', duration: 20, asset };
+    const retained = await api.routines.fillers.create(ownerHeaders, input);
+    for (const role of ['owner', 'editor', 'player']) {
+      const headers = role === 'owner' ? ownerHeaders : (await context.login(role)).headers;
+      const result = await api.handle(request('fillers', 'POST', headers, input));
+      expect(result.status).toBe(role === 'player' ? 403 : 201);
+      expect((await api.handle(request('fillers', 'GET', headers))).status).toBe(role === 'player' ? 403 : 200);
+      if (role === 'player') {
+        expect((await api.handle(request(`fillers/${retained.id}`, 'DELETE', headers))).status).toBe(403);
+        continue;
+      }
+      const recording = JSON.parse(String(result.body)) as FillerRecording;
+      for (const [method, path, body] of [['POST', 'fillers', input], ['DELETE', `fillers/${recording.id}`, undefined]] as const) {
+        for (const invalid of ['no-csrf', 'bad-csrf', 'no-origin', 'bad-origin', 'cross-site']) {
+          const denied = new Headers(headers);
+          if (invalid === 'no-csrf') denied.delete('x-csrf-token');
+          if (invalid === 'bad-csrf') denied.set('x-csrf-token', 'forged');
+          if (invalid === 'no-origin') denied.delete('origin');
+          if (invalid === 'bad-origin') denied.set('origin', 'https://other.invalid');
+          if (invalid === 'cross-site') denied.set('sec-fetch-site', 'cross-site');
+          expect((await api.handle(request(path, method, denied, body))).status).toBe(403);
+        }
+      }
+      expect((await api.handle(request(`media/${asset.id}`, 'GET', headers))).status).toBe(200);
+      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers, {}))).status).toBe(400);
+      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).body).toBe('{"archived":true}');
+      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).body).toBe('{"archived":true}');
+      expect(result.headers['cache-control']).toContain('no-store');
+    }
+    const spoofed = new Headers({ origin: 'https://example.invalid', 'x-ms-client-principal': 'owner' });
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      expect((await api.handle(request(method === 'DELETE' ? 'fillers/forged' : 'fillers', method, spoofed, method === 'POST' ? input : undefined))).status).toBe(401);
+    }
+  });
+
+  it('rejects malformed creation and unverified or mismatched assets before reserving storage', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const asset = await uploadAudio(api.media, headers);
+    const input = { name: 'Literal <name>', duration: 360, asset };
+    const before = context.store.blobs.get('control/quota');
+    const invalid = [null, [], {}, { ...input, id: 'client-id' }, { ...input, archived: false },
+      ...[0, -1, 360.001, NaN, Infinity, -Infinity, '30', null, undefined].map(duration => ({ ...input, duration })),
+      ...['', ' ', 'a'.repeat(161), null, 1].map(name => ({ ...input, name })),
+      ...[{ bytes: asset.bytes + 1 }, { sha256: 'b'.repeat(64) }, { contentType: 'audio/mpeg' },
+        { contentType: 'audio/x-wav' }, { bytes: 43 }, { bytes: LIMITS.assetBytes + 1 }, { bytes: 44.5 },
+        { sha256: 'A'.repeat(64) }, { id: '../asset' }, { arbitrary: true }].map(change => ({ ...input, asset: { ...asset, ...change } }))];
+    for (const body of invalid) await expect(api.routines.fillers.create(headers, body)).rejects.toMatchObject({ status: 400 });
+    const upload = await stageAudio(api.media, headers);
+    await expect(api.routines.fillers.create(headers, { ...input, asset: { ...asset, id: upload.assetId } })).rejects.toMatchObject({ status: 404 });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('fillers/'))).toEqual([]);
+    expect(JSON.parse(before!.bytes.toString()).fillers).toBe(0);
+    expect((await readJson<{ fillers: number }>(context.store, 'control/quota'))!.value.fillers).toBe(0);
+    expect((await api.handle(request('fillers', 'POST', headers, { ...input, unexpected: true }))).status).toBe(400);
+    expect((await api.routines.fillers.create(headers, input)).duration).toBe(360);
+  });
+
+  it('resolves every recording field against the retained entry at create, save and atomic lock', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const asset = await uploadAudio(api.media, headers);
+    const unrelated = await uploadAudio(api.media, headers, wav(8192));
+    const recording = await api.routines.fillers.create(headers, { name: 'Authoritative name', duration: 30, asset });
+    const body = routine(asset);
+    body.routine.filler = { ...body.routine.filler, sound: 'recording', recording };
+    const draft = await api.routines.create(headers, body);
+    headers.set('if-match', '"1"');
+    await api.routines.fillers.archive(headers, recording.id);
+    const head = context.store.blobs.get(`routines/${draft.routine.id}/head`);
+    const forgeries = [{ ...recording, name: 'Fake claimed name' }, { ...recording, duration: 31 },
+      { ...recording, asset: unrelated }, { ...recording, id: 'local-unregistered-id' },
+      ...[{ id: unrelated.id }, { bytes: asset.bytes + 1 }, { sha256: 'b'.repeat(64) }, { contentType: 'audio/mpeg' }]
+        .map(change => ({ ...recording, asset: { ...asset, ...change } }))];
+    for (const forged of forgeries) {
+      const changed = structuredClone(draft);
+      changed.routine.filler.recording = forged;
+      for (const action of ['create', 'save', 'lock'] as const) {
+        const input = structuredClone(changed);
+        if (action === 'create') input.routine.id = randomUUID();
+        const response = await api.handle(request(action === 'create' ? 'routines' : `routines/${draft.routine.id}${action === 'lock' ? '/lock' : ''}`,
+          action === 'save' ? 'PUT' : 'POST', headers, input));
+        expect(response.status).toBe(forged.id === 'local-unregistered-id' ? 404 : 400);
+      }
+    }
+    expect(context.store.blobs.get(`routines/${draft.routine.id}/head`)).toEqual(head);
+    const saved = await api.routines.mutate(headers, draft.routine.id, 'save', draft);
+    expect(saved.routine.filler.recording).toStrictEqual(recording);
+  });
+
+  it('reserves lifetime count and bytes before either filler write and bounds competing additions', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const first = new CloudFillers(context.store, context.auth, media);
+    const second = new CloudFillers(context.store, context.auth, media);
+    const asset = await uploadAudio(media, headers);
+    const input = { name: 'Quota loop', duration: 1, asset };
+    const initial = (await readJson<Record<string, unknown>>(context.store, 'control/quota'))!.value;
+    for (const exhausted of [{ fillers: LIMITS.fillers }, { bytes: LIMITS.quotaBytes - 8191 }, { operations: 20000 }]) {
+      await context.store.put('control/quota', encode({ ...initial, ...exhausted }), context.store.blobs.get('control/quota')!.etag);
+      await expect(first.create(headers, input)).rejects.toMatchObject({ status: 507 });
+      expect([...context.store.blobs.keys()].filter(key => key.startsWith('fillers/'))).toEqual([]);
+    }
+    await context.store.put('control/quota', encode({ ...initial, fillers: LIMITS.fillers - 1 }), context.store.blobs.get('control/quota')!.etag);
+    const put = context.store.put.bind(context.store);
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key.startsWith('fillers/')) {
+        expect(expected).toBeNull();
+        expect((await readJson<{ fillers: number; bytes: number }>(context.store, 'control/quota'))!.value)
+          .toMatchObject({ fillers: LIMITS.fillers, bytes: Number(initial.bytes) + 8192 });
+      }
+      return put(key, bytes, expected);
+    });
+    const results = await Promise.allSettled([first.create(headers, input), second.create(headers, input)]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 507 } });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('fillers/'))).toHaveLength(2);
+  });
+
+  it.each(['quota', 'index', 'archive'] as const)('rechecks current account after %s staging', async stage => {
+    const context = fixture();
+    const { headers } = await context.login('editor');
+    const media = new CloudMedia(context.store, context.auth);
+    const fillers = new CloudFillers(context.store, context.auth, media);
+    const asset = await uploadAudio(media, headers);
+    const input = { name: 'Revoked loop', duration: 1, asset };
+    const recording = stage === 'archive' ? await fillers.create(headers, input) : undefined;
+    const put = context.store.put.bind(context.store);
+    const get = context.store.get.bind(context.store);
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if ((stage === 'quota' && key === 'control/quota') || (stage === 'index' && key.startsWith('fillers/index/'))) context.accounts[1]!.enabled = false;
+      return etag;
+    });
+    vi.spyOn(context.store, 'get').mockImplementation(async (key, maximum) => {
+      const result = await get(key, maximum);
+      if (stage === 'archive' && key.startsWith('fillers/records/')) context.accounts[1]!.enabled = false;
+      return result;
+    });
+    await expect(recording ? fillers.archive(headers, recording.id) : fillers.create(headers, input)).rejects.toMatchObject({ status: 401 });
+    const records = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('fillers/records/'));
+    expect(records).toHaveLength(recording ? 1 : 0);
+    if (recording) expect(JSON.parse(records[0]![1].bytes.toString())).toEqual({ recording, archived: false });
+    const valid = (await context.login()).headers;
+    expect((await fillers.list(valid)).fillers).toEqual(recording ? [recording] : []);
+  });
+
+  it('sorts bounded discovery pages deterministically and rejects oversized or looping indexes', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const fillers = new CloudFillers(context.store, context.auth, media);
+    const asset = await uploadAudio(media, headers);
+    const expected: FillerRecording[] = [];
+    for (let index = 0; index < LIMITS.fillers; index++) {
+      const recording = { id: `fixture-${String(index).padStart(3, '0')}`, name: index % 2 ? 'Alpha' : 'Zulu', duration: 10, asset };
+      await context.store.put(`fillers/index/${recording.id}`, encode({ id: recording.id }), null);
+      if (index === 1) continue;
+      await context.store.put(`fillers/records/${recording.id}`, encode({ recording, archived: index === 0 }), null);
+      if (index !== 0) expected.push(recording);
+    }
+    expected.sort((first, second) => first.name < second.name ? -1 : first.name > second.name ? 1 : first.id < second.id ? -1 : 1);
+    const list = vi.spyOn(context.store, 'list');
+    expect(await fillers.list(headers)).toEqual({ fillers: expected });
+    expect(list).toHaveBeenCalledTimes(4);
+    expect(list.mock.calls.every(([, limit]) => limit === 128)).toBe(true);
+    await context.store.put('fillers/index/overflow', encode({ id: 'overflow' }), null);
+    await expect(fillers.list(headers)).rejects.toMatchObject({ status: 503 });
+    list.mockResolvedValue({ keys: [], cursor: 'empty-loop' });
+    await expect(fillers.list(headers)).rejects.toMatchObject({ status: 503 });
+    list.mockResolvedValue({ keys: ['fillers/index/fixture-001'], cursor: 'repeated' });
+    await expect(fillers.list(headers)).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('allows same-asset additions and both duplicates concurrently with idempotent archive', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const asset = await uploadAudio(api.media, headers);
+    const input = { name: 'Same name and bytes', duration: 15, asset };
+    const recording = await api.routines.fillers.create(headers, input);
+    const body = routine(asset);
+    body.routine.filler = { ...body.routine.filler, sound: 'recording', recording };
+    const saved = await api.routines.create(headers, body);
+    headers.set('if-match', '"1"');
+    await api.routines.mutate(headers, saved.routine.id, 'publish');
+    const [first, second, added, archived, repeated] = await Promise.all([
+      api.routines.duplicate(headers, saved.routine.id, true), api.routines.duplicate(headers, saved.routine.id, false),
+      api.routines.fillers.create(headers, input), api.routines.fillers.archive(headers, recording.id),
+      new CloudFillers(context.store, context.auth, api.media).archive(headers, recording.id),
+    ]);
+    expect(first.routine.filler.recording).toStrictEqual(recording);
+    expect(second.routine.filler.recording).toStrictEqual(recording);
+    expect(first.routine.id).not.toBe(second.routine.id);
+    expect(added.id).not.toBe(recording.id);
+    expect(archived).toEqual(repeated);
+    expect(await api.routines.fillers.list(headers)).toEqual({ fillers: [added] });
+    expect(await api.routines.fillers.resolve(recording)).toStrictEqual(recording);
+  });
+
+  it.each(['none', 'timed', 'hold'] as const)('retains archived recording snapshots and published-only media access in %s mode', async mode => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const playerHeaders = (await context.login('player')).headers;
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const trackAsset = await uploadAudio(api.media, headers);
+    const fillerAsset = await uploadAudio(api.media, headers, wav(4096));
+    const unrelatedAsset = await uploadAudio(api.media, headers, wav(8192));
+    const created = await api.handle(request('fillers', 'POST', headers, { name: 'Saved loop', duration: 30, asset: fillerAsset }));
+    expect(created.status).toBe(201);
+    const recording = JSON.parse(String(created.body)) as FillerRecording;
+    const input = routine(trackAsset);
+    input.routine.filler = { mode, sound: 'recording', seconds: 15, bpm: 100, gain: 0.5, recording };
+    const saved = await api.routines.create(headers, input);
+    headers.set('if-match', '"1"');
+    const publication = await api.routines.mutate(headers, saved.routine.id, 'publish');
+    const rawPublished = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'));
+    expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).status).toBe(200);
+    expect(JSON.parse(String((await api.handle(request('fillers', 'GET', headers))).body))).toEqual({ fillers: [] });
+    const draft = await api.routines.get(headers, saved.routine.id, false);
+    expect(draft.routine.filler).toStrictEqual(input.routine.filler);
+    headers.set('if-match', '"2"');
+    const resaved = await api.routines.mutate(headers, saved.routine.id, 'save', draft);
+    headers.set('if-match', '"3"');
+    const locked = await api.routines.mutate(headers, saved.routine.id, 'lock', resaved);
+    const duplicate = await api.routines.duplicate(headers, saved.routine.id, false);
+    expect(Object.keys(duplicate).sort()).toEqual(['media', 'routine']);
+    expect(duplicate.routine).toMatchObject({ locked: false, published: false, revision: 1 });
+    for (const body of [resaved, locked, duplicate]) expect(body.routine.filler).toStrictEqual(input.routine.filler);
+    expect(await api.routines.get(playerHeaders, saved.routine.id, true)).toStrictEqual(JSON.parse(JSON.stringify(publication)));
+    for (const suffix of ['', '/chunks/0']) {
+      expect((await api.handle(request(`media/${fillerAsset.id}${suffix}?routineId=${saved.routine.id}`, 'GET', playerHeaders))).status).toBe(200);
+      expect((await api.handle(request(`media/${unrelatedAsset.id}${suffix}?routineId=${saved.routine.id}`, 'GET', playerHeaders))).status).toBe(403);
+      expect((await api.handle(request(`media/${fillerAsset.id}${suffix}?routineId=${duplicate.routine.id}`, 'GET', playerHeaders))).status).toBe(404);
+      expect((await api.handle(request(`media/${fillerAsset.id}${suffix}`, 'GET', playerHeaders))).status).toBe(403);
+    }
+    expect([...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'))).toEqual(rawPublished);
+    headers.set('if-match', '"4"');
+    await api.routines.mutate(headers, saved.routine.id, 'unlock');
+    headers.set('if-match', '"5"');
+    const republished = await api.routines.mutate(headers, saved.routine.id, 'publish');
+    expect(republished.routine.filler).toStrictEqual(input.routine.filler);
+    for (const [key, blob] of rawPublished) expect(context.store.blobs.get(key)).toEqual(blob);
+  });
+
+  it('creates a catalog-backed recording and archives it without changing retained metadata or audio', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const fillers = new CloudFillers(context.store, context.auth, media);
+    const asset = await uploadAudio(media, headers);
+    const before = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('assets/'));
+    const recording = await fillers.create(headers, { name: '<literal recording>', duration: 15, asset });
+    expect(recording).toEqual({ id: expect.any(String), name: '<literal recording>', duration: 15, asset });
+    expect(recording.id).not.toBe(asset.id);
+    expect(await fillers.list(headers)).toEqual({ fillers: [recording] });
+    expect(await fillers.archive(headers, recording.id)).toEqual({ archived: true });
+    const retained = context.store.blobs.get(`fillers/records/${recording.id}`)!;
+    expect(await fillers.archive(headers, recording.id)).toEqual({ archived: true });
+    expect(context.store.blobs.get(`fillers/records/${recording.id}`)).toEqual(retained);
+    expect(await fillers.list(headers)).toEqual({ fillers: [] });
+    expect(await fillers.resolve(recording)).toStrictEqual(recording);
+    expect([...context.store.blobs.entries()].filter(([key]) => key.startsWith('assets/'))).toEqual(before);
+    expect((await readJson<{ fillers: number }>(context.store, 'control/quota'))!.value.fillers).toBe(1);
+  });
+});
+
+describe('cloud configuration and Blob-backed auth (in-process Blob fake, not Azure)', () => {
+  it('fails closed for duplicate, ownerless, unsafe or unbounded configuration', () => {
+    const context = fixture();
+    expect(loadConfig(context.env()).accounts).toHaveLength(3);
+    for (const accounts of [[context.accounts[0], context.accounts[0]], [context.accounts[2]], Array(33).fill(context.accounts[0])]) {
+      expect(() => loadConfig({ ...context.env(), FIM_ACCOUNTS_JSON: JSON.stringify(accounts) })).toThrow('unconfigured');
+    }
+    expect(() => loadConfig({ ...context.env(), FIM_ORIGIN: 'https://example.invalid/' })).toThrow('unconfigured');
+    expect(() => parsePasswordHash(passwordHash.replace('32768', '1048576'))).toThrow('unconfigured');
+  });
+
+  it('creates opaque secure cookies and authenticates through an independent service', async () => {
+    const context = fixture();
+    const { result, headers } = await context.login();
+    expect(result.setCookie).toContain('Path=/; HttpOnly; Secure; SameSite=Strict');
+    expect(result.session.expiresAt).toBe(1900000000000 + 12 * 3600000);
+    const independent = new CloudAuth(context.store, context.env, () => 1900000000000);
+    expect((await independent.authenticate(headers, true)).account.id).toBe('owner');
+    const missingCsrf = new Headers(headers);
+    missingCsrf.delete('x-csrf-token');
+    await expect(independent.authenticate(missingCsrf, true)).rejects.toMatchObject({ status: 403, code: 'csrf_invalid' });
+    await expect(independent.authenticate(new Headers({ 'x-ms-client-principal': 'spoofed' }))).rejects.toMatchObject({ status: 401 });
+  });
+
+  it.each(['enabled', 'authVersion', 'role', 'passwordHash', 'username'] as const)('invalidates sessions on %s changes', async field => {
+    const context = fixture();
+    const { headers } = await context.login('editor');
+    Object.assign(context.accounts[1]!, { [field]: { enabled: false, authVersion: 2, role: 'player',
+      passwordHash: passwordHash.replace(/.$/, passwordHash.endsWith('0') ? '1' : '0'), username: 'renamed' }[field] });
+    await expect(context.auth.authenticate(headers)).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('enforces absolute expiry and explicit persistent logout', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    await context.auth.logout(headers);
+    await expect(context.auth.authenticate(headers)).rejects.toMatchObject({ status: 401 });
+    const second = await context.login('editor');
+    context.advance(12 * 3600000);
+    await expect(context.auth.authenticate(second.headers)).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('requires the configured Origin on login and fails credentials uniformly', async () => {
+    const context = fixture();
+    await expect(context.auth.login(new Headers(), { username: 'owner', password: 'bad' })).rejects.toMatchObject({ status: 403 });
+    for (const username of ['unknown', 'editor']) {
+      await expect(context.auth.login(context.loginHeaders, { username, password: 'bad' })).rejects.toMatchObject({ status: 401, code: 'invalid_credentials' });
+    }
+    context.accounts[1]!.enabled = false;
+    await expect(context.auth.login(context.loginHeaders, { username: 'editor', password: 'synthetic-test-password' }))
+      .rejects.toMatchObject({ status: 401, code: 'invalid_credentials' });
+  });
+
+  it('shares a bounded durable login throttle across service instances', async () => {
+    const context = fixture();
+    const independent = new CloudAuth(context.store, context.env, () => 1900000000000);
+    for (let attempt = 0; attempt < 5; attempt++) await independent.throttle('owner');
+    await expect(context.auth.throttle('owner')).rejects.toMatchObject({ status: 429 });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('throttle/')).length).toBeLessThanOrEqual(9);
+  });
+
+  it('requires session-bound CSRF when switching identities and revokes the old cookie', async () => {
+    const context = fixture();
+    const first = await context.login();
+    const badHeaders = new Headers(first.headers);
+    badHeaders.delete('x-csrf-token');
+    await expect(context.auth.login(badHeaders, { username: 'editor', password: 'synthetic-test-password' }))
+      .rejects.toMatchObject({ status: 403, code: 'csrf_invalid' });
+    await context.auth.login(first.headers, { username: 'editor', password: 'synthetic-test-password' });
+    await expect(context.auth.authenticate(first.headers)).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('fails closed if throttle storage fails, before invoking scrypt', async () => {
+    const context = fixture();
+    vi.spyOn(context.store, 'put').mockRejectedValue(new ApiError(503, 'storage_unavailable'));
+    await expect(context.login()).rejects.toMatchObject({ status: 503 });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('sessions/'))).toHaveLength(0);
+  });
+});
+
+describe('durable routine CAS semantics (Blob fake)', () => {
+  it.each([
+    ['lock', 'publish'], ['lock', 'delete'], ['save', 'publish'], ['save', 'delete'], ['publish', 'delete'],
+  ] as const)('races %s against %s at the durable head without exposing the losing snapshot', async (firstAction, secondAction) => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const first = new CloudRoutines(context.store, context.auth, media);
+    const second = new CloudRoutines(context.store, context.auth, media);
+    const created = await first.create(headers, routine(await uploadAudio(media, headers)));
+    headers.set('if-match', '"1"');
+    const originalPublication = await first.mutate(headers, created.routine.id, 'publish');
+    const originalBlobs = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'));
+    const body = await first.get(headers, created.routine.id, false);
+    const edited = structuredClone(body);
+    edited.routine.name = 'Concurrent content';
+    edited.routine.tracks[0]!.gain = 0.375;
+    edited.routine.filler.gain = 1.5;
+    headers.set('if-match', '"2"');
+    const headKey = `routines/${body.routine.id}/head`;
+    const put = context.store.put.bind(context.store);
+    const expectedTags: (string | null)[] = [];
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key === headKey) {
+        expectedTags.push(expected);
+        if (expectedTags.length === 2) release();
+        await barrier;
+      }
+      return put(key, bytes, expected);
+    });
+    const actions = [firstAction, secondAction];
+    const outcomes = await Promise.allSettled([
+      first.mutate(headers, body.routine.id, firstAction, firstAction === 'save' ? edited : undefined),
+      second.mutate(headers, body.routine.id, secondAction),
+    ]);
+    expect(expectedTags).toHaveLength(2);
+    expect(expectedTags[0]).toBe(expectedTags[1]);
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.find(outcome => outcome.status === 'rejected')).toMatchObject({ reason: { status: 412 } });
+    const winner = actions[outcomes.findIndex(outcome => outcome.status === 'fulfilled')];
+    if (winner === 'delete') {
+      await expect(first.get(headers, body.routine.id, false)).rejects.toMatchObject({ status: 404 });
+      await expect(first.get(headers, body.routine.id, true)).rejects.toMatchObject({ status: 404 });
+    } else {
+      const actual = await first.get(headers, body.routine.id, false);
+      expect(actual.routine.revision).toBe(3);
+      expect(actual.routine.locked).toBe(winner === 'lock');
+      expect(actual.routine.name).toBe(winner === 'save' ? edited.routine.name : body.routine.name);
+      expect(actual.routine.tracks).toStrictEqual(winner === 'save' ? edited.routine.tracks : body.routine.tracks);
+      expect(actual.routine.filler).toStrictEqual(winner === 'save' ? edited.routine.filler : body.routine.filler);
+      const publication = await first.get(headers, body.routine.id, true);
+      expect(publication.routine.revision).toBe(winner === 'publish' ? 3 : originalPublication.routine.revision);
+    }
+    for (const [key, value] of originalBlobs) expect(context.store.blobs.get(key)).toEqual(value);
+  });
+
+  it('competes save and atomic save-and-lock on the same ETag across instances', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const first = new CloudRoutines(context.store, context.auth, media);
+    const second = new CloudRoutines(context.store, context.auth, media);
+    const body = await first.create(headers, routine(await uploadAudio(media, headers)));
+    headers.set('if-match', '"1"');
+    const saved = structuredClone(body);
+    saved.routine.name = 'Saved';
+    saved.routine.tracks[0]!.gain = 0;
+    saved.routine.filler.gain = 1.5;
+    const locked = structuredClone(body);
+    locked.routine.name = 'Locked content';
+    locked.routine.tracks[0]!.gain = 1.5;
+    locked.routine.filler.gain = 0;
+    const outcomes = await Promise.allSettled([
+      first.mutate(headers, body.routine.id, 'save', saved),
+      second.mutate(headers, body.routine.id, 'lock', locked),
+    ]);
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.find(outcome => outcome.status === 'rejected')).toMatchObject({ reason: { status: 412 } });
+    const actual = await first.get(headers, body.routine.id, false);
+    expect(actual.routine.revision).toBe(2);
+    expect(actual.routine.name).toBe(actual.routine.locked ? 'Locked content' : 'Saved');
+    expect(actual.routine.tracks).toStrictEqual(actual.routine.locked ? locked.routine.tracks : saved.routine.tracks);
+    expect(actual.routine.filler).toStrictEqual(actual.routine.locked ? locked.routine.filler : saved.routine.filler);
+  });
+
+  it('protects locks, publication bytes, revision progression and tombstones', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const service = new CloudRoutines(context.store, context.auth, media);
+    const asset = await uploadAudio(media, headers);
+    const created = await service.create(headers, routine(asset));
+    const id = created.routine.id;
+    await expect(service.mutate(headers, id, 'lock')).rejects.toMatchObject({ status: 428 });
+    headers.set('if-match', '"1"');
+    const published = await service.mutate(headers, id, 'publish');
+    const oldPublications = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'));
+    expect(published.routine.published).toBe(true);
+    expect(published.routine.tracks[0]!.cues[0]!.beep).toBe(true);
+    headers.set('if-match', '"2"');
+    await service.mutate(headers, id, 'lock');
+    headers.set('if-match', '"3"');
+    for (const command of ['save', 'delete', 'publish'] as const) {
+      await expect(service.mutate(headers, id, command, command === 'save' ? published : undefined)).rejects.toMatchObject({ status: 423 });
+    }
+    await service.mutate(headers, id, 'unlock');
+    await expect(service.mutate(headers, id, 'save', created)).rejects.toMatchObject({ status: 412 });
+    const duplicate = await service.duplicate(headers, id, true);
+    expect(duplicate.routine.id).not.toBe(id);
+    expect(duplicate.routine.tracks[0]!.id).not.toBe(created.routine.tracks[0]!.id);
+    expect(Object.values(duplicate.media)[0]).toEqual(asset);
+    headers.set('if-match', '"4"');
+    await service.mutate(headers, id, 'publish');
+    for (const [key, value] of oldPublications) expect(context.store.blobs.get(key)).toEqual(value);
+    headers.set('if-match', '"5"');
+    await service.mutate(headers, id, 'delete');
+    await expect(service.get(headers, id, true)).rejects.toMatchObject({ status: 404 });
+    await expect(service.create(headers, created)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('enforces players only published and verifies every immutable asset descriptor', async () => {
+    const context = fixture();
+    const editor = await context.login('editor');
+    const player = await context.login('player');
+    const media = new CloudMedia(context.store, context.auth);
+    const service = new CloudRoutines(context.store, context.auth, media);
+    const asset = await uploadAudio(media, editor.headers);
+    const body = await service.create(editor.headers, routine(asset));
+    await expect(service.get(player.headers, body.routine.id, false)).rejects.toMatchObject({ status: 403 });
+    await expect(service.list(player.headers, false)).rejects.toMatchObject({ status: 403 });
+    await expect(service.create(player.headers, routine())).rejects.toMatchObject({ status: 403 });
+    await expect(service.authorizeAsset(player.headers, asset.id, body.routine.id)).rejects.toMatchObject({ status: 404 });
+    const invalid = routine({ ...asset, bytes: asset.bytes + 1 });
+    await expect(service.create(editor.headers, invalid)).rejects.toMatchObject({ status: 400 });
+    editor.headers.set('if-match', '"1"');
+    await service.mutate(editor.headers, body.routine.id, 'publish');
+    expect((await service.get(player.headers, body.routine.id, true)).routine.published).toBe(true);
+    await service.authorizeAsset(player.headers, asset.id, body.routine.id);
+    await expect(service.authorizeAsset(player.headers, asset.id, null)).rejects.toMatchObject({ status: 403 });
+    await expect(service.authorizeAsset(player.headers, 'other-asset', body.routine.id)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('rechecks account state before committing after content staging', async () => {
+    const context = fixture();
+    const { headers } = await context.login('editor');
+    const service = new CloudRoutines(context.store, context.auth, new CloudMedia(context.store, context.auth));
+    const put = context.store.put.bind(context.store);
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if (key.startsWith('snapshots/')) context.accounts[1]!.enabled = false;
+      return etag;
+    });
+    await expect(service.create(headers, routine())).rejects.toMatchObject({ status: 401 });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('routines/'))).toHaveLength(0);
+  });
+
+  it('rejects lock mass assignment, missing/extra media and unsafe IDs', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const service = new CloudRoutines(context.store, context.auth, new CloudMedia(context.store, context.auth));
+    const locked = routine();
+    locked.routine.locked = true;
+    await expect(service.create(headers, locked)).rejects.toMatchObject({ status: 400 });
+    const unsafe = routine();
+    unsafe.routine.id = '../escape';
+    await expect(service.create(headers, unsafe)).rejects.toMatchObject({ status: 400 });
+    const extra = routine();
+    extra.media.extra = {} as CloudAsset;
+    await expect(service.create(headers, extra)).rejects.toMatchObject({ status: 400 });
+    for (const value of ['1', 'W/"1"', '"0"', '*', '"9007199254740992"']) expect(() => revisionHeader(value)).toThrow();
+  });
+});
+
+describe('bounded native container signatures (structural fixtures, not decode tests)', () => {
+  it('accepts only seven exact canonical asset types without relaxing fields or numbers', () => {
+    expect(MEDIA_TYPES).toEqual(['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/flac', 'audio/aac', 'audio/webm']);
+    for (const contentType of MEDIA_TYPES) {
+      const asset = { id: 'asset-1', bytes: 128, sha256: 'a'.repeat(64), contentType };
+      const parsed = parseAsset(asset);
+      expect(parsed).toEqual(asset);
+      expect(Object.getPrototypeOf(parsed)).toBeNull();
+      expect(Reflect.ownKeys(parsed).sort()).toStrictEqual(['bytes', 'contentType', 'id', 'sha256']);
+      for (const change of [{ bytes: '128' }, { bytes: 128.5 }, { bytes: NaN }, { bytes: Infinity }, { bytes: 43 },
+        { bytes: LIMITS.assetBytes + 1 }, { contentType: `${contentType};codecs=opus` }, { unknown: true }, { contentType: 'Audio/AAC' }]) {
+        expect(() => parseAsset({ ...asset, ...change })).toThrow();
+      }
+    }
+  });
+
+  it('walks multiple complete ADTS frames, including CRC headers and a bounded partial final prefix frame', () => {
+    expect(() => signature(adts(), 'audio/aac')).not.toThrow();
+    const crcFrame = Buffer.from('fff0508001fffc0000211004608c1c', 'hex');
+    expect(() => signature(Buffer.concat(Array.from({ length: 4 }, () => crcFrame)), 'audio/aac')).not.toThrow();
+    expect(() => signature(adts(6000), 'audio/aac')).not.toThrow();
+    expect(() => signature(adts(4).subarray(0, 28), 'audio/aac', adts(4).length)).toThrow('unsupported_media');
+    expect(() => signature(adts(1), 'audio/aac')).toThrow('unsupported_media');
+  });
+
+  it.each([
+    ['sync', 0, 0], ['layer', 1, 0xf7], ['profile', 2, 0xd0], ['rate', 2, 0x7c],
+    ['zero channels', 3, 0], ['surround', 3, 0xc0], ['short frame', 4, 0],
+    ['oversized frame', 4, 0xff], ['multiple raw blocks', 6, 0xfd], ['second sync', 13, 0],
+    ['changed configuration', 15, 0x4c],
+  ] as const)('rejects malformed ADTS %s', (_name, offset, value) => {
+    const bytes = adts();
+    bytes[offset] = value;
+    expect(() => signature(bytes, 'audio/aac')).toThrow('unsupported_media');
+  });
+
+  it('rejects truncated ADTS payloads and header-looking garbage between frames', () => {
+    expect(() => signature(adts().subarray(0, -1), 'audio/aac')).toThrow('unsupported_media');
+    expect(() => signature(Buffer.concat([adts(2), Buffer.alloc(1), adts(2)]), 'audio/aac')).toThrow('unsupported_media');
+    expect(() => signature(Buffer.concat([Buffer.alloc(8), adts()]), 'audio/aac')).toThrow('unsupported_media');
+  });
+
+  it.each(['free', 'skip', 'wide'])('walks leading MP4 %s atoms without searching their payload', kind => {
+    expect(() => signature(mp4(atom(kind, Buffer.alloc(8))), 'audio/mp4')).not.toThrow();
+    expect(() => signature(mp4(atom(kind, Buffer.alloc(8), true)), 'audio/mp4')).not.toThrow();
+    expect(() => signature(mp4(atom('free'), atom('skip'), atom('wide')), 'audio/mp4')).not.toThrow();
+    expect(() => signature(atom(kind, mp4()), 'audio/mp4')).toThrow('unsupported_media');
+  });
+
+  it('bounds MP4 atoms to both the asset and 64 KiB, including extended sizes and missing ftyp', () => {
+    expect(() => signature(mp4(), 'audio/mp4')).not.toThrow();
+    expect(() => signature(mp4(atom('free', Buffer.alloc(65504))), 'audio/mp4')).not.toThrow();
+    expect(() => signature(mp4(atom('free', Buffer.alloc(65505))), 'audio/mp4')).toThrow('unsupported_media');
+    for (const size of [0, 4, 0xffffffff]) {
+      const bytes = mp4(atom('free'));
+      bytes.writeUInt32BE(size);
+      expect(() => signature(bytes, 'audio/mp4')).toThrow('unsupported_media');
+    }
+    const oversized = mp4(atom('free', Buffer.alloc(0), true));
+    oversized.writeBigUInt64BE(0xffffffffffffffffn, 8);
+    expect(() => signature(oversized, 'audio/mp4')).toThrow('unsupported_media');
+    expect(() => signature(atom('free', Buffer.alloc(40)), 'audio/mp4')).toThrow('unsupported_media');
+    expect(() => signature(mp4().subarray(0, 20), 'audio/mp4')).toThrow('unsupported_media');
+    const highBitBrand = mp4();
+    highBitBrand[8] = highBitBrand[8]! | 128;
+    expect(() => signature(highBitBrand, 'audio/mp4')).toThrow('unsupported_media');
+  });
+
+  it.each(['A_VORBIS', 'A_OPUS', 'A_AAC'])('accepts audio-only WebM %s metadata with known and FFmpeg unknown-size Segments', codec => {
+    for (const unknownSegment of [false, true]) {
+      expect(() => signature(webm(webmTrack(codec), { unknownSegment }), 'audio/webm')).not.toThrow();
+      expect(() => signature(webm(webmTrack(codec), { unknownSegment, clusterBytes: 70000 }), 'audio/webm')).not.toThrow();
+    }
+  });
+
+  it.each([
+    ['video', () => webmTrack('V_VP9', { type: 1 })],
+    ['second video track', () => Buffer.concat([webmTrack(), webmTrack('V_VP9', { type: 1, number: 2 })])],
+    ['Video element on audio', () => webmTrack('A_VORBIS', { extra: ebml('e0', Buffer.alloc(0)) })],
+    ['ContentEncodings', () => webmTrack('A_VORBIS', { extra: ebml('6d80', ebml('6240', ebml('5035', Buffer.alloc(0)))) })],
+    ['unknown codec', () => webmTrack('A_FLAC')],
+    ['zero channels', () => webmTrack('A_VORBIS', { channels: 0 })],
+    ['surround', () => webmTrack('A_VORBIS', { channels: 6 })],
+    ['nonfinite rate', () => webmTrack('A_VORBIS', { rate: NaN })],
+    ['invalid rate', () => webmTrack('A_VORBIS', { rate: 0 })],
+    ['duplicate type', () => webmTrack('A_VORBIS', { extra: ebml('83', Buffer.from([2])) })],
+    ['duplicate track number', () => Buffer.concat([webmTrack(), webmTrack()])],
+    ['empty Tracks', () => Buffer.alloc(0)],
+    ['unknown-size TrackEntry', () => Buffer.from('aeff', 'hex')],
+  ] as const)('rejects WebM %s', (_name, tracks) => {
+    expect(() => signature(webm(tracks()), 'audio/webm')).toThrow('unsupported_media');
+  });
+
+  it('requires structured EBML/Segment/Tracks within the prefix, rejecting magic in payloads and oversized elements', () => {
+    expect(() => signature(webm(webmTrack(), { docType: 'matroska' }), 'audio/webm')).toThrow('unsupported_media');
+    const fakeTracks = ebml('ec', webmTrack());
+    expect(() => signature(webm(fakeTracks), 'audio/webm')).toThrow('unsupported_media');
+    expect(() => signature(webm(webmTrack(), { beforeTracks: ebml('ec', Buffer.alloc(65536)) }), 'audio/webm')).toThrow('unsupported_media');
+    expect(() => signature(webm(webmTrack('A_VORBIS', { extra: ebml('63a2', Buffer.alloc(65536)) })), 'audio/webm')).toThrow('unsupported_media');
+    expect(() => signature(webm(webmTrack(), { beforeTracks: ebml('1f43b675', Buffer.alloc(0)) }), 'audio/webm')).toThrow('unsupported_media');
+    const badHeader = webm();
+    badHeader[4] = 0xfe;
+    expect(() => signature(badHeader, 'audio/webm')).toThrow('unsupported_media');
+    const oversized = webm(webmTrack(), { beforeTracks: Buffer.from('ec01fffffffffffffe', 'hex') });
+    expect(() => signature(oversized, 'audio/webm')).toThrow('unsupported_media');
+    for (let length = 0; length < 48; length++) {
+      expect(() => signature(webm().subarray(0, length), 'audio/webm')).toThrow('unsupported_media');
+    }
+  });
+});
+
+describe('bounded durable media and quota (Blob fake)', () => {
+  it.each(['audio/aac', 'audio/webm'])(
+    'preserves native %s upload bytes, filler snapshots and authenticated publisher/player chunks', async contentType => {
+      const context = fixture();
+      const api = new CloudApi(context.store, context.env, context.auth.now);
+      const { headers } = await context.login('editor');
+      const playerHeaders = (await context.login('player')).headers;
+      const bytes = contentType === 'audio/aac' ? adts(Math.ceil(LIMITS.chunkBytes / 13) + 4)
+        : webm(webmTrack(), { unknownSegment: true, clusterBytes: LIMITS.chunkBytes });
+      const asset = await uploadAudio(api.media, headers, bytes, contentType);
+      expect(asset).toStrictEqual({ id: asset.id, contentType, bytes: bytes.length, sha256: hashBytes(bytes) });
+      const quota = (await readJson<{ bytes: number }>(context.store, 'control/quota'))!.value.bytes;
+      expect(quota).toBe(64 * 1024 * 1024 + bytes.length * 2 + 131072);
+      const song = await api.routines.create(headers, routine(asset));
+      expect(song.media['entry-one']).toStrictEqual(asset);
+      headers.set('if-match', '"1"');
+      const publishedSong = await api.routines.mutate(headers, song.routine.id, 'publish');
+      expect((await api.routines.get(playerHeaders, song.routine.id, true)).media).toStrictEqual(JSON.parse(JSON.stringify(publishedSong.media)));
+      const songCopy = await api.routines.duplicate(headers, song.routine.id, true);
+      expect(Object.values(songCopy.media)).toStrictEqual([asset]);
+      const created = await api.handle(request('fillers', 'POST', headers, { name: 'Native structural fixture', duration: 10, asset }));
+      expect(created.status).toBe(201);
+      const recording = JSON.parse(String(created.body)) as FillerRecording;
+      expect(recording.asset).toStrictEqual(asset);
+      expect((await api.handle(request(`fillers/${recording.id}`, 'GET', headers))).body).toBe(created.body);
+      const trackAsset = await uploadAudio(api.media, headers);
+      const input = routine(trackAsset);
+      input.routine.filler = { mode: 'timed', sound: 'recording', seconds: 15, bpm: 100, recording };
+      const saved = await api.routines.create(headers, input);
+      expect(saved.routine.filler.recording).toStrictEqual(recording);
+      const forged = structuredClone(input);
+      forged.routine.filler.recording!.asset.contentType = 'audio/mp4';
+      await expect(api.routines.parse(forged)).rejects.toMatchObject({ status: 400 });
+      headers.set('if-match', '"1"');
+      const published = await api.routines.mutate(headers, saved.routine.id, 'publish');
+      const snapshots = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'));
+      await api.routines.fillers.archive(headers, recording.id);
+      expect((await api.handle(request(`fillers/${recording.id}`, 'GET', headers))).body).toBe(created.body);
+      const duplicate = await api.routines.duplicate(headers, saved.routine.id, true);
+      expect(duplicate.routine.filler.recording).toStrictEqual(recording);
+      expect((await api.routines.get(playerHeaders, saved.routine.id, true)).routine.filler).toStrictEqual(published.routine.filler);
+      const unrelated = await uploadAudio(api.media, headers, bytes, contentType);
+      const spoof = new Headers({ 'x-ms-client-principal': 'owner' });
+      for (const suffix of ['', '/chunks/0']) {
+        const path = `media/${asset.id}${suffix}`;
+        expect((await api.handle(request(path, 'GET', new Headers()))).status).toBe(401);
+        expect((await api.handle(request(path, 'GET', spoof))).status).toBe(401);
+        expect((await api.handle(request(path, 'GET', playerHeaders))).status).toBe(403);
+        expect((await api.handle(request(`${path}?routineId=${duplicate.routine.id}`, 'GET', playerHeaders))).status).toBe(404);
+        expect((await api.handle(request(`media/${unrelated.id}${suffix}?routineId=${saved.routine.id}`, 'GET', playerHeaders))).status).toBe(403);
+      }
+      for (const actor of [headers, playerHeaders]) {
+        const query = actor === playerHeaders ? `?routineId=${saved.routine.id}` : '';
+        const descriptor = await api.handle(request(`media/${asset.id}${query}`, 'GET', actor));
+        expect(descriptor.status).toBe(200);
+        expect(JSON.parse(String(descriptor.body))).toStrictEqual({ asset, chunkBytes: LIMITS.chunkBytes, chunkCount: 2 });
+        const chunks: Buffer[] = [];
+        for (let index = 0; index < 2; index++) {
+          const response = await api.handle(request(`media/${asset.id}/chunks/${index}${query}`, 'GET', actor));
+          const expected = bytes.subarray(index * LIMITS.chunkBytes, (index + 1) * LIMITS.chunkBytes);
+          expect(response.status).toBe(200);
+          expect(Buffer.isBuffer(response.body)).toBe(true);
+          expect((response.body as Buffer).equals(expected)).toBe(true);
+          expect(response.headers).toMatchObject({ 'content-type': 'application/octet-stream',
+            'x-content-sha256': hashBytes(expected), 'content-length': String(expected.length) });
+          expect(response.headers['cache-control']).toContain('no-store');
+          chunks.push(response.body as Buffer);
+        }
+        expect(Buffer.concat(chunks).equals(bytes)).toBe(true);
+        expect(hashBytes(Buffer.concat(chunks))).toBe(asset.sha256);
+      }
+      for (const [key, snapshot] of snapshots) expect(context.store.blobs.get(key)).toStrictEqual(snapshot);
+    },
+  );
+
+  it('acknowledges validation separately without copying or publishing unvalidated media', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const bytes = wav();
+    const upload = await media.initiate(headers, { bytes: bytes.length, sha256: hashBytes(bytes), contentType: 'audio/wav' });
+    await media.putChunk(headers, upload.id, 0, bytes);
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const response = await api.handle(request(`media/uploads/${upload.id}/complete`, 'POST', headers));
+    expect(response.status).toBe(202);
+    expect(response.headers['retry-after']).toBe('0');
+    expect(JSON.parse(String(response.body))).toEqual({ pending: true, done: false, phase: 'copying', copiedChunks: 0, chunkCount: 1 });
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('assets/'))).toEqual([]);
+    expect((await api.handle(request(`media/${upload.id}`, 'GET', headers))).status).toBe(404);
+    expect((await api.handle(request(`media/uploads/${upload.id}/complete`, 'POST', headers,
+      { copiedChunks: 1, sha256: hashBytes(bytes) }))).status).toBe(413);
+  });
+
+  it('finishes a full 128 MiB WAV with four ordered reads and at most eight copies per request', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const bytes = wav(LIMITS.assetBytes - 44);
+    bytes.writeUInt16LE(2, 22);
+    bytes.writeUInt32LE(96000, 24);
+    bytes.writeUInt32LE(384000, 28);
+    bytes.writeUInt16LE(4, 32);
+    bytes.writeUInt16LE(16, 34);
+    for (let index = 0; index < 64; index++) bytes.fill(index, Math.max(44, index * LIMITS.chunkBytes), (index + 1) * LIMITS.chunkBytes);
+    const media = new CloudMedia(context.store, context.auth);
+    const upload = await stageAudio(media, headers, bytes);
+    expect(upload.chunkCount).toBe(64);
+    const before = (await readJson<{ bytes: number }>(context.store, 'control/quota'))!.value.bytes;
+    let clock = 0;
+    let activeReads = 0;
+    let peakReads = 0;
+    const stagedReads: string[] = [];
+    const permanentWrites: string[] = [];
+    const get = context.store.get.bind(context.store);
+    const put = context.store.put.bind(context.store);
+    vi.spyOn(context.store, 'get').mockImplementation(async (key, maximum) => {
+      clock += 200;
+      if (!key.startsWith(`uploads/${upload.id}/chunks/`)) return get(key, maximum);
+      stagedReads.push(key);
+      peakReads = Math.max(peakReads, ++activeReads);
+      try { return await get(key, maximum); }
+      finally { activeReads--; }
+    });
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, data, expected) => {
+      clock += 200;
+      if (key.startsWith(`assets/${upload.id}/chunks/`)) permanentWrites.push(key);
+      if (key === `assets/${upload.id}/catalog`) {
+        expect(JSON.parse(context.store.blobs.get(`uploads/${upload.id}/head`)!.bytes.toString())).toMatchObject({
+          state: 'complete', finalization: { sha256: hashBytes(bytes), copiedChunks: 64 },
+        });
+      }
+      return put(key, data, expected);
+    });
+    const complete = async () => {
+      const started = clock;
+      const writes = permanentWrites.length;
+      const result = await new CloudMedia(context.store, context.auth, () => clock).complete(headers, upload.id);
+      expect(clock - started).toBeLessThan(20000);
+      expect(permanentWrites.length - writes).toBeLessThanOrEqual(8);
+      return result;
+    };
+    expect(await complete()).toMatchObject({ pending: true, copiedChunks: 0, chunkCount: 64 });
+    expect(peakReads).toBe(4);
+    expect(stagedReads).toHaveLength(64);
+    expect(permanentWrites).toHaveLength(0);
+    expect(context.store.blobs.has(`assets/${upload.id}/catalog`)).toBe(false);
+    for (let batch = 1; batch <= 8; batch++) {
+      const result = await complete();
+      if (batch < 8) {
+        expect(result).toMatchObject({ pending: true, copiedChunks: batch * 8 });
+        expect(context.store.blobs.has(`assets/${upload.id}/catalog`)).toBe(false);
+      } else expect(result).toEqual({ id: upload.id, bytes: bytes.length, sha256: hashBytes(bytes), contentType: 'audio/wav' });
+    }
+    expect(stagedReads).toHaveLength(128);
+    expect(new Set(permanentWrites).size).toBe(64);
+    const downloadedHash = createHash('sha256');
+    for (let index = 0; index < 64; index++) downloadedHash.update((await media.chunk(upload.id, index)).bytes);
+    expect(downloadedHash.digest('hex')).toBe(hashBytes(bytes));
+    expect((await readJson<{ bytes: number; active: object }>(context.store, 'control/quota'))!.value).toMatchObject({ bytes: before, active: {} });
+  }, 30000);
+
+  it.each(['copy', 'checkpoint-before', 'checkpoint-after', 'catalog-before', 'catalog-after', 'quota'] as const)(
+    'resumes durable progress after an injected %s failure without rehashing acknowledged chunks', async failure => {
+      const context = fixture();
+      const { headers } = await context.login();
+      const media = new CloudMedia(context.store, context.auth);
+      const upload = await stageAudio(media, headers, wav(2 * LIMITS.chunkBytes));
+      await media.complete(headers, upload.id);
+      const put = context.store.put.bind(context.store);
+      let injected = false;
+      vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+        const head = key === `uploads/${upload.id}/head` ? JSON.parse(bytes.toString()) : undefined;
+        const target = failure === 'copy' ? key === `assets/${upload.id}/chunks/1`
+          : failure.startsWith('checkpoint') ? head?.finalization?.copiedChunks === 2
+          : failure.startsWith('catalog') ? key === `assets/${upload.id}/catalog` : key === 'control/quota';
+        if (!injected && target) {
+          injected = true;
+          if (failure.endsWith('after')) await put(key, bytes, expected);
+          throw new ApiError(503, 'storage_unavailable');
+        }
+        return put(key, bytes, expected);
+      });
+      await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 503 });
+      expect(injected).toBe(true);
+      const cursor = (await readJson<{ finalization: { copiedChunks: number } }>(context.store, `uploads/${upload.id}/head`))!.value.finalization.copiedChunks;
+      expect(cursor).toBe(failure === 'copy' || failure === 'checkpoint-before' ? 1 : failure === 'checkpoint-after' ? 2 : 3);
+      const get = vi.spyOn(context.store, 'get');
+      const asset = await new CloudMedia(context.store, context.auth).complete(headers, upload.id);
+      expect(asset).toMatchObject({ id: upload.id });
+      const resumedReads = get.mock.calls.filter(([key]) => key.startsWith(`uploads/${upload.id}/chunks/`)).map(([key]) => Number(key.split('/').at(-1)));
+      expect(resumedReads).toEqual(Array.from({ length: 3 - cursor }, (_, offset) => cursor + offset));
+      expect((await media.catalog(upload.id)).asset).toEqual(asset);
+    });
+
+  it.each(['copying', 'publishing'] as const)('yields at a deterministic %s deadline and never persists partial cryptographic state', async phase => {
+    const context = fixture();
+    const { headers } = await context.login();
+    let clock = 0;
+    const media = new CloudMedia(context.store, context.auth, () => clock);
+    const upload = await stageAudio(media, headers, phase === 'copying' ? wav(2 * LIMITS.chunkBytes) : wav());
+    const get = context.store.get.bind(context.store);
+    const stalled = vi.spyOn(context.store, 'get').mockImplementation(async (key, maximum) => {
+      if (key === `uploads/${upload.id}/chunks/0`) clock += 20000;
+      return get(key, maximum);
+    });
+    await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 503, code: 'finalization_timeout' });
+    expect((await readJson<{ finalization?: unknown }>(context.store, `uploads/${upload.id}/head`))!.value.finalization).toBeUndefined();
+    expect([...context.store.blobs.keys()].some(key => key.startsWith('assets/'))).toBe(false);
+    stalled.mockRestore();
+    await media.complete(headers, upload.id);
+    const put = context.store.put.bind(context.store);
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if (key === `uploads/${upload.id}/head` && JSON.parse(bytes.toString()).finalization?.copiedChunks === 1) clock += 20000;
+      return etag;
+    });
+    expect(await media.complete(headers, upload.id)).toMatchObject({ pending: true, done: false, phase, copiedChunks: 1 });
+    expect(context.store.blobs.has(`assets/${upload.id}/catalog`)).toBe(false);
+    expect(await new CloudMedia(context.store, context.auth).complete(headers, upload.id)).toMatchObject({ id: upload.id });
+  });
+
+  it('makes competing copy cursors use the same ETag and preserves identical permanent bytes', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const bytes = wav(LIMITS.chunkBytes);
+    const upload = await stageAudio(media, headers, bytes);
+    await media.complete(headers, upload.id);
+    const put = context.store.put.bind(context.store);
+    const tags: (string | null)[] = [];
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, data, expected) => {
+      if (key === `uploads/${upload.id}/head` && JSON.parse(data.toString()).finalization?.copiedChunks === 1) {
+        tags.push(expected);
+        if (tags.length === 2) release();
+        await barrier;
+      }
+      return put(key, data, expected);
+    });
+    const results = await Promise.allSettled([media.complete(headers, upload.id),
+      new CloudMedia(context.store, context.auth).complete(headers, upload.id)]);
+    expect(tags).toHaveLength(2);
+    expect(tags[0]).toBe(tags[1]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 409, code: 'upload_conflict' } });
+    expect(hashBytes(Buffer.concat([(await media.chunk(upload.id, 0)).bytes, (await media.chunk(upload.id, 1)).bytes]))).toBe(hashBytes(bytes));
+  });
+
+  it.each([false, true])('fences expiry cleanup against catalog publication (completion wins: %s)', async completionWins => {
+    const context = fixture();
+    let { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const upload = await stageAudio(media, headers);
+    await media.complete(headers, upload.id);
+    const before = (await readJson<{ bytes: number }>(context.store, 'control/quota'))!.value.bytes;
+    const put = context.store.put.bind(context.store);
+    let injected = false;
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (!injected && key === `uploads/${upload.id}/head` && JSON.parse(bytes.toString()).state === 'complete') {
+        injected = true;
+        if (completionWins) await put(key, bytes, expected);
+        context.advance(LIMITS.uploadMs);
+        headers = (await context.login()).headers;
+        await media.cleanup(headers);
+        if (completionWins) throw new ApiError(503, 'storage_unavailable');
+      }
+      return put(key, bytes, expected);
+    });
+    await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: completionWins ? 503 : 409 });
+    expect(context.store.blobs.has(`assets/${upload.id}/catalog`)).toBe(false);
+    if (completionWins) expect(await media.complete(headers, upload.id)).toMatchObject({ id: upload.id });
+    else await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 409, code: 'upload_closed' });
+    expect((await readJson<{ bytes: number; active: object }>(context.store, 'control/quota'))!.value).toMatchObject({ bytes: before, active: {} });
+  });
+
+  it('rejects corrupt progress, changed staging bytes and revoked editors before publication', async () => {
+    const context = fixture();
+    const { headers } = await context.login('editor');
+    const media = new CloudMedia(context.store, context.auth);
+    const bytes = wav();
+    const upload = await stageAudio(media, headers, bytes);
+    await media.complete(headers, upload.id);
+    const key = `uploads/${upload.id}/head`;
+    const sealed = context.store.blobs.get(key)!;
+    for (const finalization of [{ sha256: 'a'.repeat(64), copiedChunks: 0 },
+      { sha256: hashBytes(bytes), copiedChunks: -1 }, { sha256: hashBytes(bytes), copiedChunks: 0.5 },
+      { sha256: hashBytes(bytes), copiedChunks: 2 }]) {
+      context.store.blobs.set(key, { etag: sealed.etag, bytes: encode({ ...JSON.parse(sealed.bytes.toString()), finalization }) });
+      await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 503 });
+    }
+    context.store.blobs.set(key, sealed);
+    const chunkKey = `uploads/${upload.id}/chunks/0`;
+    const chunk = context.store.blobs.get(chunkKey)!;
+    context.store.blobs.delete(chunkKey);
+    await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 409, code: 'upload_corrupt' });
+    context.store.blobs.set(chunkKey, { ...chunk, bytes: Buffer.alloc(bytes.length) });
+    await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 409, code: 'upload_corrupt' });
+    context.store.blobs.set(chunkKey, chunk);
+    const put = context.store.put.bind(context.store);
+    vi.spyOn(context.store, 'put').mockImplementation(async (key, data, expected) => {
+      const etag = await put(key, data, expected);
+      if (key.startsWith('assets/')) context.accounts[1]!.enabled = false;
+      return etag;
+    });
+    await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 401 });
+    expect(context.store.blobs.has(`assets/${upload.id}/catalog`)).toBe(false);
+    expect((await readJson<{ finalization: { copiedChunks: number } }>(context.store, key))!.value.finalization.copiedChunks).toBe(0);
+  });
+
+  it('uploads multiple chunks, verifies SHA-256, returns identical immutable bytes and retries completion', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const bytes = wav(LIMITS.chunkBytes + 100);
+    const asset = await uploadAudio(media, headers, bytes);
+    const downloaded = Buffer.concat([(await media.chunk(asset.id, 0)).bytes, (await media.chunk(asset.id, 1)).bytes]);
+    expect(downloaded).toEqual(bytes);
+    expect(await media.complete(headers, asset.id)).toEqual(asset);
+    expect((await readJson<{ active: object }>(context.store, 'control/quota'))!.value.active).toEqual({});
+    await expect(media.putChunk(headers, asset.id, 0, bytes.subarray(0, LIMITS.chunkBytes))).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('rejects mismatched final hashes, signatures and conflicting chunk retries', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const bytes = wav();
+    const upload = await media.initiate(headers, { bytes: bytes.length, sha256: 'a'.repeat(64), contentType: 'audio/wav' });
+    await media.putChunk(headers, upload.id, 0, bytes);
+    await media.putChunk(headers, upload.id, 0, bytes);
+    await expect(media.putChunk(headers, upload.id, 0, Buffer.alloc(bytes.length))).rejects.toMatchObject({ status: 409 });
+    await expect(media.complete(headers, upload.id)).rejects.toMatchObject({ status: 422 });
+    await expect(media.catalog(upload.id)).rejects.toMatchObject({ status: 404 });
+    expect([...context.store.blobs.keys()].some(key => key.startsWith('assets/'))).toBe(false);
+    await expect(uploadAudio(media, headers, Buffer.alloc(100))).rejects.toMatchObject({ status: 415 });
+    await expect(media.initiate(headers, { bytes: LIMITS.assetBytes + 1, sha256: 'a'.repeat(64), contentType: 'audio/wav' }))
+      .rejects.toMatchObject({ status: 400 });
+  });
+
+  it('bounds quota contention, charges abandoned allocations and releases only slots in cleanup', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const media = new CloudMedia(context.store, context.auth);
+    const bytes = wav();
+    const upload = await media.initiate(headers, { bytes: bytes.length, sha256: hashBytes(bytes), contentType: 'audio/wav' });
+    const before = (await readJson<{ bytes: number }>(context.store, 'control/quota'))!.value.bytes;
+    context.advance(LIMITS.uploadMs);
+    const renewed = await context.login();
+    expect(await media.cleanup(renewed.headers)).toEqual({ releasedSlots: 1, more: false });
+    expect((await readJson<{ bytes: number }>(context.store, 'control/quota'))!.value.bytes).toBe(before);
+    await expect(media.putChunk(renewed.headers, upload.id, 0, bytes)).rejects.toMatchObject({ status: 409 });
+    const quota = new QuotaBudget(context.store);
+    const amount = Math.floor((LIMITS.quotaBytes - before) * 0.75);
+    const results = await Promise.allSettled([quota.charge(amount), new QuotaBudget(context.store).charge(amount)]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 507 } });
+  });
+
+  it('validates supported signatures and rejects spoofed or excessive PCM headers', () => {
+    const bytes = wav();
+    const asset = { id: 'asset', bytes: bytes.length, sha256: hashBytes(bytes), contentType: 'audio/wav' };
+    expect(() => validateSignature(bytes, asset)).not.toThrow();
+    bytes.writeUInt16LE(100, 22);
+    expect(() => validateSignature(bytes, asset)).toThrow('unsupported_media');
+    expect(() => validateSignature(Buffer.alloc(64), { ...asset, contentType: 'audio/mp4' })).toThrow('unsupported_media');
+  });
+});
+
+describe('actual HTTP dispatcher (Blob fake; no Azure ingress claim)', () => {
+  it.each([
+    [undefined, undefined], [0, undefined], [undefined, 1.5], [0.875, 0.375], [1.5, 0],
+  ])('round-trips optional track/filler gains %s/%s through HTTP snapshots and copies', async (trackGain, fillerGain) => {
+    const context = fixture();
+    const { headers } = await context.login('editor');
+    const player = await context.login('player');
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const asset = await uploadAudio(api.media, headers);
+    const input = routine(asset);
+    if (trackGain !== undefined) input.routine.tracks[0]!.gain = trackGain;
+    if (fillerGain !== undefined) input.routine.filler.gain = fillerGain;
+    const before = structuredClone(input);
+    const created = await api.handle(request('routines', 'POST', headers, input));
+    expect(created).toMatchObject({ status: 201, headers: { etag: '"1"' } });
+    expect(JSON.parse(created.body.toString())).toStrictEqual(before);
+    const path = `routines/${input.routine.id}`;
+    let body: CloudRoutine = JSON.parse(created.body.toString());
+    body.routine.name = 'Saved household draft';
+    headers.set('if-match', created.headers.etag!);
+    const saved = await api.handle(request(path, 'PUT', headers, body));
+    expect(saved).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+    body = JSON.parse(saved.body.toString());
+    headers.set('if-match', saved.headers.etag!);
+    const locked = await api.handle(request(`${path}/lock`, 'POST', headers, body));
+    expect(locked).toMatchObject({ status: 200, headers: { etag: '"3"' } });
+    headers.set('if-match', locked.headers.etag!);
+    const unlocked = await api.handle(request(`${path}/unlock`, 'POST', headers));
+    expect(unlocked).toMatchObject({ status: 200, headers: { etag: '"4"' } });
+    headers.set('if-match', unlocked.headers.etag!);
+    const published = await api.handle(request(`${path}/publish`, 'POST', headers));
+    expect(published).toMatchObject({ status: 200, headers: { etag: '"5"' } });
+    const draftRead = await api.handle(request(path, 'GET', headers));
+    const playbackRead = await api.handle(request(`${path}?published=true`, 'GET', player.headers));
+    expect(draftRead).toMatchObject({ status: 200, headers: { etag: '"5"' } });
+    expect(playbackRead).toMatchObject({ status: 200, headers: { etag: '"5"' }, body: published.body });
+    expect(JSON.parse(draftRead.body.toString()).routine).toMatchObject({ published: false, locked: false, revision: 5 });
+    expect(JSON.parse(published.body.toString()).routine).toMatchObject({ published: true, locked: false, revision: 5 });
+    for (const response of [saved, locked, unlocked, published, draftRead, playbackRead]) {
+      const snapshot: CloudRoutine = JSON.parse(response.body.toString());
+      expect(snapshot.routine.tracks).toStrictEqual(before.routine.tracks);
+      expect(snapshot.routine.filler).toStrictEqual(before.routine.filler);
+      expect(snapshot.media).toStrictEqual(before.media);
+    }
+    for (const suffix of ['', '?published=true']) {
+      const duplicated = await api.handle(request(`${path}/duplicate${suffix}`, 'POST', headers));
+      expect(duplicated).toMatchObject({ status: 201, headers: { etag: '"1"' } });
+      const copy: CloudRoutine = JSON.parse(duplicated.body.toString());
+      expect(copy.routine.id).not.toBe(input.routine.id);
+      expect(copy.routine).toMatchObject({ revision: 1, locked: false, published: false });
+      const track = copy.routine.tracks[0]!;
+      expect(track.id).not.toBe(before.routine.tracks[0]!.id);
+      expect(track.cues[0]!.id).not.toBe(before.routine.tracks[0]!.cues[0]!.id);
+      expect({ ...track, id: before.routine.tracks[0]!.id,
+        cues: track.cues.map((cue, index) => ({ ...cue, id: before.routine.tracks[0]!.cues[index]!.id })) })
+        .toStrictEqual(before.routine.tracks[0]);
+      expect(copy.routine.filler).toStrictEqual(before.routine.filler);
+      expect(copy.media).toStrictEqual({ [track.id]: asset });
+      const copyRead = await api.handle(request(`routines/${copy.routine.id}`, 'GET', headers));
+      expect(copyRead).toMatchObject({ status: 200, body: duplicated.body });
+      headers.set('if-match', duplicated.headers.etag!);
+      const deleted = await api.handle(request(`routines/${copy.routine.id}`, 'DELETE', headers));
+      expect(deleted).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+      expect(JSON.parse(deleted.body.toString())).toStrictEqual({ ...copy, routine: { ...copy.routine, revision: 2 } });
+    }
+    expect(input).toStrictEqual(before);
+  });
+
+  it('keeps fresh UUID entries independent of shared or different audio bytes through gain edits and copies', async () => {
+    const context = fixture();
+    const { headers } = await context.login('editor');
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const firstBytes = wav();
+    firstBytes.fill(0x21, 44);
+    const secondBytes = Buffer.from(firstBytes);
+    secondBytes[44] = 0x22;
+    const firstAsset = await uploadAudio(api.media, headers, firstBytes);
+    const secondAsset = await uploadAudio(api.media, headers, secondBytes);
+    expect(firstAsset.id).not.toBe(secondAsset.id);
+    expect(firstAsset.sha256).not.toBe(secondAsset.sha256);
+    const selections = [
+      { asset: firstAsset, gain: 0 }, { asset: firstAsset, gain: 1.5 }, { asset: secondAsset, gain: undefined },
+    ];
+    const input = routine(firstAsset);
+    const template = input.routine.tracks[0]!;
+    input.routine.tracks = selections.map(({ gain }) => ({
+      ...structuredClone(template), id: randomUUID(),
+      cues: template.cues.map(cue => ({ ...structuredClone(cue), id: randomUUID() })),
+      ...(gain === undefined ? {} : { gain }),
+    }));
+    input.routine.filler.gain = 0.375;
+    input.media = Object.fromEntries(input.routine.tracks.map((track, index) => [track.id, selections[index]!.asset]));
+    const originalAssets = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('assets/'))
+      .map(([key, value]) => ({ key, bytes: Buffer.from(value.bytes), etag: value.etag }));
+    const created = await api.handle(request('routines', 'POST', headers, input));
+    expect(created).toMatchObject({ status: 201, headers: { etag: '"1"' } });
+    expect(JSON.parse(created.body.toString())).toStrictEqual(input);
+    const path = `routines/${input.routine.id}`;
+    headers.set('if-match', created.headers.etag!);
+    const published = await api.handle(request(`${path}/publish`, 'POST', headers));
+    expect(published).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+    expect(JSON.parse(published.body.toString())).toStrictEqual({ ...input,
+      routine: { ...input.routine, revision: 2, published: true } });
+    const draft = await api.handle(request(path, 'GET', headers));
+    expect(draft.status).toBe(200);
+    const entryIds = new Set(input.routine.tracks.map(track => track.id));
+    const cueIds = new Set(input.routine.tracks.flatMap(track => track.cues.map(cue => cue.id)));
+    for (const suffix of ['', '?published=true']) {
+      const duplicated = await api.handle(request(`${path}/duplicate${suffix}`, 'POST', headers));
+      expect(duplicated).toMatchObject({ status: 201, headers: { etag: '"1"' } });
+      const copy: CloudRoutine = JSON.parse(duplicated.body.toString());
+      expect(copy.routine.id).not.toBe(input.routine.id);
+      expect(copy.routine).toMatchObject({ revision: 1, locked: false, published: false });
+      expect(copy.routine.tracks).toHaveLength(selections.length);
+      expect(copy.routine.filler).toStrictEqual(input.routine.filler);
+      expect(Object.keys(copy.media).sort()).toEqual(copy.routine.tracks.map(track => track.id).sort());
+      for (const [index, track] of copy.routine.tracks.entries()) {
+        const original = input.routine.tracks[index]!;
+        expect(entryIds.has(track.id)).toBe(false);
+        entryIds.add(track.id);
+        for (const cue of track.cues) {
+          expect(cueIds.has(cue.id)).toBe(false);
+          cueIds.add(cue.id);
+        }
+        expect({ ...track, id: original.id,
+          cues: track.cues.map((cue, cueIndex) => ({ ...cue, id: original.cues[cueIndex]!.id })) }).toStrictEqual(original);
+        expect(copy.media[track.id]).toStrictEqual(selections[index]!.asset);
+      }
+      copy.routine.tracks[0]!.gain = 0.625;
+      copy.routine.filler.gain = 0;
+      headers.set('if-match', duplicated.headers.etag!);
+      const saved = await api.handle(request(`routines/${copy.routine.id}`, 'PUT', headers, copy));
+      expect(saved).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+      expect(JSON.parse(saved.body.toString())).toStrictEqual({ ...copy, routine: { ...copy.routine, revision: 2 } });
+    }
+    expect(await api.handle(request(path, 'GET', headers))).toMatchObject({ status: 200, body: draft.body });
+    expect(await api.handle(request(`${path}?published=true`, 'GET', headers)))
+      .toMatchObject({ status: 200, body: published.body });
+    for (const [asset, bytes] of [[firstAsset, firstBytes], [secondAsset, secondBytes]] as const) {
+      const download = await api.handle(request(`media/${asset.id}/chunks/0`, 'GET', headers));
+      expect(download).toMatchObject({ status: 200, body: bytes, headers: { 'x-content-sha256': hashBytes(bytes) } });
+    }
+    expect([...context.store.blobs.keys()].filter(key => key.startsWith('assets/'))).toHaveLength(originalAssets.length);
+    for (const { key, bytes, etag } of originalAssets) expect(context.store.blobs.get(key)).toStrictEqual({ bytes, etag });
+  });
+
+  it('updates the SAME ID draft after publish, keeps old publication bytes, and rejects locked or stale gain saves', async () => {
+    const context = fixture();
+    const { headers } = await context.login('owner');
+    const player = await context.login('player');
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const input = routine(await uploadAudio(api.media, headers));
+    input.routine.tracks[0]!.gain = 0.75;
+    input.routine.filler.gain = 0.25;
+    const created = await api.handle(request('routines', 'POST', headers, input));
+    expect(created.status).toBe(201);
+    const path = `routines/${input.routine.id}`;
+    headers.set('if-match', created.headers.etag!);
+    const published = await api.handle(request(`${path}/publish`, 'POST', headers));
+    expect(published).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+    const publication: CloudRoutine = JSON.parse(published.body.toString());
+    expect(publication.routine).toMatchObject({ id: input.routine.id, published: true, locked: false, revision: 2 });
+    const oldPublications = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'))
+      .map(([key, value]) => ({ key, bytes: Buffer.from(value.bytes), etag: value.etag }));
+    expect(oldPublications).toHaveLength(1);
+    expect(await api.handle(request('routines', 'POST', headers, input)))
+      .toMatchObject({ status: 409, body: '{"error":"routine_exists"}' });
+    expect(await api.handle(request(path, 'PUT', headers, input)))
+      .toMatchObject({ status: 412, body: '{"error":"revision_conflict"}' });
+    headers.set('if-match', published.headers.etag!);
+    expect(await api.handle(request(path, 'PUT', headers, publication)))
+      .toMatchObject({ status: 400, body: '{"error":"invalid_routine_state"}' });
+    const draftRead = await api.handle(request(path, 'GET', headers));
+    expect(draftRead).toMatchObject({ status: 200, headers: { etag: '"2"' } });
+    const draft: CloudRoutine = JSON.parse(draftRead.body.toString());
+    expect(draft).toStrictEqual({ ...publication, routine: { ...publication.routine, published: false } });
+    const edited = structuredClone(draft);
+    edited.routine.tracks[0]!.gain = 1.5;
+    edited.routine.filler.gain = 0;
+    headers.set('if-match', draftRead.headers.etag!);
+    const saved = await api.handle(request(path, 'PUT', headers, edited));
+    expect(saved).toMatchObject({ status: 200, headers: { etag: '"3"' } });
+    const expected = { ...edited, routine: { ...edited.routine, revision: 3 } };
+    expect(JSON.parse(saved.body.toString())).toStrictEqual(expected);
+    expect(await api.handle(request(path, 'GET', headers))).toMatchObject({ status: 200, body: saved.body });
+    expect(await api.handle(request(`${path}?published=true`, 'GET', player.headers)))
+      .toMatchObject({ status: 200, headers: { etag: '"2"' }, body: published.body });
+    player.headers.set('if-match', saved.headers.etag!);
+    for (const [route, method, body] of [
+      ['routines', 'POST', input], [path, 'PUT', expected], [path, 'DELETE', undefined],
+      [`${path}/lock`, 'POST', expected], [`${path}/unlock`, 'POST', undefined],
+      [`${path}/publish`, 'POST', undefined], [`${path}/duplicate?published=true`, 'POST', undefined],
+      [path, 'GET', undefined], ['routines', 'GET', undefined],
+    ] as const) {
+      expect((await api.handle(request(route, method, player.headers, body))).status).toBe(403);
+    }
+    headers.set('if-match', saved.headers.etag!);
+    const locked = await api.handle(request(`${path}/lock`, 'POST', headers));
+    expect(locked).toMatchObject({ status: 200, headers: { etag: '"4"' } });
+    headers.set('if-match', locked.headers.etag!);
+    for (const target of ['track', 'filler']) {
+      const change: CloudRoutine = JSON.parse(locked.body.toString());
+      (target === 'track' ? change.routine.tracks[0]! : change.routine.filler).gain = 1;
+      for (const [route, method] of [[path, 'PUT'], [`${path}/lock`, 'POST']] as const) {
+        expect(await api.handle(request(route, method, headers, change)))
+          .toMatchObject({ status: 423, body: '{"error":"routine_locked"}' });
+      }
+    }
+    expect(await api.handle(request(path, 'GET', headers))).toMatchObject({ status: 200, body: locked.body });
+    const unlocked = await api.handle(request(`${path}/unlock`, 'POST', headers));
+    expect(unlocked).toMatchObject({ status: 200, headers: { etag: '"5"' } });
+    headers.set('if-match', saved.headers.etag!);
+    expect(await api.handle(request(path, 'PUT', headers, expected)))
+      .toMatchObject({ status: 412, body: '{"error":"revision_conflict"}' });
+    const legacy: CloudRoutine = JSON.parse(unlocked.body.toString());
+    delete legacy.routine.tracks[0]!.gain;
+    delete legacy.routine.filler.gain;
+    headers.set('if-match', unlocked.headers.etag!);
+    const removed = await api.handle(request(path, 'PUT', headers, legacy));
+    expect(removed).toMatchObject({ status: 200, headers: { etag: '"6"' } });
+    expect(JSON.parse(removed.body.toString())).toStrictEqual({ ...legacy, routine: { ...legacy.routine, revision: 6 } });
+    headers.set('if-match', removed.headers.etag!);
+    const republished = await api.handle(request(`${path}/publish`, 'POST', headers));
+    expect(republished).toMatchObject({ status: 200, headers: { etag: '"7"' } });
+    expect(JSON.parse(republished.body.toString())).toStrictEqual({ ...legacy,
+      routine: { ...legacy.routine, revision: 7, published: true } });
+    expect(await api.handle(request(`${path}?published=true`, 'GET', player.headers)))
+      .toMatchObject({ status: 200, body: republished.body });
+    for (const { key, bytes, etag } of oldPublications) expect(context.store.blobs.get(key)).toStrictEqual({ bytes, etag });
+  });
+
+  it.each(['track', 'filler'])('rejects malformed %s gains at HTTP create, save and atomic lock without changing the head', async target => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const input = routine(await uploadAudio(api.media, headers));
+    const created = await api.handle(request('routines', 'POST', headers, input));
+    expect(created.status).toBe(201);
+    headers.set('if-match', created.headers.etag!);
+    const path = `routines/${input.routine.id}`;
+    const headKey = `${path}/head`;
+    const head = await context.store.get(headKey, 4096);
+    for (const gain of [null, '1', -0.01, 1.500001, false, [], {}, NaN, Infinity]) {
+      const malformed = structuredClone(input);
+      Object.assign(target === 'track' ? malformed.routine.tracks[0]! : malformed.routine.filler, { gain });
+      for (const [route, method] of [['routines', 'POST'], [path, 'PUT'], [`${path}/lock`, 'POST']] as const) {
+        expect(await api.handle(request(route, method, headers, malformed)))
+          .toMatchObject({ status: 400, body: '{"error":"invalid_input"}' });
+      }
+    }
+    const unknown = structuredClone(input);
+    Object.assign(target === 'track' ? unknown.routine.tracks[0]! : unknown.routine.filler, { gain: 1, role: 'owner' });
+    expect(await api.handle(request(path, 'PUT', headers, unknown)))
+      .toMatchObject({ status: 400, body: '{"error":"invalid_input"}' });
+    expect(await context.store.get(headKey, 4096)).toStrictEqual(head);
+    expect(await api.handle(request(path, 'GET', headers))).toMatchObject({ status: 200, body: created.body });
+  });
+
+  it('publishes uploaded media and downloads authenticated binary chunks through the HTTP routes', async () => {
+    const context = fixture();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const { headers } = await context.login();
+    const bytes = wav();
+    const initiated = await api.handle(request('media/uploads', 'POST', headers,
+      { bytes: bytes.length, sha256: hashBytes(bytes), contentType: 'audio/wav' }));
+    expect(initiated.status).toBe(201);
+    const { id } = JSON.parse(String(initiated.body));
+    const chunkHeaders = new Headers(headers);
+    chunkHeaders.set('content-type', 'application/octet-stream');
+    expect((await api.handle(request(`media/uploads/${id}/chunks/0`, 'PUT', chunkHeaders, bytes))).status).toBe(200);
+    const pending = await api.handle(request(`media/uploads/${id}/complete`, 'POST', headers));
+    expect(pending.status).toBe(202);
+    expect(pending.headers['retry-after']).toBe('0');
+    expect(JSON.parse(String(pending.body))).toMatchObject({ pending: true, done: false });
+    const completed = await api.handle(request(`media/uploads/${id}/complete`, 'POST', headers));
+    expect(completed.status).toBe(200);
+    const asset: CloudAsset = JSON.parse(String(completed.body));
+    const created = await api.handle(request('routines', 'POST', headers, routine(asset)));
+    const body: CloudRoutine = JSON.parse(String(created.body));
+    headers.set('if-match', created.headers.etag!);
+    expect((await api.handle(request(`routines/${body.routine.id}/publish`, 'POST', headers))).status).toBe(200);
+    const player = await context.login('player');
+    expect((await api.handle(request(`media/${id}`, 'GET', player.headers))).status).toBe(403);
+    const manifest = await api.handle(request(`media/${id}?routineId=${body.routine.id}`, 'GET', player.headers));
+    expect(JSON.parse(String(manifest.body))).toMatchObject({ asset, chunkCount: 1, chunkBytes: LIMITS.chunkBytes });
+    const download = await api.handle(request(`media/${id}/chunks/0?routineId=${body.routine.id}`, 'GET', player.headers));
+    expect(download.status).toBe(200);
+    expect(download.body).toEqual(bytes);
+    expect(download.headers['content-type']).toBe('application/octet-stream');
+    expect(download.headers['x-content-sha256']).toBe(hashBytes(bytes));
+    const list = await api.handle(request('routines?published=true', 'GET', player.headers));
+    expect(JSON.parse(String(list.body)).routines).toHaveLength(1);
+  });
+
+  it('runs login/session/create/save/lock/unlock/duplicate/delete/logout with JSON and no-store responses', async () => {
+    const context = fixture();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const login = await api.handle(request('auth/login', 'POST', context.loginHeaders, { username: 'owner', password: 'synthetic-test-password' }));
+    expect(login.status).toBe(200);
+    const session = JSON.parse(String(login.body));
+    const headers = new Headers({ origin: context.env().FIM_ORIGIN, cookie: login.headers['set-cookie']!.split(';')[0]!, 'x-csrf-token': session.csrfToken });
+    expect((await api.handle(request('auth/session', 'GET', headers))).status).toBe(200);
+    const created = await api.handle(request('routines', 'POST', headers, routine()));
+    expect(created.status).toBe(201);
+    let body: CloudRoutine = JSON.parse(String(created.body));
+    const id = body.routine.id;
+    headers.set('if-match', created.headers.etag!);
+    body.routine.name = 'Saved through HTTP';
+    const saved = await api.handle(request(`routines/${id}`, 'PUT', headers, body));
+    expect(saved.status).toBe(200);
+    body = JSON.parse(String(saved.body));
+    headers.set('if-match', saved.headers.etag!);
+    const locked = await api.handle(request(`routines/${id}/lock`, 'POST', headers, body));
+    expect(locked.status).toBe(200);
+    headers.set('if-match', locked.headers.etag!);
+    const unlocked = await api.handle(request(`routines/${id}/unlock`, 'POST', headers));
+    expect(unlocked.status).toBe(200);
+    expect((await api.handle(request(`routines/${id}/duplicate`, 'POST', headers))).status).toBe(201);
+    headers.set('if-match', unlocked.headers.etag!);
+    expect((await api.handle(request(`routines/${id}`, 'DELETE', headers))).status).toBe(200);
+    expect((await api.handle(request(`routines/${id}`, 'GET', headers))).status).toBe(404);
+    const logout = await api.handle(request('auth/logout', 'POST', headers));
+    expect(logout.status).toBe(200);
+    expect(logout.headers['set-cookie']).toContain('Max-Age=0');
+    expect((await api.handle(request('auth/session', 'GET', headers))).status).toBe(401);
+    expect(created.headers['cache-control']).toContain('no-store');
+    expect(created.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('enforces byte limits without trusting Content-Length and refuses spoofed principals', async () => {
+    const context = fixture();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const denied = await api.handle(request('routines', 'GET', new Headers({ 'x-ms-client-principal': 'pretend-owner' })));
+    expect(denied.status).toBe(401);
+    const huge = request('auth/login', 'POST', context.loginHeaders, Buffer.alloc(4097));
+    huge.headers.set('content-type', 'application/json');
+    expect((await api.handle(huge)).status).toBe(413);
+    await expect(boundedBody(request('x', 'POST', new Headers(), Buffer.alloc(3)), 2)).rejects.toMatchObject({ status: 413 });
+    const { headers } = await context.login();
+    headers.delete('x-csrf-token');
+    expect((await api.handle(request('routines', 'POST', headers, routine()))).status).toBe(403);
+    expect((await api.handle(request('routines/%2e%2e%2fescape', 'GET', headers))).status).toBe(404);
+  });
+
+  it('returns sanitized 503 without echoing invalid configuration or storage exceptions', async () => {
+    const context = fixture();
+    const missing = new CloudApi(context.store, () => ({}));
+    expect(await missing.handle(request('auth/session', 'GET', new Headers()))).toMatchObject({ status: 503, body: '{"error":"unconfigured"}' });
+    vi.spyOn(context.store, 'get').mockRejectedValue(new Error('private-internal-fixture-detail'));
+    const failed = await new CloudApi(context.store, context.env).handle(request('auth/session', 'GET', new Headers()));
+    expect(failed.status).toBe(503);
+    expect(String(failed.body)).not.toContain('private-internal');
+  });
+});
+
+describe('Azure SDK adapter contract (fake ContainerClient)', () => {
+  it.each(['request', 'operation'] as const)('terminates a stalled download body at the %s deadline', async deadlineKind => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let reading!: () => void;
+    const started = new Promise<void>(resolve => { reading = resolve; });
+    const stream = new Readable({ read() { reading(); } });
+    const container = { getBlobClient: () => ({ download: async () => ({
+      etag: '"stalled"', contentLength: 4, readableStreamBody: stream,
+    }) }) } as unknown as ContainerClient;
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(milliseconds => {
+      const timed = new AbortController();
+      setTimeout(() => timed.abort(), milliseconds);
+      return timed.signal;
+    });
+    try {
+      const result = new AzureBlobStore(container, controller.signal).get('chunk', 4);
+      const rejected = expect(result).rejects.toMatchObject({ status: 503, code: 'storage_unavailable' });
+      await started;
+      if (deadlineKind === 'request') controller.abort();
+      else await vi.advanceTimersByTimeAsync(12000);
+      await rejected;
+      expect(stream.destroyed).toBe(true);
+    } finally { stream.destroy(); timeout.mockRestore(); vi.useRealTimers(); }
+  });
+
+  it('registers the actual Functions v4 handler and binds login plus sanitized unconfigured responses', async () => {
+    const context = fixture();
+    const functions = await import('@azure/functions');
+    const { handler } = await import('../src/cloud/functions');
+    expect(functions.app.http).toHaveBeenCalledWith('cloud', expect.objectContaining({ route: '{*path}', authLevel: 'anonymous', handler }));
+    for (const [key, value] of Object.entries(context.env())) vi.stubEnv(key, value);
+    const connect = vi.spyOn(AzureBlobStore, 'connect').mockReturnValue(context.store as unknown as AzureBlobStore);
+    try {
+      const response = await handler(request('auth/login', 'POST', context.loginHeaders,
+        { username: 'owner', password: 'synthetic-test-password' }) as unknown as import('@azure/functions').HttpRequest);
+      expect(response.status).toBe(200);
+      expect(JSON.parse(String(response.body)).user.id).toBe('owner');
+      vi.stubEnv('FIM_ORIGIN', '');
+      const unconfigured = await handler(request('auth/session', 'GET', new Headers()) as unknown as import('@azure/functions').HttpRequest);
+      expect(unconfigured).toMatchObject({ status: 503, body: '{"error":"unconfigured"}' });
+    } finally { connect.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it('propagates a request deadline to every Azure operation', async () => {
+    const deadline = AbortSignal.abort();
+    const upload = vi.fn().mockImplementation(async (_bytes, _length, options) => {
+      expect(options.abortSignal.aborted).toBe(true);
+      throw new Error('aborted');
+    });
+    const container = { getBlockBlobClient: () => ({ upload }) } as unknown as ContainerClient;
+    await expect(new AzureBlobStore(container, deadline).put('record', Buffer.alloc(0), null)).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('sends real If-Match/If-None-Match options and bounds streamed reads', async () => {
+    const upload = vi.fn().mockResolvedValue({ etag: '"next"' });
+    const container = { getBlockBlobClient: () => ({ upload }), getBlobClient: () => ({
+      download: async () => ({ etag: '"read"', contentLength: 3, readableStreamBody: Readable.from([Buffer.from('abc')]) }),
+    }) } as unknown as ContainerClient;
+    const store = new AzureBlobStore(container);
+    await store.put('record', Buffer.from('a'), null);
+    expect(upload.mock.calls[0]![2].conditions).toEqual({ ifNoneMatch: '*' });
+    await store.put('record', Buffer.from('b'), '"old"');
+    expect(upload.mock.calls[1]![2].conditions).toEqual({ ifMatch: '"old"' });
+    expect((await store.get('record', 3))!.bytes.toString()).toBe('abc');
+    await expect(store.get('record', 2)).rejects.toMatchObject({ status: 503 });
+    upload.mockRejectedValue({ statusCode: 412 });
+    await expect(store.put('record', Buffer.alloc(0), '"stale"')).rejects.toBeInstanceOf(BlobConflict);
+  });
+
+  it('rejects a public container rather than relying on HTTP auth to protect public blobs', async () => {
+    const container = { getAccessPolicy: async () => ({ blobPublicAccess: 'blob' }) } as unknown as ContainerClient;
+    await expect(new AzureBlobStore(container).verifyPrivate()).rejects.toMatchObject({ status: 503 });
+  });
+});

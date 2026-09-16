@@ -1,0 +1,23 @@
+{
+  "name": "fitness-instructor-music-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/functions.cjs",
+  "engines": { "node": ">=22.12.0 <23" },
+  "scripts": {
+    "build": "esbuild src/cloud/functions.ts --bundle --platform=node --target=node22 --format=cjs --external:@azure/functions --outfile=dist/functions.cjs",
+    "typecheck": "tsc --project tsconfig.json",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@azure/functions": "4.16.2",
+    "@azure/storage-blob": "12.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.15",
+    "esbuild": "0.25.12",
+    "typescript": "6.0.2",
+    "vitest": "4.1.11"
+  }
+}

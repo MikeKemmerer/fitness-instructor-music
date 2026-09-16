@@ -1,0 +1,13 @@
+{
+  "version": "2.0",
+  "functionTimeout": "00:00:45",
+  "extensions": {
+    "http": {
+      "routePrefix": "api",
+      "maxConcurrentRequests": 4,
+      "maxOutstandingRequests": 8,
+      "dynamicThrottlesEnabled": true
+    }
+  },
+  "logging": { "logLevel": { "default": "None" } }
+}

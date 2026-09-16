@@ -1,0 +1,9 @@
+**
+!worker/
+!worker/**
+!shared/
+!shared/**
+**/node_modules
+**/.env*
+**/local-media
+**/*.local.json

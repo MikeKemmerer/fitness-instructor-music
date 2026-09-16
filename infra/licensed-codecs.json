@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "ffmpeg-audio-core-v1",
+  "license": "LGPL-2.1-or-later AND MIT AND NCSA AND BSD-2-Clause AND BSD-3-Clause AND IJG AND (Apache-2.0 WITH LLVM-exception)",
+  "artifacts": [
+    {
+      "role": "glue",
+      "path": "frontend/src/assets/codecs/ffmpeg-audio-core.js",
+      "buildName": "ffmpeg-audio-core",
+      "extension": "js",
+      "mimeType": "application/javascript",
+      "bytes": 81943,
+      "sha256": "9ccec78786ef9d9ed1bbdfe6af56218ab7dfe1b6aae066c8324c36f07ee40df9",
+      "cache": true,
+      "deploy": true
+    },
+    {
+      "role": "wasm",
+      "path": "frontend/src/assets/codecs/ffmpeg-audio-core.wasm",
+      "buildName": "ffmpeg-audio-core",
+      "extension": "wasm",
+      "mimeType": "application/wasm",
+      "bytes": 2460050,
+      "sha256": "978adc54750b888c10b605105bfc22a99ea46ee2b255dad43ccd045e4b90fdf2",
+      "cache": true,
+      "deploy": true
+    },
+    {
+      "role": "source",
+      "path": "frontend/public/sources/ffmpeg-audio-core-v1-source.tar.gz",
+      "publicPath": "/sources/ffmpeg-audio-core-v1-source.tar.gz",
+      "mimeType": "application/gzip",
+      "bytes": 19521396,
+      "sha256": "45360ad6c7469beec37a3a91560353750a41473b61337ec67561cbb9e2b20394",
+      "cache": false,
+      "deploy": true
+    },
+    {
+      "role": "notices",
+      "path": "frontend/public/licenses/ffmpeg-audio-core-v1-NOTICES.txt",
+      "publicPath": "/licenses/ffmpeg-audio-core-v1-NOTICES.txt",
+      "mimeType": "text/plain",
+      "bytes": 771627,
+      "sha256": "1df2000900c82be7ce56c6c0f06d6c3ddc132d0d7afd5a45698319e8d77ce945",
+      "cache": true,
+      "deploy": true
+    },
+    {
+      "role": "license",
+      "path": "frontend/public/licenses/ffmpeg-audio-core-v1-LGPL-2.1.txt",
+      "publicPath": "/licenses/ffmpeg-audio-core-v1-LGPL-2.1.txt",
+      "mimeType": "text/plain",
+      "bytes": 26526,
+      "sha256": "b634ab5640e258563c536e658cad87080553df6f34f62269a21d554844e58bfe",
+      "cache": true,
+      "deploy": true
+    },
+    {
+      "role": "sbom",
+      "path": "frontend/public/licenses/ffmpeg-audio-core-v1-SBOM.json",
+      "publicPath": "/licenses/ffmpeg-audio-core-v1-SBOM.json",
+      "mimeType": "application/json",
+      "bytes": 5445,
+      "sha256": "f3bff2dda08dbbfad7f9ef8d9fb41d7cfe9d54f3b18f81ccdad68c085251823c",
+      "cache": true,
+      "deploy": true
+    }
+  ]
+}

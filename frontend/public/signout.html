@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Sign out | Fitness Music Player</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/access.css">
+  <script type="module" src="/signout.js"></script>
+</head>
+<body>
+  <main class="access-page">
+    <header class="access-brand"><img src="/icon-192.png" alt="" width="40" height="40"><span>Fitness Music Player</span></header>
+    <p class="access-label">HOUSEHOLD ACCESS</p>
+    <h1>Sign out</h1>
+    <p id="signout-status" role="status" aria-live="polite" aria-atomic="true">Preparing to remove this app's local data...</p>
+    <button id="signout-retry" class="access-action" type="button" hidden>Retry sign out</button>
+    <p class="access-note">Signing out stops playback and removes this app's saved audio, routines and preferences from this browser. Original files and cloud copies are not removed.</p>
+    <noscript><p class="access-error">JavaScript is required to clear local data and sign out. Enable JavaScript for this site and reload this page.</p></noscript>
+  </main>
+</body>
+</html>

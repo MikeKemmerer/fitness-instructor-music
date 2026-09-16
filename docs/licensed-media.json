@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "path": "frontend/src/assets/loops/lofi-hip-hop-v1.wav",
+      "buildName": "lofi-hip-hop-v1",
+      "sha256": "4b4abf4e85b4887714ea58b7f96586f01cd2eeef3a11fb6953960861bb6c3379",
+      "title": "lofi hip hop",
+      "author": "omfgdude",
+      "source": "https://opengameart.org/content/lofi-hip-hop",
+      "download": "https://opengameart.org/sites/default/files/lofihiphop.ogg",
+      "sourceSha256": "8641e8203d0e7dc06db0276b69fc15f59e9f45faf76d2d647bc076a3339c1ef1",
+      "license": "CC0-1.0",
+      "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "modifications": "Excerpt 32.00-48.04 seconds; loudnorm I=-20:TP=-3:LRA=7; 22050 Hz mono PCM16; 882-sample complementary boundary crossblend, 16 seconds total; metadata stripped. Recorded tempo and pitch unchanged."
+    }
+  ]
+}

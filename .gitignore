@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+test-results/
+test-results.json
+playwright-report/
+local-media/
+.env
+.env.*
+!.env.example
+*.local.json
+*.log
+.DS_Store

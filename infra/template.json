@@ -1,0 +1,159 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "staticSiteName": {
+      "type": "string",
+      "defaultValue": "fitness-instructor-music-pilot",
+      "allowedValues": ["fitness-instructor-music-pilot"],
+      "metadata": {
+        "description": "Retain the approved existing Free site; never replace or upgrade it."
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 24
+    },
+    "containerName": {
+      "type": "string",
+      "defaultValue": "private-library",
+      "minLength": 3,
+      "maxLength": 63
+    },
+    "enableBudget": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": { "description": "Keep enabled unless the lead explicitly resolves an unsupported billing scope. Alerts are not a hard cap." }
+    },
+    "budgetStartDate": {
+      "type": "string",
+      "defaultValue": "[utcNow('yyyy-MM-01T00:00:00Z')]",
+      "metadata": { "description": "First day of the approved billing month; preserve this value on later deployments." }
+    },
+    "budgetContactRoles": {
+      "type": "array",
+      "defaultValue": ["Owner"],
+      "minLength": 1,
+      "metadata": { "description": "Billing alert recipient RBAC roles; no household emails in parameters. Verify delivery and USD billing currency." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "westus2",
+      "allowedValues": ["westus2"]
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "kind": "StorageV2",
+      "sku": { "name": "Standard_LRS" },
+      "properties": {
+        "accessTier": "Hot",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2",
+        "allowSharedKeyAccess": true,
+        "publicNetworkAccess": "Enabled",
+        "allowCrossTenantReplication": false
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/default', parameters('storageAccountName'))]",
+      "dependsOn": ["[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"],
+      "properties": {
+        "isVersioningEnabled": false,
+        "deleteRetentionPolicy": { "enabled": false },
+        "containerDeleteRetentionPolicy": { "enabled": false },
+        "restorePolicy": { "enabled": false },
+        "changeFeed": { "enabled": false }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/default/{1}', parameters('storageAccountName'), parameters('containerName'))]",
+      "dependsOn": ["[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"],
+      "properties": { "publicAccess": "None" }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/managementPolicies",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/default', parameters('storageAccountName'))]",
+      "dependsOn": ["[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"],
+      "properties": {
+        "policy": {
+          "rules": [
+            {
+              "name": "expired-sessions",
+              "enabled": true,
+              "type": "Lifecycle",
+              "definition": {
+                "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["[format('{0}/sessions/', parameters('containerName'))]"] },
+                "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 2 } } }
+              }
+            },
+            {
+              "name": "expired-upload-staging",
+              "enabled": true,
+              "type": "Lifecycle",
+              "definition": {
+                "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["[format('{0}/uploads/', parameters('containerName'))]"] },
+                "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 7 } } }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "condition": "[parameters('enableBudget')]",
+      "type": "Microsoft.Consumption/budgets",
+      "apiVersion": "2024-08-01",
+      "name": "fitness-instructor-monthly",
+      "properties": {
+        "category": "Cost",
+        "amount": 30,
+        "timeGrain": "Monthly",
+        "timePeriod": { "startDate": "[parameters('budgetStartDate')]" },
+        "notifications": {
+          "actual-15": {
+            "enabled": true, "operator": "GreaterThanOrEqualTo", "threshold": 50,
+            "thresholdType": "Actual", "contactRoles": "[parameters('budgetContactRoles')]"
+          },
+          "actual-24": {
+            "enabled": true, "operator": "GreaterThanOrEqualTo", "threshold": 80,
+            "thresholdType": "Actual", "contactRoles": "[parameters('budgetContactRoles')]"
+          },
+          "actual-30": {
+            "enabled": true, "operator": "GreaterThanOrEqualTo", "threshold": 100,
+            "thresholdType": "Actual", "contactRoles": "[parameters('budgetContactRoles')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "resourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Web/staticSites', parameters('staticSiteName'))]"
+    },
+    "hostname": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Web/staticSites', parameters('staticSiteName')), '2023-12-01').defaultHostname]"
+    },
+    "storageAccountResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+    },
+    "containerName": {
+      "type": "string",
+      "value": "[parameters('containerName')]"
+    }
+  }
+}
