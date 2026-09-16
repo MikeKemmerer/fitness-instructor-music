@@ -788,6 +788,49 @@ test('Settings disables demo loading persistently without deleting existing rout
   expect((await savedTracks(page)).routines).toEqual(saved.routines);
 });
 
+test('readiness, undo and recovered drafts preserve the saved routine and prepared class', async ({ page }, testInfo) => {
+  page.on('dialog', dialog => dialog.accept());
+  await demo(page);
+  const original = (await savedTracks(page)).routines[0]!;
+  const name = page.getByRole('textbox', { name: 'Routine name', exact: true });
+  await name.fill('Recover my routine'); await name.press('Tab');
+  await page.locator('.draft-protection').first().getByRole('button', { name: 'Undo edit', exact: true }).click();
+  await expect(name).toHaveValue(original.name);
+  await page.locator('.draft-protection').first().getByRole('button', { name: 'Redo edit', exact: true }).click();
+  await expect(name).toHaveValue('Recover my routine');
+  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  const saved = (await savedTracks(page)).routines[0]!;
+  await page.locator('.draft-protection').first().getByRole('button', { name: 'Undo edit', exact: true }).click();
+  await expect(name).toHaveValue(original.name);
+  expect((await savedTracks(page)).routines[0]!.revision).toBe(saved.revision);
+  await name.fill('Unsaved recovered routine'); await name.press('Tab');
+  await expect(page.locator('.draft-protection').first()).toContainText('Recovery up to date');
+  await page.reload();
+  await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  const recovery = page.locator('.recovery-library');
+  await recovery.locator(':scope > summary').click();
+  const row = recovery.locator('.routine-library-row').filter({ hasText: 'Unsaved recovered routine' });
+  await row.getByRole('button', { name: 'Restore as new draft', exact: true }).click();
+  await expect(name).toHaveValue('Unsaved recovered routine (recovered)');
+  expect((await savedTracks(page)).routines[0]).toEqual(saved);
+  await page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Start class', exact: true })).toBeEnabled({ timeout: 30000 });
+  const readiness = page.getByRole('region', { name: 'Class readiness', exact: true });
+  await expect(readiness).toContainText('Audio verified on this device');
+  await readiness.getByRole('button', { name: 'Test sound', exact: true }).click();
+  await readiness.getByRole('button', { name: 'Stop sound test', exact: true }).click();
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0');
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(readiness.getByRole('button', { name: 'Test sound', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await readiness.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('readiness-mobile.png') });
+  await page.getByRole('button', { name: 'Start class', exact: true }).click();
+  await expect(readiness).toBeHidden();
+});
+
 test('desktop practice keeps typed cue times during playback and saves repeated edits', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await demo(page);
@@ -830,6 +873,43 @@ test('Stop and Previous retain the current track in Practice and Class Mode', as
     await expect(page.locator('.playing-title')).toHaveText('Synthetic tonal warm-up');
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
   }
+});
+
+test('playlist and class authoring recover independent copies with undo after save', async ({ page }) => {
+  page.on('dialog', dialog => dialog.accept());
+  await demo(page);
+  await page.getByRole('button', { name: 'Walk-in / walk-out music', exact: true }).click();
+  const library = page.locator('.class-library');
+  await library.getByRole('button', { name: 'New music playlist', exact: true }).click();
+  const playlistName = library.getByLabel('Playlist name', { exact: true });
+  await playlistName.fill('Arrival'); await playlistName.press('Tab');
+  await library.getByRole('button', { name: 'Save Arrival to This device', exact: true }).click();
+  await library.getByRole('button', { name: 'Undo edit', exact: true }).click();
+  await expect(playlistName).toHaveValue('New music playlist');
+  await library.getByRole('button', { name: 'Redo edit', exact: true }).click();
+  await expect(playlistName).toHaveValue('Arrival');
+  await playlistName.fill('Arrival recovered'); await playlistName.press('Tab');
+  await expect(library.locator('.draft-protection')).toContainText('Recovery up to date');
+  await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  const recovery = page.locator('.recovery-library');
+  await recovery.locator(':scope > summary').click();
+  await recovery.locator('.routine-library-row').filter({ hasText: 'Arrival recovered' })
+    .getByRole('button', { name: 'Restore as new draft', exact: true }).click();
+  await expect(playlistName).toHaveValue('Arrival recovered (recovered)');
+  await library.getByRole('button', { name: 'Save Arrival recovered (recovered) to This device', exact: true }).click();
+  await library.getByRole('button', { name: 'New class setup', exact: true }).click();
+  const setupName = library.getByLabel('Class setup name', { exact: true });
+  await setupName.fill('Morning'); await setupName.press('Tab');
+  await library.getByRole('button', { name: 'Save Morning to This device', exact: true }).click();
+  await setupName.fill('Morning recovered'); await setupName.press('Tab');
+  await expect(library.locator('.draft-protection')).toContainText('Recovery up to date');
+  await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  await recovery.locator(':scope > summary').click();
+  await recovery.locator('.routine-library-row').filter({ hasText: 'Morning recovered' })
+    .getByRole('button', { name: 'Restore as new draft', exact: true }).click();
+  await expect(setupName).toHaveValue('Morning recovered (recovered)');
+  await library.getByRole('button', { name: 'Save Morning recovered (recovered) to This device', exact: true }).click();
+  await expect(library.getByRole('button', { name: 'Select class setup', exact: true })).toBeEnabled();
 });
 
 test('practice seeks and drags cue timing without changing class mode', async ({ page }) => {
@@ -1001,7 +1081,7 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   await page.goto('/');
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await expect(page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true })).toBeEnabled();
-  expect(await page.evaluate(async () => (await indexedDB.databases()).find(database => database.name === 'fitness-rehearsal')?.version)).toBe(5);
+  expect(await page.evaluate(async () => (await indexedDB.databases()).find(database => database.name === 'fitness-rehearsal')?.version)).toBe(6);
   await context.setOffline(true);
   await page.reload();
   const failures: string[] = [];

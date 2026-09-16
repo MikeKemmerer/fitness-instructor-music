@@ -1,5 +1,43 @@
 # Initial Rehearsal Contract
 
+## Ready And Protected Follow-up
+
+User approved release-test repairs and the first two summarized roadmap items:
+stabilization/readiness and protection of authoring work, followed by commit/push
+and deployment. Session position recovery, workout blocks, advanced DSP and remote
+controls remain deferred. Physical-device results require user observation.
+
+IndexedDB v6 adds draftRecovery to the existing private database. A copy contains
+entity kind, local/household source, detached working content, base revision,
+immutable media descriptors and update time. It contains no media bytes, account
+credentials or tokens. Each page has an independent writer ID, so two tabs do not
+overwrite each other's working buffers. Limit64 records,256KiB per record and4MiB
+aggregate; refuse excess writes visibly without evicting unsaved work. No timed
+expiry; explicit Discard removes an exact update, and successful Save removes the
+current page's recovery copy. Existing account invalidation/transaction fencing
+and whole-database sign-out purge apply. Debounced typing has a400ms unsaved
+window; the UI must not claim persistence until the write is acknowledged.
+
+Recovery always offers an independent draft, never an implicit overwrite of the
+original server head. Routine copies become local drafts; playlist/class copies
+keep their source and exact references but receive a new identity. Missing audio
+or stale/unavailable references block preparation/save rather than being replaced.
+Old copies remain until explicitly discarded. Recovery does not modify playback.
+
+Undo/redo is in-memory content history, bounded to50 edits/1MiB for undo snapshots.
+Group continuous typing/nudges within700ms. Retain current entity ID, revision,
+lock and publication state when applying history; undo after Save creates unsaved
+content at the new base revision. Switching entities resets that editor's history.
+No server locks, publications, credentials, media deletion or prepared Class Mode
+state can be undone. Re-prepare deliberately after authoring content changes.
+
+Readiness displays the prepared name/revision and all five phase selections using
+the existing preparation pipeline. Pending or changed selection is not marked as
+newly verified. Manual speaker/power checkboxes reset on preparation; a bounded
+synthetic sound audition is disabled while music/filler is playing. Navigation,
+preparation and entering Class Mode remain silent. No claim of automatic physical
+route/battery detection, background audio reliability or browser-eviction immunity.
+
 ## Approved Streamlined Workflows (September 15 Implementation)
 
 ### Class-Control Follow-up

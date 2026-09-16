@@ -6,7 +6,7 @@ Private household fitness-class PWA. Public code, private music.
 
 September 15: [current user instructions](docs/user-guide.md),
 [separate workflow review](docs/workflow-review.md), and
-[the revised UI/class-session plan](docs/plan.md#september-15-workflow-revision)
+[the consolidated review plan](docs/plan.md#september-16-review-plan)
 describe how to create/share, revise/fine-tune and teach a routine. The guide now
 covers implemented silent Class entry, Practice cue editing, per-song fillers and
 independent walk-in/announcement/walk-out phases. The review and plan retain their
@@ -25,6 +25,8 @@ The standalone local build does not contact Azure or Plex and has no cloud login
 
 - Two generated demo songs, or explicit local audio imports in a user-editable order.
 - Settings > Demos > Disable demos hides and blocks demo loading on this device. The preference survives reloads and never deletes existing routines or audio.
+- Class readiness shows the exact prepared phase queue and offers a guarded sound audition plus manual speaker/power checks. It never claims to detect the physical speaker automatically.
+- Undo/redo for routines, music playlists and class setups; bounded automatic local recovery copies in Routines > Recoverable drafts. Restore creates a separate draft, never overwrites a saved household revision, and leaves prepared playback alone. Cloud Save/Publish remains explicit.
 - Saved routines, independent duplication, local lock/unlock, and revision conflicts between tabs.
 - Drag tracks by their header grips on Edit, including touch dragging with automatic scrolling. Move up/down buttons and grip arrow keys remain available. Cues, audio and gains move together; a prepared or playing routine stays unchanged until explicitly prepared again. Escape or dropping outside the track list cancels the move. Locked, published and playback-only views cannot reorder tracks.
 - Current/next move, cue markers, elapsed/remaining times, body-area notes and cue sheet.

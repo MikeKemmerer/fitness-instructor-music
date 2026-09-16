@@ -1,3 +1,34 @@
+# Physical Instructor Pilot
+
+Record results privately, not in public GitHub test artifacts. Before a rehearsal,
+record device/OS/browser or installed-PWA version, app build, speaker/connection,
+routine revision, class duration, available storage and power arrangement. Start
+with the instructor's actual iPhone/iPad and speaker, then desktop/tablet backups.
+Hardware inventory and3-5 pilot participants still need user confirmation.
+
+| Scenario | Procedure | Pass Condition |
+| --- | --- | --- |
+| Preparation | Prepare distinct arrival/departure lists, both announcement loops and custom gaps | All phases listed; missing audio blocks Ready; entry stays silent |
+| Normal class | Run45-90minutes or the longest intended class with pauses and long holds | No app-caused stop, unexpected transition or lost cues |
+| Offline | Prepare online, enable airplane mode, reload, then explicitly start | Complete cached class operates without login/network requests |
+| Cloud expiry | Let the server session expire while playing | Prepared playback continues; cloud authoring requests require sign-in |
+| Speaker interruption | Disconnect/reconnect Bluetooth and select the intended output | No surprise replay; record actual platform behavior and manual recovery |
+| Calls/assistant/screen lock | Interrupt during a song, fade and held filler | Record stop/resume behavior; no unsupported background-playback claim |
+| Draft recovery | Edit without Save, wait for recovery acknowledgment, reload, restore a copy | Work recovered under a new ID; original saved revision unchanged |
+| Undo | Edit, Save, Undo, then inspect both prepared and saved versions | Undo creates an unsaved edit; no publication or playing-snapshot mutation |
+| Storage pressure | Test on a separate synthetic profile with constrained storage | Failure shown honestly; no silent eviction of recovery copies |
+| Identity change | Sign out after creating a synthetic recovery copy | Private drafts/audio/recoveries removed before another user enters |
+
+Foreground-only teaching is the current pilot assumption. Screen locking,
+background playback, calls and Bluetooth behavior require observed results before
+they are supported promises. Reload/crash playback-position recovery is deferred;
+after reload prepare/start explicitly. Do not use private real-class traces in CI.
+
+Pilot targets are20 completed classes with zero app-caused stops/lost edits and
+recorded handling for each interruption, not a claim of current acceptance. Note
+every failure and compare authoring/navigation time with an observed baseline.
+If browser constraints prevent the required workflow, review native audio and
+budget before implementation rather than assuming a web wrapper solves it.
 # Phone Testing From Windows and WSL
 
 Vite development and preview bind to `0.0.0.0`, not just loopback. A WSL NAT address is not the Windows Ethernet/Wi-Fi address. Windows localhost forwarding alone does not expose a WSL server to other LAN devices.

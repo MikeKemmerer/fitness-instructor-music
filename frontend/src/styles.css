@@ -1,5 +1,12 @@
 @import url('./theme.css');
 
+.readiness dl { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); gap: 6px 16px; }
+.readiness dt { font-weight: 600; }
+.readiness dd { margin: 0; overflow-wrap: anywhere; }
+.readiness > p, .draft-protection { overflow-wrap: anywhere; }
+.draft-protection { flex-wrap: wrap; }
+.recovery-library { margin-block: 16px; }
+
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; }

@@ -7,6 +7,7 @@ import { cloudErrorMessage } from './cloud-ui';
 import { cloudHash, createCloudLibrary } from './cloud-library';
 import * as offline from './offline';
 import { fillerControls } from './filler-controls';
+import { createDraftProtection } from './draft-protection';
 import { t } from './i18n';
 import { element, field, iconButton, numberInput, selectInput, textInput } from './ui';
 
@@ -52,8 +53,20 @@ export function createClassPanel(context: ClassPanelContext) {
   const available = () => !disposed && !busy && !context.busy();
   const editable = () => available() && author() && !(playlist ?? setup)?.locked && !(playlist ?? setup)?.published
     && (source === 'local' || getCloudContext().access === 'online');
+  const protection = createDraftProtection({ editable, apply: value => {
+    if ('routine' in value) setup = value;
+    else if ('tracks' in value && !('filler' in value)) playlist = value;
+    else return;
+    dirty = true; render();
+  } });
+  const protect = (grouped = false) => {
+    const value = playlist ?? setup;
+    if (value) protection.observe({ kind: playlist ? 'playlist' : 'class', source, value,
+      baseRevision: revision, media: { ...envelope?.media, ...reusableMedia } }, dirty, grouped);
+  };
   const changed = () => {
     dirty = true;
+    protect(true);
     const value = playlist ?? setup;
     if (value && pendingSave) {
       const label = t('librarySave', { name: value.name, destination: t(source === 'household' ? 'householdDestination' : 'localDestination') });
@@ -262,6 +275,8 @@ export function createClassPanel(context: ClassPanelContext) {
     }
     const value = playlist ?? setup;
     if (!value) { sync(); return; }
+    protect();
+    content.append(protection.element);
     content.append(element('p', 'draft-identity', `${identityText(value)} / ${t(dirty ? 'unsaved' : 'savedSnapshot')}`));
     const fields = element('fieldset', 'class-editor'); fields.dataset.libraryContent = '';
     fields.append(field(t(playlist ? 'playlistName' : 'setupName'), textInput(value.name, 160, name => { if (editable()) { value.name = name; changed(); } })));
@@ -354,6 +369,7 @@ export function createClassPanel(context: ClassPanelContext) {
     content.append(actions); sync();
   };
   function sync(): void {
+      protection.sync();
     for (const fields of content.querySelectorAll<HTMLFieldSetElement>('fieldset[data-library-content]')) fields.disabled = !editable();
     for (const button of content.querySelectorAll<HTMLButtonElement>('button')) {
       const blocked = !available() || (source === 'household' && getCloudContext().access !== 'online' && button.dataset.offlineAvailable !== 'true');
@@ -368,5 +384,21 @@ export function createClassPanel(context: ClassPanelContext) {
   }
   root.addEventListener('toggle', () => { if (root.open && available()) void run(refresh); });
   render();
-  return { element: root, sync, hasUnsaved: () => dirty, dispose: () => { disposed = true; generation++; controller?.abort(); } };
+  return { element: root, sync, hasUnsaved: () => dirty,
+    async restoreRecovery(record: offline.DraftRecovery) {
+      if (!available() || !author() || !discard()) return;
+      if (context.hosted) captureCloudIdentity()();
+      source = record.source; published = false;
+      if (record.kind === 'class' && 'routine' in record.value) {
+        setup = { ...structuredClone(record.value), id: crypto.randomUUID(), revision: 1, locked: false, published: false };
+        playlist = null;
+      } else if (record.kind === 'playlist' && 'tracks' in record.value && !('filler' in record.value)) {
+        playlist = { ...structuredClone(record.value), id: crypto.randomUUID(), revision: 1, locked: false, published: false };
+        setup = null;
+      } else return;
+      (playlist ?? setup)!.name = t('recoveryCopy', { name: record.value.name });
+      envelope = null; reusableMedia = structuredClone(record.media); revision = null; dirty = true;
+      root.open = true; render();
+    },
+    dispose: () => { disposed = true; protection.dispose(); generation++; controller?.abort(); } };
 }

@@ -1,14 +1,279 @@
 # Fitness Music Player Plan
 
+## September 16 Review Plan
+
+**Status: first two summarized items approved for implementation on September16.** This is the consolidated current
+backlog and modification plan. It supersedes the planning/status statements in
+the historical sections below, not the implemented [contracts](contracts.md).
+The user authorized fixing test failures, stabilization/readiness and protection
+of authoring work, followed by commit, push and deployment. That covers R1/R2,
+pilot definition P1 and U1/A1/A2; physical pilot execution needs the user's devices.
+It does not authorize new infrastructure, paid services, public music sharing,
+PR merges or the later feature increments. See contracts for the chosen limits.
+
+### Product Goal And Constraints
+
+Make music-led, in-person barre/Pilates teaching dependable and fast to prepare.
+The instructor should be able to operate a complete prepared class without
+leaving Class Mode, losing choreography, or relying on a network connection.
+Broader fitness formats follow evidence from the initial pilot, not a larger
+first-release interface.
+
+Preserve the existing household owner/editor/player boundary, private media,
+explicit cloud Save/Publish, immutable publications and prepared revisions.
+Retain SWA Free and the USD30/month total budget target. No always-on service,
+automatic plan upgrade or music migration is proposed. Budget alerts are not a
+hard spending cap. Initial pilot exclusions such as section loops and external
+remotes remain in force until separately approved.
+
+### Baseline: Do Not Rebuild These Features
+
+- Committed source already includes distinct walk-in/walk-out playlists,
+	independently configured announcement loops, per-song filler, silent Class
+	entry, Practice cue editing, current-song Stop, one-second Previous behavior,
+	and the persisted Disable demos setting. Current recipes are in the
+	[user guide](user-guide.md).
+- AAC import, bounded parallel downloads, exact-revision preparation,
+	custom filler management, loudness/BPM proposals, exports, roles and locks
+	already exist. Improve measured shortcomings rather than duplicating them.
+- Source publication is complete. Feature baseline is commit `dd8a7b3`; the
+	additional compound archive MIME correction is committed as `08188a9`.
+- The requested Azure update is **not deployed**. The latest release attempt
+	passed its dedicated API/security/offline checks and full-class browser gate,
+	then stopped at local Vitest: 1,732 passed, 40 failed, 20 skipped. The displayed
+	cloud orchestration failures report a synthetic DOM stub missing `Element.after()`.
+	Triage all failures before assuming they share that cause. The remaining hosted,
+	full-browser, artifact-review and upload gates have not completed for this attempt.
+- An earlier full-class audio-clock assertion failed once; its unchanged rerun
+	passed. Preserve that evidence and investigate recurrence, without increasing
+	timeouts or disabling assertions just to obtain a green release.
+- Live source-archive MIME verification is still outstanding. A local config
+	change and a successful upload are not proof that Azure serves the intended bytes
+	and headers. Physical iPhone/Bluetooth acceptance is also outstanding.
+
+### Consolidated Checklist
+
+Unchecked means unfinished or not yet approved, not a claim that work has started.
+IDs are the single actionable backlog; the sections below define their scope.
+
+- [x] **R1 - Now: restore a trustworthy release gate.** Triage the 40 local test
+	failures; repair the cloud DOM fixture where verified; investigate any distinct
+	failure. Preserve the original reports and rerun focused checks first.
+- [ ] **R2 - Now: finish the existing Azure release.** After review approval,
+	complete the required local/hosted/browser/infra checks, review the exact artifact,
+	deploy once, verify live files/API denials/source MIME, and restore the local preview.
+- [ ] **P1 - Now: define the physical-device pilot.** Confirm teaching devices,
+	speakers, class length and interruption expectations; recruit 3-5 instructors
+	and record a reproducible acceptance matrix.
+- [ ] **U1 - First modification: consolidate pre-class readiness.** Show the exact
+	queued class, verified local availability, unresolved blockers and a manual sound test.
+- [ ] **A1 - First modification: recover unsaved drafts.** Add bounded,
+	identity-scoped automatic local recovery without automatic household Save/Publish.
+- [ ] **A2 - First modification: add undo/redo.** Group meaningful authoring changes
+	and preserve media references, revision checks and the prepared-class boundary.
+- [ ] **R3 - Next: restore interrupted sessions safely.** Persist minimal playback
+	checkpoints and offer an explicit, silent recovery choice after reload/crash.
+- [ ] **A3 - Next: accelerate rehearsal authoring.** Capture cue times while
+	listening, batch-shift selected cues, and copy choreography with explicit mappings.
+- [ ] **U2 - Next: validate teaching ergonomics.** Refine observed readability,
+	touch-target, orientation and control-discovery problems on actual devices.
+- [ ] **B1 - Later approval: introduce reusable timed exercise blocks.** Define the
+	versioned work/rest/rounds model and its relationship to music before implementation.
+- [ ] **B2 - Later approval: allow controlled run-only adjustments.** Add prepared
+	alternatives and deliberate shortening/skipping with truthful finish-time estimates.
+- [ ] **F1 - Deferred decision: advanced music, sharing and device integrations.**
+	Evaluate waveform/phrase tools, prepared tempo variants, templates/substitute
+	handoff, remotes and Plex import separately after the pilot.
+
+### Release And Delivery Order
+
+| Increment | Work | Dependency | Exit Gate |
+| --- | --- | --- | --- |
+| 0: Stabilize | R1, R2, P1 | Approval to resume release work | Clean required gates, verified live release, agreed device matrix |
+| 1: Ready And Protected | U1, A1, A2 | Increment0 and recovery/conflict design approval | Ready state trustworthy; unsaved work recoverable; undo tested across save/lock boundaries |
+| 2: Rehearse And Recover | R3, A3, U2 | Draft recovery foundation plus pilot observations | Explicit session recovery; faster cue workflow; full-device class rehearsals |
+| 3: Structured Classes | B1, then B2 | Separate schema/timing/UX approval | Timed exercises remain deterministic through holds, transitions and run-only changes |
+| Future | F1 | Demonstrated instructor demand and feasibility review | Separate scoped proposal; no implied implementation approval |
+
+Implementation of Increment0 and Increment1 is now approved; later increments remain proposals.
+Do not batch all proposed features into one release. No delivery-date estimates
+are asserted before the device pilot and contract changes are scoped.
+
+### Increment 0: Stabilize And Establish Evidence
+
+R1 changes test fixtures only where the missing API is verified; a passing desktop
+browser test is not permission to ignore another failure. Reuse neighboring test
+helpers when suitable. Do not remove the production control or weaken assertions
+merely because a synthetic DOM is incomplete.
+
+R2 retains the existing release guard: committed source, clean source inventory,
+exact artifact hash approval, one executor and durable receipts. Review the new
+`.tar.gz` mapping against the actual live response, six pinned codec/source
+resources, public app files and unauthenticated/spoofed API denials. Keep music,
+accounts and private storage unchanged. Finish with accurate deployed build
+metadata and a tested local-preview restoration. Add concise failure diagnostics
+and safe stage resumption only if they reduce the observed recovery problems;
+never turn incomplete or skipped suites into successful evidence.
+
+P1 covers the actual iPhone/iPad and Bluetooth route first, then the user's other
+teaching devices. Test 45-90 minute classes, or the longest supported class:
+offline preparation/relaunch, network loss, expired cloud sessions, long holds,
+calls/assistant interruptions, speaker disconnect/reconnect, screen locking,
+orientation changes, reload and constrained storage. Mark unsupported behavior
+explicitly. Do not promise background/lock-screen playback from the current PWA.
+
+If device evidence shows browser audio cannot satisfy the approved requirements,
+stop for a native-audio feasibility decision. A website wrapper alone is not proof
+of reliable background audio. No native implementation is approved by this plan.
+
+### Increment 1: Ready And Protected
+
+**U1 - Readiness:** extend the existing preparation pipeline, not a second cache
+or player. Present routine/setup revision and walk-in, before, routine, after and
+walk-out selections together. Reuse verified local files; display missing/corrupt
+media and changed selections accurately. Provide an explicit test-sound action
+that cannot overlap a running class. Acknowledge output route/battery manually
+where browser APIs cannot inspect them reliably. A successful sound test is not
+automatic proof that the intended physical speaker is connected.
+
+Acceptance: cold and cached preparation, empty optional lists, retained archived
+filler, offline reuse and expiry all produce truthful states. Opening Readiness
+or Class Mode stays silent. Settings/demo visibility and player-only permissions
+continue to work. Active classes are not replaced by refresh or update checks.
+
+**A1 - Draft recovery:** add a dedicated IndexedDB recovery store for the newest
+working buffer per entity, with bounded storage and versioned migrations. Store
+the draft, source identity, base revision, media descriptors and dirty generation;
+do not copy music, cookies or tokens into the buffer. Debounce ordinary typing and
+persist completed structural edits. Report a failed recovery write honestly.
+
+On return, offer Restore/Discard without silently saving to the cloud. A newer
+server revision requires review or recovery into a separate draft, never a force
+overwrite. Ordinary expiry retains work but blocks unauthorized cloud writes.
+Explicit logout/account change must purge the recovery data with existing private
+stores. Define retention and quota behavior before coding; active unsaved work
+must not disappear silently when a limit is reached.
+
+**A2 - Undo/redo:** start with routine, playlist and class-setup content edits.
+Group typing, cue nudges, reordering and gap changes into useful operations rather
+than one history entry per UI event. Do not undo authentication, publication,
+server locks or uploads as if they were ordinary content changes. Undo after Save
+creates a new unsaved local edit against the current base revision; it does not
+rewind server history. Undoing an import removes the draft reference, not the audio.
+
+Acceptance: reload with unsaved work; quota failure; two tabs; stale/locked server
+head; expiry/logout/account switch; edit-save-undo; cue-only Practice edits during
+playback. Publications, prepared Class Mode snapshots and other users' work remain
+unchanged. Design the recovery schema before adding UI controls.
+
+### Increment 2: Rehearse And Recover
+
+**R3 - Session checkpoint:** use a separate identity-scoped record from draft
+recovery. Persist exact prepared revisions/assets, phase, track occurrence, source
+offset, exercise elapsed time and necessary hold state, never an AudioContext or
+credentials. Write at stable transitions and a bounded cadence, not every frame.
+Revalidate local media and identity before offering Resume here / Restart current
+song / Discard. Always reopen silently and require a fresh playback gesture.
+
+Define recovery during crossfades, held filler, announcements and finished states
+before implementation. Reconstruct one valid owning segment; do not resurrect
+overlapping voices or replay overdue cue alarms. Recovery after browser eviction
+cannot be promised when the required audio is missing. Checkpoint data follows
+explicit logout purge and must not confer new server authorization.
+
+**A3 - Rehearsal authoring:** add a deliberate capture mode for timing an existing
+ordered cue list while listening, plus selected-cue bulk offsets and explicit
+copy/paste mappings. Use audio time and stable cue/track IDs. Counts retain their
+anchor kind; do not transfer timing to a different recording by matching its title.
+Integrate recovery and undo first. Validate all changes before applying them; no
+silent out-of-range cues or publication changes.
+
+Waveform/phrase snapping is a separate extension after measuring whether capture
+and batch operations suffice. If approved, use an established library with local,
+bounded peak generation, offline support and compatible licensing. Do not retain
+whole-class decoded PCM or claim an estimated downbeat is instructor-verified.
+
+**U2 - Ergonomics:** observe the complete Create, Revise and Teach paths in person.
+Fix concrete friction in cue selection, collapsed filler access, setup discovery,
+contrast and touch targets. Preserve a quiet Class Mode with stable controls and
+unobstructed Now/Next information. Verify phone/tablet portrait and landscape;
+avoid adding permanent controls for every possible future feature.
+
+### Increment 3 And Deferred Work
+
+**B1:** propose a versioned block model for warm-up, work/rest, rounds, side changes
+and cooldown, with optional equipment/modification notes. Define both song-bound
+and fixed-seconds timing. Existing interval cues are single markers, not this
+sequencer. Preserve legacy routines; require shared schema, API validation, export,
+offline and runtime review before writing a migration. Fixed-seconds work must
+remain fixed through any future tempo variant; pause and deliberate holds freeze
+the approved exercise clock consistently.
+
+**B2:** only after B1, design explicit session-only shortening/skipping and choices
+among already-prepared alternatives. Saved choreography and publications remain
+unchanged. Show projected routine finish only when computable; indefinite walk-in
+and announcement holds must not produce invented exact finish times. Section
+repeats/loops remain outside the initial pilot and require a separate decision.
+
+**F1:** defer pitch-preserving tempo variants/BPM bridges, advanced waveform/phrase
+tools, template sharing, substitute handoff refinements, external remotes,
+lock-screen controls and one-way Plex import until demand and feasibility justify
+them. Plex remains snapshot import, never synchronization. Shared templates should
+exclude audio by default; importing a song does not establish public-performance
+rights. No multi-studio/public-signup architecture, marketplace, social feed,
+wearable integration or broad AI workout generation is proposed for the next release.
+
+### Ownership And Verification
+
+| Owner | Proposed Responsibility |
+| --- | --- |
+| Horton/lead | Scope, shared contracts, recovery schemas, integration and approval gates |
+| Fonda | Readiness, authoring, recovery/undo UI and device-layout refinements |
+| Simmons | Audio checkpoints, offline storage, timing, media preparation and runtime tests |
+| Pilates | Revision/role enforcement and any explicitly approved API/history changes |
+| Wicks | Release diagnostics, reviewed artifacts, live verification and cost checks |
+| Michaels | Independent read-only review of timing, recovery, privacy and release risks |
+| User/pilot instructors | Real-device acceptance, workflow observations and priority decisions |
+
+Ownership assignments are planning boundaries, not permission to launch agents.
+Shared contracts are agreed first; parallel work, if later authorized, remains
+file-disjoint. Reuse existing tests and helpers; run a focused falsifying check
+after each substantive edit, then the required integration gates. Use synthetic
+media in public artifacts/tests. Device evidence and live authenticated acceptance
+are separate from desktop simulations. No telemetry or private class traces are
+uploaded without explicit consent.
+
+Pilot targets, not current claims: 20 complete classes across agreed devices with
+zero app-caused stops or lost edits; documented recovery for every interruption
+scenario; and measured reductions in authoring time and in-class navigation versus
+the observed baseline. Record failures, not just aggregate pass counts. A native
+decision or larger budget requires a separate proposal with measured justification.
+
+### Decisions Requested Before Implementation
+
+1. Approve Increment0 and Increment1 design only, or identify a different first scope.
+2. Confirm the primary devices/speakers and whether screen-locked/background
+	 playback is a requirement or foreground-only teaching is acceptable for the pilot.
+3. Confirm automatic local draft recovery with explicit household Save/Publish,
+	 and agree its retention/quota behavior before the storage schema is changed.
+4. Confirm the proposed manual session-recovery choices and behavior during fades/holds.
+5. Keep intervals, run-only improvisation, advanced DSP, external controls and
+	 broader sharing deferred until a separate scope review.
+
+**Approval record:** user approved the first two summarized items and commit/push/
+deployment. Recovery uses explicit independent copies,64 records/4MiB total,
+256KiB per record, no silent expiration; undo has50 entries/1MiB per direction.
+Readiness and protection are implemented and under acceptance testing. P1 hardware
+confirmation and physical results remain open. R3/A3/U2/B1/B2/F1 are deferred.
+
 ## September 15 Workflow Revision
 
-This section is the current proposed UI/product plan. It supersedes conflicting
-historical milestone and hosting statements below; the earlier implementation
-already uses SWA Free, custom server accounts and private Blob storage. This is
-not a deployment announcement or permission to buy additional infrastructure.
-The user requested current workflow instructions and a separate review before a
-more natural workflow is implemented. See [current instructions](user-guide.md)
-and [independent review](workflow-review.md).
+Historical planning snapshot. Many changes below are now implemented; earlier
+Stop, cue-editing and deployment statements are not the current operating rules.
+Use the September16 review plan above for the unfinished backlog, the
+[user guide](user-guide.md) for current controls, and [contracts](contracts.md)
+for implemented interfaces. The [independent review](workflow-review.md) records
+the findings that motivated this work, not a fresh release certification.
 
 ### Findings To Resolve First
 

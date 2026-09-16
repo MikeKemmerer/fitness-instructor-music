@@ -18,6 +18,23 @@ these changes; it is historical, not the current operating guide.
 
 ## Before You Begin
 
+- On Teach, **Class readiness** summarizes the prepared routine and its walk-in,
+   announcement and walk-out phases. A changed draft/selection needs Prepare again.
+   Use **Test sound**, then **Stop sound test**, to check your actual speaker at a
+   sensible volume. Sound testing is blocked while class music is playing. Speaker
+   and power checkboxes are your confirmation, not automatic hardware detection.
+- Routines, playlists and class setups now have **Undo edit / Redo edit**. Undo
+   changes authoring content, not a playing class or server history. After Save,
+   undo produces an unsaved edit; use explicit Save again when ready.
+- **Routines > Recoverable drafts** lists this device's acknowledged recovery
+   copies. **Restore as new draft** never overwrites the original routine. Save
+   the recovered draft explicitly; discard old copies only after reviewing them.
+   Recovery survives ordinary reload/expiry, but sign-out/account switching purges
+   it. It is not backup protection against clearing browser storage or device loss.
+- Recovery copies are saved after a short typing debounce; wait for **Recovery up
+   to date on this device** before closing. Limits are64 copies,256KiB each and4MiB
+   total, with no automatic expiration. A full/blocked store reports failure rather
+   than deleting your work. Explicitly saved cloud drafts remain independent.
 - Owners and editors can author household drafts; playback-only accounts use published routines.
 - A routine on this device and a household routine are different save destinations.
    Open the intended library row before editing, and check the displayed destination.

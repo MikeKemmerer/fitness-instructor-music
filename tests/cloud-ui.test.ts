@@ -12,6 +12,7 @@ import { createClassLibrary, parseCloudPlaylist } from '../frontend/src/class-li
 import type { ClassSetup, CloudMusicPlaylist } from '../shared/class-plan';
 
 const appMocks = vi.hoisted(() => ({
+  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), getCloudRoutine: vi.fn(), getTrackBlob: vi.fn(),
   cacheCloudRoutine: vi.fn(), cacheCloudTrack: vi.fn(), saveRoutine: vi.fn(), setActiveRoutine: vi.fn(),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), filler: vi.fn(),
@@ -1807,6 +1808,12 @@ class AppNode extends EventTarget {
     super(); this.tag = tag; this.className = className; this.textContent = textContent; appNodes.push(this);
   }
   append(...children: AppNode[]) { this.children.push(...children); }
+  after(...children: AppNode[]) {
+    const parent = appNodes.find(node => node.children.includes(this));
+    if (!parent) return;
+    const next = parent.children[parent.children.indexOf(this) + 1] ?? null;
+    for (const child of children) parent.insertBefore(child, next);
+  }
   insertBefore(child: AppNode, next: AppNode | null) {
     const index = next ? this.children.indexOf(next) : this.children.length;
     this.children.splice(index < 0 ? this.children.length : index, 0, child); return child;

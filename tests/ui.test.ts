@@ -31,6 +31,7 @@ describe('cue time text', () => {
 });
 
 const mocks = vi.hoisted(() => ({
+  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), setActiveRoutine: vi.fn(), saveRoutine: vi.fn(),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), renderEditor: vi.fn(),
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
@@ -1465,6 +1466,7 @@ describe('real IndexedDB filler cancellation', () => {
 describe('class panel saved references and local actions', () => {
   beforeEach(() => {
     vi.resetAllMocks(); nodes.length = 0; stubDocument(); vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('window', new EventTarget());
     mocks.listMusicPlaylists.mockResolvedValue([]); mocks.listClassSetups.mockResolvedValue([]); mocks.listRoutines.mockResolvedValue([]);
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -2305,8 +2307,8 @@ describe('UI persistence and transport wiring', () => {
     button(t('prepare')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     button(t('startClass')).click();
-    const listener = vi.mocked(window.addEventListener).mock.calls.find(call => call[0] === 'pagehide')![1] as (event: PageTransitionEvent) => void;
-    listener({ persisted: true } as PageTransitionEvent);
+    const listeners = vi.mocked(window.addEventListener).mock.calls.filter(call => call[0] === 'pagehide').map(call => call[1] as (event: PageTransitionEvent) => void);
+    for (const listener of listeners) listener({ persisted: true } as PageTransitionEvent);
     expect(nodes.some(node => node.classList.contains('class-mode'))).toBe(false);
     expect(mocks.player.pause).toHaveBeenCalledOnce();
     expect(mocks.preview.stop).toHaveBeenCalled();
@@ -2315,9 +2317,9 @@ describe('UI persistence and transport wiring', () => {
 
   it('cancels jobs and releases preview resources on page teardown', async () => {
     await open();
-    const listener = vi.mocked(window.addEventListener).mock.calls.find(call => call[0] === 'pagehide')![1] as (event: PageTransitionEvent) => void;
+    const listeners = vi.mocked(window.addEventListener).mock.calls.filter(call => call[0] === 'pagehide').map(call => call[1] as (event: PageTransitionEvent) => void);
     mocks.editorSession.dispose.mockClear();
-    listener({ persisted: false } as PageTransitionEvent);
+    for (const listener of listeners) listener({ persisted: false } as PageTransitionEvent);
     expect(mocks.editorSession.cancelJobs).toHaveBeenCalled();
     expect(mocks.editorSession.dispose).toHaveBeenCalledOnce();
     expect(mocks.preview.dispose).toHaveBeenCalledOnce();

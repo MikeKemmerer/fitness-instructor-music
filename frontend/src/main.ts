@@ -21,6 +21,7 @@ import { captureCloudIdentity, getCloudContext, getCloudRole, refreshCloudSessio
 import { createCloudLibrary, routineRecordings, type CloudTransfer } from './cloud-library';
 import { createClassLibrary, type ClassSelection } from './class-library';
 import { createClassPanel } from './class-panel';
+import { createDraftProtection, createRecoveryPanel } from './draft-protection';
 import type { ClassAudio, ClassPhase } from '../../shared/class-plan';
 import { formatCueTime, parseCueTime } from './cue-time';
 import { canEditCloudDraft, cloudErrorMessage, cloudStatusMessage, confirmCloudNavigation,
@@ -50,6 +51,8 @@ let draft = newRoutine();
 draft.name = t('newName');
 draft.filler.sound = 'lofi';
 let loaded: Routine | null = null;
+let preparedAudio: ClassAudio | undefined;
+let preparedName = '';
 let persistedRevision: number | null = null;
 let savedRoutines: Routine[] = [];
 let dirty = false;
@@ -97,7 +100,9 @@ const transportOperation = createTransportOperation(() => {
   if (preparation && !preparation.current()) preparation.controller.abort();
   renderPlayback();
 }, error => notify(hostedPilot ? cloudErrorMessage(error) : errorMessage(error), true));
-const audioPreview = createAudioPreview(() => transportOperation.cancel(() => player.pause()));
+const audioPreview = createAudioPreview(() => {
+  if (transportOperation.pending || ['playing', 'filler'].includes(state?.status)) transportOperation.cancel(() => player.pause());
+});
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const shell = element('div', 'app-shell');
@@ -669,7 +674,7 @@ panels.teach.append(routineHeading, snapshotStatus, empty, rehearsal);
 const classMode = createClassMode(shell, exitClass,
   () => (startClass.disabled ? tabButtons.get('teach')! : startClass).focus({ preventScroll: true }), active => {
   cancelCueDrag();
-  for (const node of [header, navigation, routineHeading, snapshotStatus, sidebar, cueSheet, footer]) node.hidden = active;
+  for (const node of [header, navigation, routineHeading, snapshotStatus, sidebar, cueSheet, footer, readyPanel]) node.hidden = active;
   cloudPanel.hidden = active || !hostedPilot;
   classToolbar.hidden = !active;
   empty.hidden = active || !!(loaded ?? draft).tracks.length;
@@ -898,6 +903,64 @@ const replaceTarget = field(t('cloudReplace'), cloudSelect);
 overflowActions.insertBefore(replaceTarget, cloudReplace);
 routineLibrary.append(libraryFilters, versionFilters, routineRows);
 panels.edit.append(editorHeading, routineLibrary, cloudPanel, draftIdentity, editorActions, exportPanel.element, validation, editor);
+
+const protection = createDraftProtection({
+  editable: () => !appDisposed && !editorBusy && !transportOperation.pending && canEdit() && !draft.locked && !shell.classList.contains('class-mode'),
+  apply: value => {
+    if (!('filler' in value)) return;
+    stopEditorAudio(); draft = value; dirty = true; draftGeneration++; refreshDraft(true);
+  },
+});
+editorActions.append(protection.element);
+const recoveries = createRecoveryPanel({
+  allowed: () => !appDisposed && !editorBusy && !transportOperation.pending && !shell.classList.contains('class-mode')
+    && (!hostedPilot || ['owner', 'editor'].includes(getCloudRole() ?? '')),
+  message: notify,
+  restore: async record => {
+    if (record.kind !== 'routine') { await classPanel?.restoreRecovery(record); return; }
+    await runEditor(async () => {
+      if (!('filler' in record.value) || (dirty && !confirm(t('confirmSwitch', { name: draft.name })))) return;
+      const assertIdentity = hostedPilot ? captureCloudIdentity() : () => {};
+      assertIdentity(); clearCloudSelection();
+      draft = { ...structuredClone(record.value), id: crypto.randomUUID(), name: t('recoveryCopy', { name: record.value.name }), revision: 1, locked: false, published: false };
+      persistedRevision = null; dirty = true; draftGeneration++; refreshDraft(true); selectTab('edit');
+    });
+  },
+});
+panels.edit.insertBefore(recoveries.element, draftIdentity);
+
+const readyPanel = element('section', 'settings-section readiness');
+readyPanel.setAttribute('aria-label', t('readiness'));
+const readyIdentity = element('p');
+const readyState = element('p'); readyState.setAttribute('role', 'status');
+const readyQueue = element('dl');
+const readySound = iconButton(t('soundCheck'), Play, () => {
+  if (!loaded || editorBusy || transportOperation.pending || shell.classList.contains('class-mode') || ['playing', 'filler'].includes(state.status)) return;
+  void audioPreview.playFiller({ ...newRoutine().filler, mode: 'timed', seconds: 8, sound: 'soft', gain: 0.3 })
+    .catch(error => notify(errorMessage(error), true));
+}, true);
+const stopSound = iconButton(t('stopSoundCheck'), Square, () => audioPreview.stop());
+readyPanel.append(element('h2', '', t('readiness')), readyIdentity, readyState, readyQueue, readySound, stopSound);
+for (const label of ['speakerCheck', 'powerCheck'] as const) {
+  const checkbox = element('input'); checkbox.type = 'checkbox';
+  readyPanel.append(field(t(label), checkbox));
+}
+panels.teach.insertBefore(readyPanel, rehearsal);
+
+function renderReadiness() {
+  readyIdentity.textContent = loaded ? `${preparedName} / ${loaded.name} / ${loaded.revision}` : draft.name;
+  const changed = !!loaded && (preparedClassKey !== classKey() || (!selectedClass && contentFingerprint(draft) !== contentFingerprint(loaded)));
+  readyState.textContent = !loaded ? t('preparePrompt') : changed ? t('readinessChanged') : t('verifiedLocal');
+  readyQueue.replaceChildren();
+  for (const [label, value] of [
+    ['phaseWalkIn', preparedAudio?.walkIn?.tracks.length ? preparedAudio.walkIn.name : undefined],
+    ['beforeAnnouncement', preparedAudio?.before?.recording?.name ?? preparedAudio?.before?.sound],
+    ['routine', loaded?.name],
+    ['afterAnnouncement', preparedAudio?.after?.recording?.name ?? preparedAudio?.after?.sound],
+    ['phaseWalkOut', preparedAudio?.walkOut?.tracks.length ? preparedAudio.walkOut.name : undefined],
+  ] as const) readyQueue.append(element('dt', '', t(label)), element('dd', '', value ?? t('notQueued')));
+  readyPanel.hidden = shell.classList.contains('class-mode');
+}
 
 const settingsHeading = element('div', 'section-heading');
 settingsHeading.append(element('h1', '', t('settings')));
@@ -1137,6 +1200,9 @@ async function prepareRoutine(current: () => boolean): Promise<void> {
     else await player.load(snapshot);
     if (!current()) return;
     loaded = snapshot;
+    preparedAudio = classAudio;
+    preparedName = selectedClass?.setup.name ?? snapshot.name;
+    for (const checkbox of readyPanel.querySelectorAll<HTMLInputElement>('input')) checkbox.checked = false;
     preparedCloudBase = selectionKey(); preparedClassKey = requestedClass;
     preparedSourceFingerprint = contentFingerprint(snapshot);
     cueEditing = false; selectedCueId = ''; cueTimeInvalid = false;
@@ -1150,6 +1216,9 @@ async function prepareRoutine(current: () => boolean): Promise<void> {
 
 function refreshDraft(structural: boolean): void {
   if (appDisposed) return;
+  protection.observe({ kind: 'routine', source: cloudSelection ? 'household' : 'local', value: draft,
+    baseRevision: persistedRevision, media: cloudEnvelope?.media ?? {} }, dirty, !structural);
+  renderReadiness();
   cancelCueDrag();
   validationErrors = validateRoutine(draft);
   if (hasInvalidCueTimes(draft)) validationErrors.push(t('invalidCueTime'));
@@ -1255,6 +1324,10 @@ function syncAvailability(): void {
   classMusic.disabled = editorClassMusic.disabled = busy;
   for (const button of routineRows.querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy;
   classPanel?.sync();
+  protection.sync();
+  recoveries.element.hidden = !author;
+  readyPanel.hidden = shell.classList.contains('class-mode');
+  readySound.disabled = !loaded || busy || ['playing', 'filler'].includes(state?.status);
   prepare.setAttribute('aria-busy', String(transportOperation.pending));
   startClass.hidden = !loaded;
   startClass.disabled = !loaded || editorBusy || transportOperation.pending;
@@ -1687,6 +1760,8 @@ function disposeApp(): void {
   if (appDisposed) return;
   cancelCueDrag();
   appDisposed = true;
+  protection.dispose();
+  recoveries.dispose();
   classPanel?.dispose();
   fillerLibrary.dispose();
   exportPanel.dispose();
