@@ -217,7 +217,7 @@ async function login(page: Page, username = 'owner') {
   await page.getByLabel('Username', { exact: true }).fill(username);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await browserExpect(page.locator('.local-status')).toHaveText('HOUSEHOLD');
+  await browserExpect(page.locator('.local-status')).toHaveText('CLOUD');
 }
 async function demo(page: Page) {
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
@@ -230,7 +230,7 @@ async function ready(page: Page) {
   await page.waitForFunction(async () => (await navigator.serviceWorker.getRegistration())?.active?.state === 'activated');
   await page.reload();
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  await browserExpect(page.locator('.local-status')).toHaveText('HOUSEHOLD');
+  await browserExpect(page.locator('.local-status')).toHaveText('CLOUD');
 }
 const progress = async (page: Page) => Number(await page.getByRole('progressbar', { name: 'Track progress', exact: true }).getAttribute('aria-valuenow'));
 async function play(page: Page) {
@@ -300,10 +300,10 @@ async function upload(page: Page) {
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   const actions = page.locator('.routine-overflow');
   if (!await actions.evaluate(node => (node as HTMLDetailsElement).open)) await actions.locator(':scope > summary').click();
-  const share = page.getByRole('button', { name: 'Share to Household', exact: true });
+  const share = page.getByRole('button', { name: 'Share to Cloud', exact: true });
   if (await share.isVisible()) await share.click();
-  else await page.getByRole('button', { name: 'Save to Household', exact: true }).click();
-  await browserExpect(page.locator('.notice [role="status"]')).toHaveText('Saved to Household.');
+  else await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
+  await browserExpect(page.locator('.notice [role="status"]')).toHaveText('Saved to Cloud.');
 }
 
 function fillerWav(): Buffer {
@@ -397,9 +397,10 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     expire();
     const denied = page.waitForResponse(response => response.url().endsWith('/api/auth/session') && response.status() === 401);
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await page.getByRole('button', { name: 'Refresh household', exact: true }).click();
+    await page.getByRole('button', { name: 'Refresh cloud', exact: true }).click();
     await denied;
     await browserExpect(page.locator('.cloud-status')).toContainText('Cloud sign-in required');
+    await browserExpect(page.getByRole('link', { name: 'Sign in', exact: true })).toBeVisible();
     await page.getByRole('tab', { name: 'Teach', exact: true }).click();
     await browserExpect.poll(() => progress(page)).toBeGreaterThan(elapsed + 1);
     await browserExpect(page.locator('.class-clock')).not.toHaveText(clock!);
@@ -423,9 +424,20 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
   test('household Practice cue Save keeps the current prepared revision paused without autoplay or media downloads', () => withHosted(async ({ page, calls }) => {
     page.on('dialog', dialog => dialog.accept());
     await login(page, 'editor'); await demo(page); await upload(page);
-    await page.reload();
+    const beforeLogin = calls.length;
+    await login(page, 'editor');
+    const routineSelect = page.locator('select[aria-label="Cloud routines"]');
+    await browserExpect(routineSelect.locator('option')).toHaveCount(2);
+    await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+    await browserExpect(page.getByRole('link', { name: 'Sign in', exact: true })).toBeHidden();
+    await browserExpect(page.locator('.routine-library-row').filter({ hasText: 'Two-song practice' })).toBeVisible();
+    expect(await routineSelect.locator('option').allTextContents()).toEqual(expect.arrayContaining([expect.stringContaining('Two-song practice')]));
+    const afterLogin = calls.slice(beforeLogin);
+    expect(afterLogin.filter(call => call.path === '/api/auth/login' && call.method === 'POST')).toHaveLength(1);
+    expect(afterLogin.filter(call => call.path === '/api/routines' && call.method === 'GET')).toHaveLength(1);
+    expect(afterLogin.some(call => call.path.startsWith('/api/media/'))).toBe(false);
     await page.getByRole('tab', { name: 'Teach', exact: true }).click();
-    await page.getByRole('button', { name: 'Open household draft', exact: true }).click();
+    await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
     await page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true }).click();
     await page.getByRole('button', { name: 'Play', exact: true }).click();
     await browserExpect.poll(() => progress(page)).toBeGreaterThan(0);
@@ -438,8 +450,8 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const original = await timing.inputValue();
     await page.getByRole('button', { name: 'Move cue later', exact: true }).click();
     await browserExpect(timing).not.toHaveValue(original);
-    await page.getByRole('button', { name: 'Save to Household', exact: true }).click();
-    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to Household.');
+    await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
+    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to Cloud.');
     await browserExpect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible();
     await browserExpect(seek).toHaveAttribute('aria-valuenow', position!);
     await browserExpect(page.locator('.snapshot-status')).toHaveText('Prepared on this device');
@@ -460,13 +472,21 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await panel.getByRole('button', { name: 'New music playlist', exact: true }).click();
     await panel.getByLabel('Playlist name', { exact: true }).fill('Shared lobby');
     await panel.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
-    await panel.getByRole('button', { name: 'Save Shared lobby to Household', exact: true }).click();
+    await panel.getByRole('button', { name: 'Save Shared lobby to Cloud', exact: true }).click();
     await browserExpect(page.locator('.notice [role=status]')).toHaveText('Library draft saved.');
-    await panel.getByRole('button', { name: 'New class setup', exact: true }).click();
-    await panel.getByLabel('Class setup name', { exact: true }).fill('Draft setup');
-    await panel.getByRole('combobox', { name: 'Walk-in (repeat playlist)', exact: true }).selectOption({ index: 1 });
-    await panel.getByRole('button', { name: 'Save Draft setup to Household', exact: true }).click();
-    await browserExpect(panel.getByRole('button', { name: 'Select class setup', exact: true })).toBeEnabled();
+    const sequence = page.getByRole('region', { name: 'Class sequence', exact: true });
+    await sequence.getByRole('checkbox', { name: 'Walk-in music', exact: true }).check();
+    const arrival = page.getByRole('region', { name: 'Walk-in music', exact: true });
+    await browserExpect(arrival.getByRole('combobox', { name: 'Music playlist', exact: true }).locator('option')).toHaveCount(2);
+    await arrival.getByRole('combobox', { name: 'Music playlist', exact: true }).selectOption({ label: 'Shared lobby / 1 / Draft' });
+    await sequence.getByRole('checkbox', { name: 'Pre-routine filler', exact: true }).check();
+    await sequence.getByRole('checkbox', { name: 'Post-routine filler', exact: true }).check();
+    await sequence.getByRole('textbox', { name: 'Class setup name', exact: true }).fill('Draft setup');
+    const beforeSave = calls.length;
+    await sequence.getByRole('button', { name: 'Save class setup', exact: true }).click();
+    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Class setup saved and selected. Prepare to use these changes.');
+    expect(calls.slice(beforeSave).filter(call => call.path === '/api/classes' && call.method === 'POST' && call.status === 201)).toHaveLength(1);
+    expect(calls.slice(beforeSave).some(call => call.path.startsWith('/api/media/') && call.method !== 'GET')).toBe(false);
     const coldContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
     try {
       const cold = await coldContext.newPage(); await login(cold, 'editor');
@@ -486,7 +506,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const routineActions = page.locator('.editor-actions > .routine-overflow');
     if (!await routineActions.evaluate(node => (node as HTMLDetailsElement).open)) await routineActions.locator(':scope > summary').click();
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Published to Household.');
+    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Published to Cloud.');
     await panel.getByRole('button', { name: 'Open Shared lobby', exact: true }).click();
     await panel.locator('.routine-overflow > summary').click();
     await panel.getByRole('button', { name: 'Publish Shared lobby', exact: true }).click();
@@ -499,17 +519,17 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
         .find(value => value && JSON.parse(value).published));
       expect(value).toBeTruthy(); await select.selectOption(value!);
     }
-    await panel.getByRole('button', { name: 'Save Published setup to Household', exact: true }).click();
+    await panel.getByRole('button', { name: 'Save Published setup to Cloud', exact: true }).click();
     await browserExpect(panel.getByRole('button', { name: 'Select class setup', exact: true })).toBeEnabled();
     await panel.locator('.routine-overflow > summary').click();
     await panel.getByRole('button', { name: 'Publish Published setup', exact: true }).click();
     await browserExpect(page.locator('.notice [role=status]')).toHaveText('Library draft saved.');
-    await page.getByRole('button', { name: 'Open household draft', exact: true }).click();
+    await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
     await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Later routine head');
-    await page.getByRole('button', { name: 'Save to Household', exact: true }).click();
-    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to Household.');
+    await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
+    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to Cloud.');
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Published to Household.');
+    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Published to Cloud.');
     const playerContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
     try {
       const device = await playerContext.newPage(); await login(device, 'player');
@@ -518,6 +538,9 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       await library.getByRole('button', { name: 'Open Published setup', exact: true }).click();
       await browserExpect(library.getByRole('button', { name: /New |Save |Delete |Publish / })).toHaveCount(0);
       await library.getByRole('button', { name: 'Select class setup', exact: true }).click();
+      const sequence = device.getByRole('region', { name: 'Class sequence', exact: true });
+      await browserExpect(sequence.getByRole('checkbox', { name: 'Walk-in music', exact: true })).toBeChecked();
+      await browserExpect(sequence.getByRole('checkbox', { name: 'Pre-routine filler', exact: true })).toBeDisabled();
       const start = calls.length;
       await device.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true }).click();
       await browserExpect(device.locator('.playing-title')).toHaveText('Lobby.wav');
@@ -562,7 +585,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await duplicate.dispatchEvent('click');
     await browserExpect(timing).toHaveValue('1:60');
     await browserExpect(cue.getByRole('textbox', { name: 'Move / note', exact: true })).toHaveValue(originalNote);
-    await browserExpect(page.getByRole('button', { name: 'Save to Household', exact: true })).toBeDisabled();
+    await browserExpect(page.getByRole('button', { name: 'Save to Cloud', exact: true })).toBeDisabled();
     expect(calls.filter(call => call.method !== 'GET')).toHaveLength(writesBefore);
     await timing.fill(originalTime); await timing.press('Tab');
     await page.locator('.analysis-details > summary').first().click();
@@ -571,7 +594,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await upload(page);
     expect(calls.filter(call => call.path.startsWith('/api/routines/') && call.method === 'PUT' && call.status === 200)).toHaveLength(1);
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.locator('.notice [role="status"]')).toHaveText('Published to Household.');
+    await browserExpect(page.locator('.notice [role="status"]')).toHaveText('Published to Cloud.');
     const transferStart = calls.length;
     const device = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
     const player = await device.newPage();
@@ -581,10 +604,10 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect(player.getByRole('tab', { name: 'Routines', exact: true })).toBeVisible();
     await browserExpect(player.locator('#panel-teach .cloud-panel')).toHaveCount(0);
     await player.getByRole('tab', { name: 'Routines', exact: true }).click();
-    for (const label of ['Save to Household', 'Save on this device', 'Update existing household routine', 'Open household draft', 'Publish saved routine', 'Delete household routine', 'Import audio']) {
+    for (const label of ['Save to Cloud', 'Save on this device', 'Update existing cloud routine', 'Open cloud draft', 'Publish saved routine', 'Delete cloud routine', 'Import audio']) {
       await browserExpect(player.getByRole('button', { name: label, exact: true })).toBeHidden();
     }
-    await player.getByRole('button', { name: 'Refresh household', exact: true }).click();
+    await player.getByRole('button', { name: 'Refresh cloud', exact: true }).click();
     const routines = player.locator('.routine-library-rows');
     await browserExpect(routines.locator('.routine-library-row')).toHaveCount(1);
     await routines.getByRole('button', { name: 'Open Two-song practice', exact: true }).click();
@@ -641,8 +664,8 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.getByRole('tab', { name: 'Settings', exact: true }).click();
     const library = page.getByRole('region', { name: 'Filler library', exact: true });
     await library.getByLabel('Recording audio file', { exact: true }).setInputFiles({ name: 'UserFiller.wav', mimeType: 'audio/wav', buffer: fillerWav() });
-    await library.getByRole('button', { name: 'Upload recording to Household', exact: true }).click();
-    await browserExpect(library.locator('.filler-library-feedback')).toHaveText('Recording saved to the Household filler library.');
+    await library.getByRole('button', { name: 'Upload recording to Cloud', exact: true }).click();
+    await browserExpect(library.locator('.filler-library-feedback')).toHaveText('Recording saved to the Cloud filler library.');
     const recording = (await (await page.request.get('/api/fillers')).json()).fillers[0] as FillerRecording;
     await screenshot(page, 'filler-settings');
 
@@ -724,11 +747,11 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await library(page).getByLabel('Recording audio file', { exact: true }).setInputFiles({ name: 'UserFiller.wav', mimeType: 'audio/wav', buffer: wav });
     const writesBefore = calls.filter(call => call.method === 'POST').length;
     page.once('dialog', dialog => dialog.dismiss());
-    await library(page).getByRole('button', { name: 'Upload recording to Household', exact: true }).click();
+    await library(page).getByRole('button', { name: 'Upload recording to Cloud', exact: true }).click();
     expect(calls.filter(call => call.method === 'POST')).toHaveLength(writesBefore);
     page.once('dialog', async dialog => { expect(dialog.message()).toContain('UserFiller'); await dialog.accept(); });
-    await library(page).getByRole('button', { name: 'Upload recording to Household', exact: true }).click();
-    await browserExpect(library(page).locator('.filler-library-feedback')).toHaveText('Recording saved to the Household filler library.');
+    await library(page).getByRole('button', { name: 'Upload recording to Cloud', exact: true }).click();
+    await browserExpect(library(page).locator('.filler-library-feedback')).toHaveText('Recording saved to the Cloud filler library.');
     const catalog = await (await page.request.get('/api/fillers')).json();
     const recording = catalog.fillers[0] as { id: string; name: string; duration: number; asset: { id: string } };
     expect(recording).toMatchObject({ name: 'UserFiller', duration: 1 });
@@ -762,7 +785,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     page.on('dialog', dialog => dialog.accept());
     await upload(page);
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.locator('.notice [role="status"]')).toHaveText('Published to Household.');
+    await browserExpect(page.locator('.notice [role="status"]')).toHaveText('Published to Cloud.');
     await play(page);
     await page.getByRole('button', { name: 'Hold', exact: true }).click();
     await page.getByRole('slider', { name: 'Seek current song', exact: true }).press('End');
@@ -790,7 +813,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await player.getByRole('tab', { name: 'Settings', exact: true }).click();
     await browserExpect(library(player)).toBeHidden();
     await player.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await player.getByRole('button', { name: 'Refresh household', exact: true }).click();
+    await player.getByRole('button', { name: 'Refresh cloud', exact: true }).click();
     const publication = (await (await page.request.get('/api/routines?published=true')).json()).routines[0] as { id: string; revision: number };
     const publicationId = publication.id;
     await player.locator('.routine-library-rows').getByRole('button', { name: 'Open Two-song practice', exact: true }).click();

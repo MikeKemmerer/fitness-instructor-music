@@ -132,7 +132,7 @@ export function createRecoveryPanel(options: {
       rows.replaceChildren();
       for (const record of records) {
         const row = element('div', 'routine-library-row');
-        row.append(element('span', '', `${record.value.name} / ${record.source} / ${new Date(record.updatedAt).toLocaleString()}`));
+        row.append(element('span', '', `${record.value.name} / ${t(record.source === 'household' ? 'householdDestination' : 'localDestination')} / ${new Date(record.updatedAt).toLocaleString()}`));
         const restore = iconButton(t('restoreCopy'), Copy, () => {
           if (!options.allowed() || disposed) return;
           restore.disabled = true;

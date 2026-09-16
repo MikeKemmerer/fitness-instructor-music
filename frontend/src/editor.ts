@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Check, GripVertical, Pause, Play, Plus, ScanLine, Square, Trash2, ChevronsRight, Minus, Hand } from 'lucide';
-import { cueSeconds, reorderTrack, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import { cueSeconds, reorderTrack, transitionAfter, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { AudioPreview, BpmEstimate, LoudnessEstimate, PreviewState } from '../../shared/preview-contract';
 import { formatCueTime, parseCueTime } from './cue-time';
 import { formatNumber, formatTime, t } from './i18n';
@@ -16,6 +16,8 @@ interface EditorContext {
   canEdit?: () => boolean;
   fillerRecordings?: () => FillerRecording[];
   previewFiller?: (filler: Filler) => Promise<void>;
+  beforeTracks?: HTMLElement;
+  afterTracks?: HTMLElement;
 }
 
 export interface EditorSession {
@@ -265,6 +267,12 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     });
     remove.classList.add('danger');
     tools.append(up, down, remove);
+    const afterStatus = element('div', 'after-track-status');
+    afterStatus.id = `after-track-${track.id}`;
+    afterStatus.dataset.afterTrackId = track.id;
+    const afterLabel = element('strong');
+    const afterDescription = element('span', 'muted');
+    afterStatus.append(afterLabel, afterDescription);
     const afterButton = iconButton(t('afterTrack', { name: track.title }), ChevronsRight, () => {
       if (!trackEditable()) return;
       const original = JSON.stringify(track.after);
@@ -297,6 +305,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
           const invalid = controls.querySelector<HTMLInputElement>(':invalid'); invalid?.reportValidity(); return;
         }
         mutate(() => { if (!rule) delete track.after; else track.after = rule.mode === 'none' ? rule : { mode: 'custom', filler: customFiller, crossfade: fade }; });
+        syncAfterStatus();
         close();
       }, true));
       dialog.append(actions); form.append(dialog); syncRule(); dialog.showModal();
@@ -304,7 +313,32 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     });
     afterButton.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); });
     afterButton.append(element('span', '', t('filler')));
-    refreshers.push(() => { afterButton.disabled = !trackEditable(); });
+    afterButton.classList.toggle('icon-button', false);
+    afterButton.classList.add('after-track-button');
+    const syncAfterStatus = () => {
+      const position = routine.tracks.indexOf(track);
+      const custom = track.after?.mode === 'custom';
+      const { filler, crossfade } = transitionAfter(routine, position);
+      const active = custom && position >= 0 && filler.mode !== 'none' && (filler.mode === 'hold' || filler.seconds > 0);
+      afterStatus.hidden = track.after === undefined || position < 0;
+      afterStatus.classList.toggle('active', active);
+      afterButton.classList.toggle('custom-filler-active', active);
+      afterButton.disabled = !trackEditable();
+      if (afterStatus.hidden) { afterButton.removeAttribute('aria-describedby'); return; }
+      afterButton.setAttribute('aria-describedby', afterStatus.id);
+      const label = t(active ? 'customGapActive' : custom && position === routine.tracks.length - 1 ? 'customGapInactive' : 'customGapDisabled', { name: track.title });
+      if (afterLabel.textContent !== label) afterLabel.textContent = label;
+      afterDescription.hidden = !active;
+      if (active) {
+        const description = t('customGapDetails', {
+          sound: filler.sound === 'recording' ? filler.recording?.name ?? t('customFillers') : t(filler.sound),
+          mode: filler.mode === 'hold' ? t('openHold') : t('exportSeconds', { seconds: formatNumber(filler.seconds) }),
+          gain: formatNumber((filler.gain ?? 1) * 100), fade: formatNumber(crossfade),
+        });
+        if (afterDescription.textContent !== description) afterDescription.textContent = description;
+      }
+    };
+    refreshers.push(syncAfterStatus);
     summary.append(afterButton);
     const grid = element('div', 'field-grid');
     const rows = new Map<string, { row: HTMLDivElement; note: HTMLTextAreaElement; update: () => void }>();
@@ -650,7 +684,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     trackFields.append(tools, grid, analysis, cueList);
     body.append(auditionControls, trackFields);
     details.append(body);
-    trackList.append(details);
+    trackList.append(details, afterStatus);
   });
   const transitions = element('section', 'editor-section');
   transitions.append(element('h2', '', t('transitions')));
@@ -753,7 +787,10 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
   const alertFields = content(t('alerts'));
   alertFields.append(beepFields);
   beeps.append(alertFields);
-  form.append(tracks, transitions, beeps, auditionError);
+  if (context.beforeTracks) form.append(context.beforeTracks);
+  form.append(tracks);
+  if (context.afterTracks) form.append(context.afterTracks);
+  form.append(transitions, beeps, auditionError);
   host.insertBefore(form, reorderReport);
   const sync = (state: PreviewState) => {
     if (disposed) return;

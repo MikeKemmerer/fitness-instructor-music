@@ -16,6 +16,13 @@ function contrast(first: string, second: string): number {
 }
 
 describe('local appearance', () => {
+  it('uses Cloud for Azure storage labels without renaming translation keys', () => {
+    expect(t('householdDestination')).toBe('Cloud');
+    expect(t('householdFilter')).toBe('Cloud');
+    expect(t('cloudSave')).toBe('Save to Cloud');
+    expect(t('cloudRoutines')).toBe('Cloud routines');
+    expect(t('uploadFiller')).toBe('Upload recording to Cloud');
+  });
   it('uses OS mode only until a valid explicit preference exists', () => {
     expect(parsePreferences(null, true).mode).toBe('dark');
     expect(parsePreferences('{"mode":"light"}', true).mode).toBe('light');

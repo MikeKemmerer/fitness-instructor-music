@@ -1829,7 +1829,8 @@ class AppNode extends EventTarget {
   focus() {}
 }
 
-async function bootCloudApp(options: { role?: CloudSession['user']['role']; local?: boolean; cached?: boolean } = {}) {
+async function bootCloudApp(options: { role?: CloudSession['user']['role']; local?: boolean; cached?: boolean;
+  access?: 'offline' | 'signin-required'; earlyEdit?: boolean } = {}) {
   vi.resetModules();
   vi.clearAllMocks();
   appNodes.length = 0;
@@ -1857,6 +1858,8 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   const cached = new Map<string, Routine>();
   if (options.cached) cached.set(data.envelope.routine.id, structuredClone(data.envelope.routine));
   appMocks.getRoutine.mockResolvedValue(options.local ? structuredClone(data.envelope.routine) : null);
+  const localStartup = pending<Routine | null>();
+  if (options.earlyEdit) appMocks.getRoutine.mockReturnValueOnce(localStartup.promise);
   appMocks.listRoutines.mockResolvedValue(options.local ? [structuredClone(data.envelope.routine)] : []);
   appMocks.listFillerRecordings.mockResolvedValue([]);
   appMocks.getFillerRecordingBlob.mockResolvedValue(undefined);
@@ -1912,8 +1915,10 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   });
   vi.stubGlobal('fetch', fetcher);
   const { cloudClient } = await import('../frontend/src/cloud-client');
-  cloudClient.admitSession(account);
+  if (options.access) cloudClient.admitLocal(account.user, options.access, () => {});
+  else cloudClient.admitSession(account);
   await import('../frontend/src/main');
+  if (options.earlyEdit) { button(t('edit')).click(); localStartup.resolve(null); }
   await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
   return { server, fetcher, data, store, navigate, cached, platform };
 }
@@ -1943,6 +1948,60 @@ async function openCloudRoutine(): Promise<void> {
 }
 
 describe('main hosted orchestration with synthetic DOM and player', () => {
+  it.each(['owner', 'editor', 'player'] as const)('loads household routines at startup using the admitted %s session without another sign-in', async role => {
+    const app = await bootCloudApp({ role });
+    const path = role === 'player' ? '/api/routines?published=true' : '/api/routines';
+    expect(app.fetcher.mock.calls.filter(([url]) => url === path)).toHaveLength(1);
+    expect(app.fetcher.mock.calls.some(([url]) => url === '/api/auth/session')).toBe(false);
+    const selector = appNodes.find(node => node.tag === 'select' && node.attributes.get('aria-label') === t('cloudRoutines'))!;
+    expect(selector.children.some(option => option.value === 'routine-a')).toBe(true);
+    const signin = appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!;
+    expect(signin.hidden).toBe(true);
+    signin.dispatchEvent(new Event('click', { cancelable: true }));
+    expect(app.navigate).not.toHaveBeenCalled();
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.cacheCloudTrack).not.toHaveBeenCalled();
+    button(t('edit')).click();
+    expect(app.fetcher.mock.calls.filter(([url]) => url === path)).toHaveLength(1);
+    expect(button(t('householdFilter')).disabled).toBe(false);
+    expect(button(t(role === 'player' ? 'cloudPublications' : 'cloudDrafts')).disabled).toBe(false);
+  });
+
+  it('shows reauthentication only after expiry, not while offline or forbidden, without stopping prepared audio', async () => {
+    const app = await bootCloudApp({ local: true });
+    await cloudClick(t('prepare')); button(t('play')).click();
+    const signin = appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!;
+    const { cloudClient } = await import('../frontend/src/cloud-client');
+    cloudClient.admitLocal(session().user, 'offline', () => {});
+    expect(signin.hidden).toBe(true);
+    app.server.authStatus = 403;
+    await cloudClick(t('cloudRefresh'));
+    expect(signin.hidden).toBe(true);
+    app.server.authStatus = 401;
+    await cloudClick(t('cloudRefresh'));
+    expect(signin.hidden).toBe(false);
+    expect(app.navigate).not.toHaveBeenCalled();
+    expect(appMocks.player.stop).not.toHaveBeenCalled();
+    expect(appMocks.player.pause).not.toHaveBeenCalled();
+    expect(appMocks.player.dispose).not.toHaveBeenCalled();
+  });
+
+  it('loads the household list even when Routines is opened before local startup finishes', async () => {
+    const app = await bootCloudApp({ earlyEdit: true });
+    expect(app.fetcher.mock.calls.filter(([path]) => path === '/api/routines')).toHaveLength(1);
+    expect(appNodes.find(node => node.className === 'edit-panel')!.hidden).toBe(false);
+    expect(appNodes.filter(node => node.tag === 'select').some(node => node.children.some(option => option.value === 'routine-a'))).toBe(true);
+  });
+
+  it.each(['offline', 'signin-required'] as const)('keeps cached %s startup network-free and does not load or start playback', async access => {
+    const app = await bootCloudApp({ role: 'player', cached: true, access });
+    expect(app.fetcher).not.toHaveBeenCalled();
+    expect(appMocks.editor.routine!.id).toBe('routine-a');
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!.hidden).toBe(access !== 'signin-required');
+  });
+
   it.each(['owner', 'editor'] as const)('manages the household filler catalog as %s only in Settings, with explicit consent and retained class audio', async role => {
     const app = await bootCloudApp({ role, local: true });
     const local: FillerRecording = { id: 'local-recording', name: 'My loop', duration: 8,
@@ -2134,6 +2193,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each(['owner', 'editor', 'player'] as const)('downloads a cold selected recording before all readiness checks and loading for %s', async role => {
     const app = await bootCloudApp({ role, local: role !== 'player', cached: role === 'player' });
+    const startupRequests = app.fetcher.mock.calls.length;
     const recording = { id: 'known-filler', name: 'Loop', duration: 8, asset: app.data.asset };
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording', recording };
     let cached = false;
@@ -2141,7 +2201,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     appMocks.getReadiness.mockImplementation(async () => ({ ready: cached, missing: cached ? [] : ['filler-asset-a'] }));
     await cloudClick(t('prepare'));
     const suffix = role === 'player' ? '?routineId=routine-a&revision=1' : '';
-    expect(app.fetcher.mock.calls.map(([path]) => path)).toEqual([`/api/media/asset-a${suffix}`, `/api/media/asset-a/chunks/0${suffix}`]);
+    expect(app.fetcher.mock.calls.slice(startupRequests).map(([path]) => path)).toEqual([`/api/media/asset-a${suffix}`, `/api/media/asset-a/chunks/0${suffix}`]);
     expect(appMocks.cacheFillerRecording).toHaveBeenCalledWith(recording, expect.any(Blob));
     expect(appMocks.cacheFillerRecording.mock.invocationCallOrder[0]).toBeLessThan(appMocks.getReadiness.mock.invocationCallOrder.at(-1)!);
     expect(appMocks.getReadiness.mock.invocationCallOrder.at(-1)).toBeLessThan(appMocks.player.load.mock.invocationCallOrder[0]!);
@@ -2170,13 +2230,14 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each(['stop', 'pause', 'draft', 'identity', 'new-prepare'] as const)('fences a late cold filler response after %s', async interruption => {
     const app = await bootCloudApp({ local: true });
+    const startupRequests = app.fetcher.mock.calls.length;
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording',
       recording: { id: 'known-filler', name: 'Loop', duration: 8, asset: app.data.asset } };
     const download = pending<Response>();
     const handler = app.fetcher.getMockImplementation()!;
     app.fetcher.mockImplementation((path, init) => String(path).includes('/chunks/') ? download.promise : handler(path, init));
     button(t('prepare')).click();
-    await vi.waitFor(() => expect(app.fetcher).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(app.fetcher).toHaveBeenCalledTimes(startupRequests + 2));
     if (interruption === 'identity') (await import('../frontend/src/cloud-client')).cloudClient.admitSession(session('editor', 'other'));
     else if (interruption === 'draft') appMocks.editor.routine!.name = 'Changed draft';
     else button(t(interruption === 'pause' ? 'pause' : 'stop')).click();
@@ -2189,7 +2250,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.cacheFillerRecording).not.toHaveBeenCalled();
     expect(appMocks.player.load).toHaveBeenCalledTimes(interruption === 'new-prepare' ? 1 : 0);
     if (interruption === 'new-prepare') expect(appMocks.player.load.mock.calls[0]![0].filler.mode).toBe('none');
-    if (['stop', 'pause', 'new-prepare'].includes(interruption)) expect(app.fetcher.mock.calls[1]![1]!.signal!.aborted).toBe(true);
+    if (['stop', 'pause', 'new-prepare'].includes(interruption)) expect(app.fetcher.mock.calls[startupRequests + 1]![1]!.signal!.aborted).toBe(true);
   });
 
   it('keeps explicit refresh and 401 from disposing, stopping or reloading a prepared playing snapshot', async () => {
@@ -2324,7 +2385,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it('never uploads existing local songs on startup, refresh or cancelled explicit upload', async () => {
     const app = await bootCloudApp({ local: true });
-    expect(app.fetcher).not.toHaveBeenCalled();
+    expect(app.fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([['/api/routines', 'GET']]);
     await cloudClick(t('cloudRefresh'));
     vi.mocked(confirm).mockReturnValue(false);
     await cloudClick(t('shareRoutine'));
@@ -2345,7 +2406,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.setActiveRoutine).toHaveBeenCalledExactlyOnceWith(saved.id);
     expect(appMocks.editor.routine).toEqual(saved);
     expect(app.store.getItem(hostedCloudSelectionKey)).toBeNull();
-    expect(app.fetcher).not.toHaveBeenCalled();
+    expect(app.fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([['/api/routines', 'GET']]);
     expect(appMocks.cacheCloudRoutine).not.toHaveBeenCalled();
     expect(appMocks.player.load).not.toHaveBeenCalled();
     expect(appMocks.player.dispose).not.toHaveBeenCalled();
@@ -2400,7 +2461,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
   });
 
   it('restores an exact cached publication without fetching and prepares after expiry only when readiness passes', async () => {
-    const app = await bootCloudApp({ role: 'player', cached: true });
+    const app = await bootCloudApp({ role: 'player', cached: true, access: 'signin-required' });
     expect(app.fetcher).not.toHaveBeenCalled();
     expect(appMocks.editor.routine!.id).toBe('routine-a');
     expect(appMocks.editor.canEdit!()).toBe(false);
@@ -2430,7 +2491,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
   });
 
   it('does not dispose or navigate when sign-in confirmation is cancelled', async () => {
-    const app = await bootCloudApp();
+    const app = await bootCloudApp({ access: 'signin-required' });
     const link = appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!;
     vi.mocked(confirm).mockReturnValue(false);
     link.click();

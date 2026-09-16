@@ -21,6 +21,7 @@ import { captureCloudIdentity, getCloudContext, getCloudRole, refreshCloudSessio
 import { createCloudLibrary, routineRecordings, type CloudTransfer } from './cloud-library';
 import { createClassLibrary, type ClassSelection } from './class-library';
 import { createClassPanel } from './class-panel';
+import { createClassComposition } from './class-composition';
 import { createDraftProtection, createRecoveryPanel } from './draft-protection';
 import type { ClassAudio, ClassPhase } from '../../shared/class-plan';
 import { formatCueTime, parseCueTime } from './cue-time';
@@ -67,6 +68,7 @@ let preparedClassKey = '';
 let preparedSourceFingerprint = '';
 let shareMode: 'create' | 'replace' = 'create';
 let classPanel: ReturnType<typeof createClassPanel> | undefined;
+let composition: ReturnType<typeof createClassComposition> | undefined;
 const classLibrary = createClassLibrary();
 const selectionKey = () => JSON.stringify(cloudSelection ? [cloudSelection.id, cloudSelection.revision, cloudSelection.published, !!cloudSelection.cached, cloudEnvelope?.media] : null);
 const classKey = () => JSON.stringify(selectedClass);
@@ -184,7 +186,7 @@ function selectTab(tab: typeof activeTab): void {
   editorSession?.syncAvailability();
   fillerLibrary.sync();
   if (previous !== tab && (tab === 'settings' || tab === 'edit')) void fillerLibrary.refresh();
-  if (previous !== tab && tab === 'edit' && hostedPilot && !cloudRoutines.length && getCloudContext().access === 'online') void runCloud(refreshHousehold);
+  if (previous !== tab && tab === 'edit' && hostedPilot && !cloudRoutines.length && getCloudContext().access === 'online') void runCloud(loadHousehold);
   syncPracticeControls();
 }
 
@@ -321,6 +323,10 @@ function renderCloudList(): void {
 
 async function refreshHousehold(transfer: CloudTransfer): Promise<void> {
   await refreshCloudSession();
+  await loadHousehold(transfer);
+}
+
+async function loadHousehold(transfer: CloudTransfer): Promise<void> {
   if (transfer.signal?.aborted || appDisposed) throw new CloudRequestError('cancelled');
   cloudRoutines = await cloudLibrary.list(cloudMode.value === 'published', transfer);
   if (transfer.signal?.aborted || appDisposed) throw new CloudRequestError('cancelled');
@@ -399,6 +405,7 @@ const cloudSignIn = element('a', 'button', t('cloudSignIn'));
 cloudSignIn.href = '/signin.html';
 cloudSignIn.addEventListener('click', event => {
   event.preventDefault();
+  if (getCloudContext().access !== 'signin-required') return;
   confirmCloudNavigation(() => confirm(t('cloudConfirmSignin')), () => disposeApp(), () => window.location.assign(cloudSignIn.href));
 });
 const cloudControls = element('div', 'cloud-controls');
@@ -413,6 +420,7 @@ function syncCloudControls(): void {
   const mutable = ['owner', 'editor'].includes(context.user?.role ?? '');
   const busy = editorBusy || transportOperation.pending;
   cloudStatus.textContent = cloudStatusMessage(context);
+  cloudSignIn.hidden = context.access !== 'signin-required';
   cloudRefresh.disabled = busy;
   cloudMode.disabled = busy || !mutable;
   cloudSelect.disabled = busy || !cloudRoutines.length;
@@ -1016,8 +1024,9 @@ const fillerLibrary = createFillerLibrary({ hosted: hostedPilot, cloud: cloudLib
 classPanel = createClassPanel({ hosted: hostedPilot, draft: () => draft,
   currentSelection: () => selectedClass,
   routineMedia: () => cloudEnvelope?.routine.id === draft.id ? cloudEnvelope.media : {},
-  busy: () => editorBusy || transportOperation.pending || shell.classList.contains('class-mode'), recordings: fillerLibrary.choices,
+  busy: () => editorBusy || transportOperation.pending || !!composition?.working() || shell.classList.contains('class-mode'), recordings: fillerLibrary.choices,
   message: notify, selected: selection => {
+    if (composition && !composition.discard()) return;
     selectedClass = selection;
     try { rememberClassSelection(localStorage, hostedPilot ? getCloudContext().user : null, selection); }
     catch { notify(t('activeSelectionFailure'), true); }
@@ -1026,6 +1035,20 @@ classPanel = createClassPanel({ hosted: hostedPilot, draft: () => draft,
   },
 });
 panels.edit.append(classPanel.element);
+composition = createClassComposition({
+  hosted: hostedPilot, routine: () => draft, routineSaved: () => persistedRevision !== null && !dirty,
+  source: () => cloudSelection ? 'household' : 'local', selection: () => selectedClass,
+  busy: () => editorBusy || transportOperation.pending || shell.classList.contains('class-mode'),
+  recordings: fillerLibrary.choices, message: notify, managePlaylists: openClassMusic,
+  changed: () => syncAvailability(),
+  select: selection => {
+    selectedClass = selection;
+    try { rememberClassSelection(localStorage, hostedPilot ? getCloudContext().user : null, selection); }
+    catch { notify(t('activeSelectionFailure'), true); }
+    refreshDraft(false);
+  },
+});
+editorActions.after(composition.controls);
 const editorClassMusic = iconButton(t('classMusic'), ListMusic, openClassMusic, true);
 editorPrepare.after(editorClassMusic);
 const storage = element('section', 'settings-section');
@@ -1122,6 +1145,7 @@ async function persistDraft(action: 'save' | 'lock' | 'unlock'): Promise<void> {
 }
 
 async function prepareRoutine(current: () => boolean): Promise<void> {
+  if (composition?.pending()) throw new Error(t('saveClassBeforePrepare'));
   if (!selectedClass) {
     assertValid();
     if (!draft.tracks.length) throw new Error(t('noTracksError'));
@@ -1235,6 +1259,7 @@ function refreshDraft(structural: boolean): void {
     editorSession = renderEditor(editor, draft, (structure = false) => { dirty = true; draftGeneration++; refreshDraft(structure); }, {
       preview: audioPreview, detectBpm: detectTrackBpm, analyzeLoudness: analyzeTrackLoudness,
       fillerRecordings: fillerLibrary.choices, previewFiller: fillerLibrary.audition,
+      beforeTracks: composition?.beforeTracks, afterTracks: composition?.afterTracks,
       isBusy: () => editorBusy || transportOperation.pending || shell.classList.contains('class-mode'), canEdit,
       isCurrent: () => !appDisposed && draft === editingDraft && activeTab === 'edit',
     });
@@ -1318,19 +1343,21 @@ function syncAvailability(): void {
     duplicate.disabled = true;
   }
   routineSelect.disabled = busy || savedRoutines.length === 0;
-  prepare.disabled = busy || (!selectedClass && (!draft.tracks.length || validationErrors.length > 0));
+  prepare.disabled = busy || !!composition?.pending() || (!selectedClass && (!draft.tracks.length || validationErrors.length > 0));
   prepare.disabled ||= hostedPilot && getCloudRole() === 'player' && !(selectedClass?.setup.published ?? cloudSelection?.published);
   editorPrepare.disabled = prepare.disabled;
   classMusic.disabled = editorClassMusic.disabled = busy;
   for (const button of routineRows.querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy;
+  for (const button of [...sourceButtons.values(), ...versionButtons.values()]) button.disabled = busy;
   classPanel?.sync();
+  composition?.sync();
   protection.sync();
   recoveries.element.hidden = !author;
   readyPanel.hidden = shell.classList.contains('class-mode');
   readySound.disabled = !loaded || busy || ['playing', 'filler'].includes(state?.status);
   prepare.setAttribute('aria-busy', String(transportOperation.pending));
   startClass.hidden = !loaded;
-  startClass.disabled = !loaded || editorBusy || transportOperation.pending;
+  startClass.disabled = !loaded || editorBusy || transportOperation.pending || !!composition?.pending();
   const lockLabel = t(draft.locked ? 'unlock' : 'lock');
   if (lock.title !== lockLabel) {
     setButtonIcon(lock, draft.locked ? UnlockKeyhole : LockKeyhole);
@@ -1738,10 +1765,14 @@ void (async () => {
       } else notify(t('classCacheUnavailable'), true);
     }
   } catch (error) { notify(errorMessage(error), true); }
-  finally { editorBusy = false; syncAvailability(); }
+  finally {
+    editorBusy = false;
+    syncAvailability();
+    if (hostedPilot && !appDisposed && getCloudContext().access === 'online') void runCloud(loadHousehold);
+  }
 })();
 function onBeforeUnload(event: BeforeUnloadEvent): void {
-  if (dirty || classPanel?.hasUnsaved() || (loaded && ['playing', 'filler', 'paused'].includes(state.status))) event.preventDefault();
+  if (dirty || classPanel?.hasUnsaved() || composition?.hasUnsaved() || (loaded && ['playing', 'filler', 'paused'].includes(state.status))) event.preventDefault();
 }
 window.addEventListener('beforeunload', onBeforeUnload);
 window.addEventListener('blur', cancelCueDrag);
@@ -1763,6 +1794,7 @@ function disposeApp(): void {
   protection.dispose();
   recoveries.dispose();
   classPanel?.dispose();
+  composition?.dispose();
   fillerLibrary.dispose();
   exportPanel.dispose();
   cloudController?.abort();

@@ -1,5 +1,26 @@
 # Initial Rehearsal Contract
 
+## Inline Class Sequence Editor
+
+The September16 follow-up exposes four enable checkboxes below the routine import
+actions. Configuration slots render walk-in, before, routine track order, after,
+walk-out in chronological order. The underlying ClassSetup, MusicPlaylist and
+exact revision references are unchanged; no routine schema or API migration.
+Enabling an unselected playlist creates an incomplete UI draft, never a fake
+reference or silently omitted phase. Save class setup persists and selects via
+existing local/cloud CAS APIs, distinct from routine Save. Pending changes block
+new preparation/entry but not transport on the already-loaded class.
+
+Disabled choices are retained only in the editing session and omitted from the
+saved setup. Existing locked/published setups cannot be changed through these
+controls. New setups use the current routine's source and must reference a saved
+routine; adopting a newer routine revision is explicit. Selector refresh retrieves
+metadata only, with invocation-bound identity and cancellation guards. Changing
+setup selection must not discard an unsaved inline draft without confirmation.
+The library remains available to create/manage independent playlists and publish
+setups. App-controlled inline save cannot mutate another editor's active draft or
+the prepared player snapshot.
+
 ## Ready And Protected Follow-up
 
 User approved release-test repairs and the first two summarized roadmap items:
