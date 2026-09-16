@@ -31,5 +31,5 @@
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
     "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
   },
-  "mimeTypes": { ".wav": "audio/wav", ".ttf": "font/ttf", ".webmanifest": "application/manifest+json", ".wasm": "application/wasm", ".gz": "application/gzip" }
+  "mimeTypes": { ".wav": "audio/wav", ".ttf": "font/ttf", ".webmanifest": "application/manifest+json", ".wasm": "application/wasm", ".gz": "application/gzip", ".tar.gz": "application/gzip" }
 }

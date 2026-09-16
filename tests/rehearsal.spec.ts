@@ -620,6 +620,74 @@ test('independent local playlist and class setup prepare silently and require ex
   await page.getByRole('button', { name: 'Stop', exact: true }).click();
 });
 
+test('inline phase checkboxes configure the class in chronological order and persist distinct playlists', async ({ page }, testInfo) => {
+  page.on('dialog', dialog => dialog.accept());
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await demo(page);
+  const sequence = page.getByRole('region', { name: 'Class sequence', exact: true });
+  await expect(sequence.getByRole('checkbox')).toHaveCount(4);
+  expect(await sequence.evaluate(node => node.previousElementSibling?.classList.contains('editor-actions'))).toBe(true);
+  for (const checkbox of await sequence.getByRole('checkbox').all()) await expect(checkbox).not.toBeChecked();
+  await sequence.getByRole('checkbox', { name: 'Walk-in music', exact: true }).check();
+  await expect(page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true })).toBeDisabled();
+  const arrival = page.getByRole('region', { name: 'Walk-in music', exact: true });
+  await arrival.getByRole('button', { name: 'Manage music playlists', exact: true }).click();
+  const library = page.locator('.class-library');
+  for (const title of ['Arrival playlist', 'Departure playlist']) {
+    await library.getByRole('button', { name: 'New music playlist', exact: true }).click();
+    await library.getByLabel('Playlist name', { exact: true }).fill(title);
+    await library.locator('input[type=file]').setInputFiles({ name: `${title}.wav`, mimeType: 'audio/wav', buffer: syntheticWav(3) });
+    await library.getByRole('button', { name: `Save ${title} to This device`, exact: true }).click();
+    await expect(page.locator('.notice [role=status]')).toHaveText('Library draft saved.');
+  }
+  await library.locator(':scope > summary').click();
+  await arrival.getByRole('button', { name: 'Refresh playlists', exact: true }).click();
+  const arrivalChoice = arrival.getByRole('combobox', { name: 'Music playlist', exact: true });
+  await expect(arrivalChoice.locator('option')).toHaveCount(3);
+  await arrivalChoice.selectOption({ label: 'Arrival playlist / 1 / Draft' });
+  for (const label of ['Pre-routine filler', 'Post-routine filler', 'Walk-out music']) {
+    await sequence.getByRole('checkbox', { name: label, exact: true }).check();
+  }
+  const departure = page.getByRole('region', { name: 'Walk-out music', exact: true });
+  await departure.getByRole('combobox', { name: 'Music playlist', exact: true }).selectOption({ label: 'Departure playlist / 1 / Draft' });
+  const before = page.getByRole('region', { name: 'Pre-routine filler', exact: true });
+  const after = page.getByRole('region', { name: 'Post-routine filler', exact: true });
+  await before.getByRole('combobox', { name: 'Filler sound', exact: true }).selectOption('soft');
+  await after.getByRole('combobox', { name: 'Filler sound', exact: true }).selectOption('drums');
+  await sequence.getByRole('checkbox', { name: 'Pre-routine filler', exact: true }).uncheck();
+  await expect(before).toHaveCount(0);
+  await sequence.getByRole('checkbox', { name: 'Pre-routine filler', exact: true }).check();
+  await expect(before.getByRole('combobox', { name: 'Filler sound', exact: true })).toHaveValue('soft');
+  expect(await page.locator('.class-phase-config, .track-list').evaluateAll(nodes => nodes.map(node =>
+    node.getAttribute('data-class-phase') ?? 'routine'))).toEqual(['walkIn', 'before', 'routine', 'after', 'walkOut']);
+  await sequence.getByRole('textbox', { name: 'Class setup name', exact: true }).fill('Inline morning class');
+  await sequence.getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
+  await sequence.getByRole('button', { name: 'Save class setup', exact: true }).click();
+  await expect(page.locator('.notice [role=status]')).toHaveText('Class setup saved and selected. Prepare to use these changes.');
+  for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport); await sequence.scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`class-sequence-${viewport.width}.png`), fullPage: true });
+  }
+  await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  for (const checkbox of await sequence.getByRole('checkbox').all()) await expect(checkbox).toBeChecked();
+  await page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Start class', exact: true })).toBeEnabled({ timeout: 30000 });
+  await expect(page.locator('.playing-title')).toHaveText('Arrival playlist.wav');
+  await page.getByRole('button', { name: 'Start class', exact: true }).click();
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0');
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await page.getByRole('button', { name: 'Start Announcements', exact: true }).click();
+  await page.getByRole('button', { name: 'Start Routine', exact: true }).click();
+  await page.getByRole('button', { name: 'Next track', exact: true }).click();
+  await page.getByRole('button', { name: 'Next track', exact: true }).click();
+  await page.getByRole('button', { name: 'Start Walk-out', exact: true }).click();
+  await expect(page.locator('.playing-title')).toHaveText('Departure playlist.wav');
+  await expect(page.locator('.app-shell')).toHaveClass(/class-mode/);
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  expect(errors).toEqual([]);
+});
+
 test('full class workflow uses saved references, silent practice and real audio phases offline', async ({ page, context }, testInfo) => {
   page.on('dialog', dialog => dialog.accept());
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
@@ -761,6 +829,47 @@ test('full class workflow uses saved references, silent practice and real audio 
   await page.screenshot({ path: testInfo.outputPath('class-finished-mobile.png') });
 });
 
+test('custom filler summary follows its track while collapsed, reordered and reloaded', async ({ page }, testInfo) => {
+  await demo(page);
+  const first = page.locator('details[data-track-id]').first();
+  const id = await first.getAttribute('data-track-id');
+  const title = await first.locator('.track-title').textContent();
+  await first.locator(':scope > summary').click();
+  await first.getByRole('button', { name: `After ${title}`, exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('combobox', { name: 'After-track rule', exact: true }).selectOption('custom');
+  await dialog.getByRole('combobox', { name: 'Filler mode', exact: true }).selectOption('hold');
+  await dialog.getByRole('combobox', { name: 'Filler sound', exact: true }).selectOption('drums');
+  await dialog.getByRole('button', { name: 'Apply', exact: true }).click();
+  const indicator = page.locator(`[data-after-track-id="${id}"]`);
+  await expect(first).not.toHaveAttribute('open');
+  await expect(indicator).toBeVisible();
+  await expect(indicator).toHaveClass(/active/);
+  await expect(indicator).toContainText(`Custom filler after ${title}`);
+  await expect(indicator).toContainText('Synthetic drums / Until Continue');
+  await expect(page.locator(`details[data-track-id="${id}"] + .after-track-status`)).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await indicator.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('custom-filler-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await indicator.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('custom-filler-mobile.png') });
+  await first.getByRole('button', { name: `Reorder ${title}`, exact: true }).press('ArrowDown');
+  await expect(indicator).toContainText('inactive on the last track');
+  await expect(indicator).not.toHaveClass(/active/);
+  await page.locator(`details[data-track-id="${id}"]`).getByRole('button', { name: `Reorder ${title}`, exact: true }).press('ArrowUp');
+  await expect(indicator).toHaveClass(/active/);
+  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.reload();
+  await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  await expect(indicator).toContainText('Synthetic drums / Until Continue');
+  await page.locator(`details[data-track-id="${id}"]`).getByRole('button', { name: `After ${title}`, exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'After-track rule', exact: true }).selectOption('inherit');
+  await dialog.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect(indicator).toBeHidden();
+});
+
 test('Settings disables demo loading persistently without deleting existing routines', async ({ page }) => {
   await demo(page);
   const saved = await savedTracks(page);
@@ -786,6 +895,49 @@ test('Settings disables demo loading persistently without deleting existing rout
   await expect(loadDemo).toBeVisible();
   await expect(loadDemo).toBeEnabled();
   expect((await savedTracks(page)).routines).toEqual(saved.routines);
+});
+
+test('readiness, undo and recovered drafts preserve the saved routine and prepared class', async ({ page }, testInfo) => {
+  page.on('dialog', dialog => dialog.accept());
+  await demo(page);
+  const original = (await savedTracks(page)).routines[0]!;
+  const name = page.getByRole('textbox', { name: 'Routine name', exact: true });
+  await name.fill('Recover my routine'); await name.press('Tab');
+  await page.locator('.draft-protection').first().getByRole('button', { name: 'Undo edit', exact: true }).click();
+  await expect(name).toHaveValue(original.name);
+  await page.locator('.draft-protection').first().getByRole('button', { name: 'Redo edit', exact: true }).click();
+  await expect(name).toHaveValue('Recover my routine');
+  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  const saved = (await savedTracks(page)).routines[0]!;
+  await page.locator('.draft-protection').first().getByRole('button', { name: 'Undo edit', exact: true }).click();
+  await expect(name).toHaveValue(original.name);
+  expect((await savedTracks(page)).routines[0]!.revision).toBe(saved.revision);
+  await name.fill('Unsaved recovered routine'); await name.press('Tab');
+  await expect(page.locator('.draft-protection').first()).toContainText('Recovery up to date');
+  await page.reload();
+  await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  const recovery = page.locator('.recovery-library');
+  await recovery.locator(':scope > summary').click();
+  const row = recovery.locator('.routine-library-row').filter({ hasText: 'Unsaved recovered routine' });
+  await row.getByRole('button', { name: 'Restore as new draft', exact: true }).click();
+  await expect(name).toHaveValue('Unsaved recovered routine (recovered)');
+  expect((await savedTracks(page)).routines[0]).toEqual(saved);
+  await page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Start class', exact: true })).toBeEnabled({ timeout: 30000 });
+  const readiness = page.getByRole('region', { name: 'Class readiness', exact: true });
+  await expect(readiness).toContainText('Audio verified on this device');
+  await readiness.getByRole('button', { name: 'Test sound', exact: true }).click();
+  await readiness.getByRole('button', { name: 'Stop sound test', exact: true }).click();
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0');
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(readiness.getByRole('button', { name: 'Test sound', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await readiness.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('readiness-mobile.png') });
+  await page.getByRole('button', { name: 'Start class', exact: true }).click();
+  await expect(readiness).toBeHidden();
 });
 
 test('desktop practice keeps typed cue times during playback and saves repeated edits', async ({ page }) => {
@@ -830,6 +982,43 @@ test('Stop and Previous retain the current track in Practice and Class Mode', as
     await expect(page.locator('.playing-title')).toHaveText('Synthetic tonal warm-up');
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
   }
+});
+
+test('playlist and class authoring recover independent copies with undo after save', async ({ page }) => {
+  page.on('dialog', dialog => dialog.accept());
+  await demo(page);
+  await page.getByRole('button', { name: 'Walk-in / walk-out music', exact: true }).click();
+  const library = page.locator('.class-library');
+  await library.getByRole('button', { name: 'New music playlist', exact: true }).click();
+  const playlistName = library.getByLabel('Playlist name', { exact: true });
+  await playlistName.fill('Arrival'); await playlistName.press('Tab');
+  await library.getByRole('button', { name: 'Save Arrival to This device', exact: true }).click();
+  await library.getByRole('button', { name: 'Undo edit', exact: true }).click();
+  await expect(playlistName).toHaveValue('New music playlist');
+  await library.getByRole('button', { name: 'Redo edit', exact: true }).click();
+  await expect(playlistName).toHaveValue('Arrival');
+  await playlistName.fill('Arrival recovered'); await playlistName.press('Tab');
+  await expect(library.locator('.draft-protection')).toContainText('Recovery up to date');
+  await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  const recovery = page.locator('.recovery-library');
+  await recovery.locator(':scope > summary').click();
+  await recovery.locator('.routine-library-row').filter({ hasText: 'Arrival recovered' })
+    .getByRole('button', { name: 'Restore as new draft', exact: true }).click();
+  await expect(playlistName).toHaveValue('Arrival recovered (recovered)');
+  await library.getByRole('button', { name: 'Save Arrival recovered (recovered) to This device', exact: true }).click();
+  await library.getByRole('button', { name: 'New class setup', exact: true }).click();
+  const setupName = library.getByLabel('Class setup name', { exact: true });
+  await setupName.fill('Morning'); await setupName.press('Tab');
+  await library.getByRole('button', { name: 'Save Morning to This device', exact: true }).click();
+  await setupName.fill('Morning recovered'); await setupName.press('Tab');
+  await expect(library.locator('.draft-protection')).toContainText('Recovery up to date');
+  await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  await recovery.locator(':scope > summary').click();
+  await recovery.locator('.routine-library-row').filter({ hasText: 'Morning recovered' })
+    .getByRole('button', { name: 'Restore as new draft', exact: true }).click();
+  await expect(setupName).toHaveValue('Morning recovered (recovered)');
+  await library.getByRole('button', { name: 'Save Morning recovered (recovered) to This device', exact: true }).click();
+  await expect(library.getByRole('button', { name: 'Select class setup', exact: true })).toBeEnabled();
 });
 
 test('practice seeks and drags cue timing without changing class mode', async ({ page }) => {
@@ -1001,7 +1190,7 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   await page.goto('/');
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await expect(page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true })).toBeEnabled();
-  expect(await page.evaluate(async () => (await indexedDB.databases()).find(database => database.name === 'fitness-rehearsal')?.version)).toBe(5);
+  expect(await page.evaluate(async () => (await indexedDB.databases()).find(database => database.name === 'fitness-rehearsal')?.version)).toBe(6);
   await context.setOffline(true);
   await page.reload();
   const failures: string[] = [];

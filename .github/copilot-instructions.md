@@ -7,6 +7,9 @@ Private household barre-class PWA. Public source; never public household music.
 - Never copy local-media into frontend/public, dist, images, CI artifacts or GitHub releases.
 - No Azure provisioning, production deployment, commits, pushes or PR merges without the lead's authorized gate.
 - Node 22.12+, TypeScript, Vite, Vitest, Playwright. Plain DOM UI, no framework required.
+- This workstation is resource-limited: do not start or restore local preview/dev servers for this project. Use Azure for the interactive handoff.
+- Use serial, memory-bounded build/type checks. Do not run browser suites that launch local servers here without explicit approval; use prior verified evidence or remote CI and disclose validation limits.
+- Deployment helpers must not restore or restart a local preview after uploading. Preserve local media and browser data when stopping existing preview processes.
 - Use audio time for playback and fixed-seconds exercise clocks; never accumulate UI interval ticks.
 - User text is text, never HTML. Runtime tokens/secrets never in localStorage or logs.
 - Routine locks must be enforced in API mutations, not only UI controls.

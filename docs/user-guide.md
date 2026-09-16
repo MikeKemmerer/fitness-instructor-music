@@ -1,7 +1,9 @@
 # Fitness Music Player: Current Workflows
 
 Status: September 15, 2026. This guide describes the current source checkout.
-The class-control visibility and Stop/Previous follow-up has not been deployed.
+Cloud wording, automatic list loading, after-track indicators and inline class
+sequence controls are included in this source. Use the Azure app and check its
+footer build timestamp for the installed release; no local preview is required.
 Existing media and account data are not migrated by these instructions.
 The earlier [workflow review](workflow-review.md) records the problems that led to
 these changes; it is historical, not the current operating guide.
@@ -12,18 +14,38 @@ these changes; it is historical, not the current operating guide.
    choose default or per-song filler > Save to the displayed destination.
 2. **Fine-tune:** open an unlocked draft > Prepare for Practice / Teach > Edit cue
    times > select a cue and type, nudge or drag its time > Save.
-3. **Teach the whole class:** Walk-in / walk-out music > create distinct playlists >
-   save/select a class setup > Prepare for Practice / Teach > Start class > Play.
+3. **Teach the whole class:** Routines > Class sequence checkboxes > choose playlists
+   and filler > Save class setup > Prepare for Practice / Teach > Start class > Play.
    Operate every phase from Class Mode; no library navigation is needed during class.
 
 ## Before You Begin
 
-- Owners and editors can author household drafts; playback-only accounts use published routines.
-- A routine on this device and a household routine are different save destinations.
+- On Teach, **Class readiness** summarizes the prepared routine and its walk-in,
+   announcement and walk-out phases. A changed draft/selection needs Prepare again.
+   Use **Test sound**, then **Stop sound test**, to check your actual speaker at a
+   sensible volume. Sound testing is blocked while class music is playing. Speaker
+   and power checkboxes are your confirmation, not automatic hardware detection.
+- Routines, playlists and class setups now have **Undo edit / Redo edit**. Undo
+   changes authoring content, not a playing class or server history. After Save,
+   undo produces an unsaved edit; use explicit Save again when ready.
+- **Routines > Recoverable drafts** lists this device's acknowledged recovery
+   copies. **Restore as new draft** never overwrites the original routine. Save
+   the recovered draft explicitly; discard old copies only after reviewing them.
+   Recovery survives ordinary reload/expiry, but sign-out/account switching purges
+   it. It is not backup protection against clearing browser storage or device loss.
+- Recovery copies are saved after a short typing debounce; wait for **Recovery up
+   to date on this device** before closing. Limits are64 copies,256KiB each and4MiB
+   total, with no automatic expiration. A full/blocked store reports failure rather
+   than deleting your work. Explicitly saved cloud drafts remain independent.
+- Owners and editors can author cloud drafts; playback-only accounts use published routines.
+- One sign-in applies throughout the app. Cloud routine metadata loads after
+   startup; opening a row selects and downloads its audio. Sign in appears only
+   when authentication is required, not while connected or merely offline.
+- A routine on this device and a cloud routine are different save destinations.
    Open the intended library row before editing, and check the displayed destination.
 - A prepared routine is a playback snapshot. Later editor changes do not automatically
   change it; prepare again when you intend to replace the playback snapshot.
-- Published routines are immutable. Open household draft to change their current
+- Published routines are immutable. Open cloud draft to change their current
   draft, then save and publish a new revision. Explicitly unlock a locked draft first.
 - Do not sign out or clear site data to refresh the app: that removes local private
   data and prepared downloads. Save changes before closing the app.
@@ -50,21 +72,25 @@ these changes; it is historical, not the current operating guide.
    sound, level, timed/held behavior and crossfade. The final song's outgoing rule
    is retained but inactive. Custom recordings come from **Settings > Filler library**;
    removing a library choice does not break saved references.
+   A summary below the song shows active custom sound, timed/held duration, level
+   and fade even when collapsed. It follows that song on reorder. Disabled gaps
+   and a last-song custom rule are explicitly marked inactive; returning to the
+   routine default removes the override summary.
 6. Choose **Save on this device** to save locally. This does not upload songs or
-   sync the routine to the household.
+   sync the routine to Cloud.
 7. While the source is still local, choose ONE sharing path:
-   **Save to Household** creates a new household routine and uploads its selected
-   audio after confirmation. Alternatively, select an existing household target and
-   use **Update existing household routine** without first opening that target or
-   uploading a new household copy. Review the target name and revision before replacing
+   **Save to Cloud** creates a new cloud routine and uploads its selected
+   audio after confirmation. Alternatively, select an existing cloud target and
+   use **Update existing cloud routine** without first opening that target or
+   uploading a new cloud copy. Review the target name and revision before replacing
    its draft. Completing a new upload adopts that cloud selection and hides the local
    replacement action, so replacement is an alternative, not the next step after upload.
 8. Wait for completion and confirm the resulting active routine/destination. A failed
-   upload is not a household save. Subsequent **Save to Household** updates the open
-   household draft with revision checks. A lock or conflict requires reviewing the
+   upload is not a cloud save. Subsequent **Save to Cloud** updates the open
+   cloud draft with revision checks. A lock or conflict requires reviewing the
    current draft; it is not permission to force an overwrite. Keep your unsaved work
    until you decide whether to copy it or explicitly reopen the current server draft.
-9. For playback-only household members, save the unlocked household draft and
+9. For playback-only household members, save the unlocked cloud draft and
    choose **Publish saved routine**. Locking does not publish. Publishing creates
    a new immutable revision; it does not alter an already-prepared class.
 
@@ -81,15 +107,16 @@ of perceived loudness. Apply only after comparing songs and filler at a sensible
 master volume. Gain does not rewrite the audio file. Manual boosts and overlapping
 signals can clip; there is no guaranteed true-peak limiter.
 
-## 2. Edit A Household Routine And Fine-Tune Cues
+## 2. Edit A Cloud Routine And Fine-Tune Cues
 
-1. On **Routines**, choose the household Drafts filter, refresh and open the intended
-   routine row. Wait for verified downloads and confirm the active routine name.
-2. If viewing a publication or cached copy, choose **Open household draft**. If
+1. On **Routines**, choose **Cloud > Drafts** and open the intended routine row.
+   The list loads automatically after sign-in; **Refresh cloud** checks for later
+   changes. Wait for verified downloads and confirm the active routine name.
+2. If viewing a publication or cached copy, choose **Open cloud draft**. If
    locked, explicitly unlock it. Playback-only users cannot perform these edits.
 3. Import additional songs and add/edit cues using each song's preview on Routines.
    Check the active routine and save destination before making changes.
-4. Choose **Save to Household** and confirm to save the draft. Then go to
+4. Choose **Save to Cloud** and confirm to save the draft. Then go to
    **Prepare for Practice / Teach**. Preparation checks required media and captures a
    snapshot; it does not start the music. Use **Play** to practice.
 5. On Teach, use **Edit cue times**, select the cue, then enter **Cue time (m:ss.s)**
@@ -100,8 +127,8 @@ signals can clip; there is no guaranteed true-peak limiter.
    keeps its paused position; edits do not start sound. A lock or revision conflict
    still blocks saving. Publish separately when ready.
 
-Reopening the app can restore a read-only cached household selection. Use **Open
-household draft** on Teach while online, then prepare the current draft before
+Reopening the app can restore a read-only cached cloud selection. Use **Open
+cloud draft** on Teach while online, then prepare the current draft before
 editing. This does not unlock drafts, edit a publication, or bypass a stale-revision
 conflict. A changed class setup's exact routine reference must also be updated.
 
@@ -112,30 +139,46 @@ conflict. A changed class setup's exact routine reference must also be updated.
 - In Edit cue times, the double-headed arrows beneath the bar are drag handles.
    Select a cue for the separate earlier/later buttons or focus a handle and use
    keyboard arrows.
-- Editing works only outside Class Mode, on a matching unlocked local or household draft and
+- Editing works only outside Class Mode, on a matching unlocked local or cloud draft and
   prepared snapshot, while a song owns playback and no conflicting work is pending.
    Publications, cached-only selections, filler phases and playback-only accounts are read-only.
-- Adjustment marks the draft unsaved. Save explicitly; separate device and household
+- Adjustment marks the draft unsaved. Save explicitly; separate device and cloud
    copies do not synchronize automatically.
 - Closely spaced handles can overlap. Safari on the user's actual iPhone has not
   been validated; these instructions do not establish that every pointer gesture works there.
 
 ## 3. Queue The Whole Class
 
-1. Save the routine, then choose **Walk-in / walk-out music** beside Prepare.
-2. Choose **New music playlist**, name it, import its songs and arrange their order.
-   Save it to the intended destination. Repeat for a separate walk-out playlist;
-   the two lists can contain completely different songs and ordering.
-3. Choose **New class setup**. Select the saved routine, the walk-in playlist and
-   the separate walk-out playlist. Either playlist may be None.
-4. Optionally enable **Before-routine announcements** and/or **After-routine
-   announcements**. Each is an independently configured held filler loop, with
-   its own sound and level. Select the class crossfade, save, then **Select class setup**.
+1. Save the routine. Under the Import audio actions, **Class sequence** has four
+   checkboxes: **Walk-in music**, **Pre-routine filler**, **Post-routine filler**
+   and **Walk-out music**. Enable only the phases you want.
+2. Enabled configuration sections appear in playback order: Walk-in music,
+   Pre-routine filler, Track order, Post-routine filler, Walk-out music. Disabling
+   a phase hides its section and removes it from the next saved setup; its choice
+   is retained if you re-enable it during this editing session.
+3. In each music section, choose a saved **Music playlist**. Arrival and departure
+   can use completely different songs and ordering. **Manage music playlists**
+   opens the reusable library: New music playlist > name > import/order songs >
+   Save. Return to the inline section and use **Refresh playlists** to see new lists.
+   The routine's songs remain separate. An enabled playlist without a selection
+   prevents saving/preparing the changed class.
+4. Each enabled filler section has independent sound, level and tempo controls
+   where applicable. Pre/post-routine filler holds until the instructor advances.
+   Set the class setup name and crossfade, then **Save class setup**. This saves
+   and selects the setup; routine Save is still a separate action. New setups use
+   the routine's save destination. Existing setups retain their destination and
+   exact references; **Use current saved routine** deliberately updates that
+   reference after a routine revision. Locked/published setups remain read-only.
 5. Use **Prepare for Practice / Teach**. All referenced songs and filler are prepared
    together. The setup pins exact saved revisions; later library edits do not change
    an already-selected or prepared class. Update the setup references and prepare
    again when deliberately adopting revised content.
 6. Enter **Start class**. Entry is silent. Press **Play** when ready.
+
+The older Class setup / library panel remains available for selecting, publishing,
+locking, duplicating or deleting saved setups. Selecting another setup prompts
+before discarding unsaved inline changes. Changes do not alter an already-playing
+class; save and explicitly prepare when ready to replace it.
 
 The walk-in playlist repeats until **Start Announcements** or **Start Routine** is
 pressed. A before-routine loop waits for **Start Routine**. The routine then follows

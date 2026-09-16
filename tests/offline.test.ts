@@ -7,6 +7,7 @@ import { newRoutine, validateRoutine, type FillerRecording } from '../shared/rou
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from '../frontend/src/hosted-session';
 import { AAC_IMPORT } from '../shared/audio-import';
 import { newMusicPlaylist, type ClassSetup, type MusicPlaylist } from '../shared/class-plan';
+import { listDraftRecoveries, removeDraftRecovery, saveDraftRecovery } from '../frontend/src/offline';
 
 const conversion = vi.hoisted(() => vi.fn<(file: File, options?: { signal?: AbortSignal }) => Promise<{ blob: Blob; duration: number }>>());
 vi.mock('../frontend/src/audio-conversion', () => ({ convertToM4a: conversion }));
@@ -18,6 +19,7 @@ const storage = vi.hoisted(() => ({
   onRequest: undefined as ((store: string, method: string) => void | Promise<void>) | undefined,
 }));
 const stores = vi.hoisted(() => ({
+  draftRecovery: new Map<string, unknown>(),
   tracks: new Map<string, unknown>(), routines: new Map<string, unknown>(), meta: new Map<string, unknown>(),
   cloudRoutines: new Map<string, unknown>(),
   fillerRecordings: new Map<string, unknown>(),
@@ -319,6 +321,39 @@ describe('native decode deadline', () => {
   });
 });
 
+describe('private draft recovery', () => {
+  const record = () => ({ id: 'tab-a:routine', kind: 'routine' as const, source: 'local' as const,
+    value: newRoutine(), baseRevision: null, media: {}, updatedAt: 1 });
+
+  it('migrates to v6 and retains detached working copies without saving a routine', async () => {
+    storage.version = 5;
+    const value = record(); await saveDraftRecovery(value);
+    value.value.name = 'Changed caller';
+    const records = await listDraftRecoveries();
+    expect(records[0].value.name).not.toBe('Changed caller');
+    expect(storage.version).toBe(6); expect(stores.routines.size).toBe(0);
+    expect(stores.tracks.size).toBe(0);
+    await removeDraftRecovery(records[0].id, records[0].updatedAt);
+    expect(await listDraftRecoveries()).toEqual([]);
+  });
+  it('does not discard another tab update or evict unsaved drafts at capacity', async () => {
+    const value = record(); await saveDraftRecovery(value);
+    await saveDraftRecovery({ ...value, updatedAt: 2 });
+    await expect(removeDraftRecovery(value.id, 1)).rejects.toThrow('routine_conflict');
+    for (let index = 1; index < 64; index++) await saveDraftRecovery({ ...value, id: `tab-${index}` });
+    await expect(saveDraftRecovery({ ...value, id: 'overflow' })).rejects.toThrow('recovery_limit');
+    expect((await listDraftRecoveries()).length).toBe(64);
+    await saveDraftRecovery({ ...value, updatedAt: 3 });
+  });
+  it('refuses oversized copies and locked or published working snapshots', async () => {
+    const value = record();
+    await expect(saveDraftRecovery({ ...value, value: { ...value.value, name: 'x'.repeat(256 * 1024) } })).rejects.toThrow('recovery_limit');
+    await expect(saveDraftRecovery({ ...value, value: { ...value.value, locked: true } })).rejects.toThrow('recovery_limit');
+    await expect(saveDraftRecovery({ ...value, value: { ...value.value, published: true } })).rejects.toThrow('recovery_limit');
+    expect(await listDraftRecoveries()).toEqual([]);
+  });
+});
+
 describe('local package storage', () => {
   it('stores both demo blobs, returns a valid routine, and leaves the active routine alone', async () => {
     const active = await saveRoutine(newRoutine(), null);
@@ -409,7 +444,7 @@ describe('local package storage', () => {
     expect(await getRoutine()).toEqual(legacy);
     expect(await getRoutine(id)).toEqual(legacy);
     expect(await listRoutines()).toEqual([legacy]);
-    expect(storage.version).toBe(5);
+    expect(storage.version).toBe(6);
     expect(stores.meta.get('active')).toBe(id);
     expect(stores.tracks.has('legacy-track')).toBe(true);
   });
@@ -493,7 +528,7 @@ describe('local routine publication and deletion', () => {
     expect(unlocked).toMatchObject({ revision: 8, locked: false, published: false });
     expect(await getRoutine(legacy.id, 7)).toEqual(legacy);
     expect(await getRoutine(legacy.id, 7, false)).toEqual(head);
-    expect(storage.version).toBe(5);
+    expect(storage.version).toBe(6);
   });
 
   it('requires explicit publication and rejects empty routines without moving the head', async () => {
@@ -610,7 +645,7 @@ describe('local routine publication and deletion', () => {
     const reloaded = await import('../frontend/src/offline');
     expect(await reloaded.getRoutine(saved.id)).toBeNull();
     expect(await reloaded.getRoutine(saved.id, 2)).toEqual(publication);
-    expect(storage.version).toBe(5);
+    expect(storage.version).toBe(6);
   });
 });
 
@@ -863,7 +898,7 @@ describe('cloud package storage', () => {
     const pending = cacheCloudRoutine(cloud);
     cloud.name = 'Mutated after invocation';
     await pending;
-    expect(storage.version).toBe(5);
+    expect(storage.version).toBe(6);
     expect(await getRoutine()).toEqual(local);
     expect(await listRoutines()).toEqual([local]);
     expect(await getCloudRoutine(local.id)).toEqual(expected);
@@ -1057,7 +1092,7 @@ describe('custom filler storage', () => {
     stores.tracks.set('existing', { blob, bytes: blob.size, duration: 2, sha256: await sha256(blob) });
     if (version === 3) stores.cloudRoutines.set(routine.id, routine);
     expect(await listFillerRecordings()).toEqual([]);
-    expect(storage.version).toBe(5);
+    expect(storage.version).toBe(6);
     expect(await getRoutine()).toEqual(routine);
     expect(await (await getTrackBlob('existing'))!.arrayBuffer()).toEqual(await blob.arrayBuffer());
     if (version === 3) expect(await getCloudRoutine(routine.id)).toEqual(routine);
@@ -1235,8 +1270,8 @@ describe('hosted mutation ownership', () => {
   const mutations = ['storeTrack', 'saveRoutine', 'setActiveRoutine', 'removeTrack', 'createDemoRoutine',
     'cacheCloudTrack', 'cacheCloudRoutine', 'addFillerRecording', 'removeFillerRecording', 'cacheFillerRecording',
     'saveMusicPlaylist', 'saveClassSetup', 'cacheMusicPlaylist', 'cacheClassSetup',
-    'deleteRoutine', 'deleteMusicPlaylist', 'deleteClassSetup'] as const;
-  const guardedOperations = [...mutations, 'publishRoutine'] as const;
+    'deleteRoutine', 'deleteMusicPlaylist', 'deleteClassSetup', 'saveDraftRecovery', 'removeDraftRecovery'] as const;
+  const guardedOperations = [...mutations, 'publishRoutine', 'listDraftRecoveries'] as const;
   const file = () => new File(['synthetic audio'], 'synthetic.wav', { type: 'audio/wav' });
   let cloudHash: string;
   let custom: FillerRecording;
@@ -1249,6 +1284,10 @@ describe('hosted mutation ownership', () => {
     events.dispatchEvent(Object.assign(new Event('storage'), { key, oldValue, newValue, storageArea: sessionStorage }));
   };
   const mutate = (name: typeof guardedOperations[number]) => {
+    if (name === 'saveDraftRecovery') return offline.saveDraftRecovery({ id: 'guarded-recovery', kind: 'routine', source: 'household',
+      value: newRoutine(), media: {}, baseRevision: null, updatedAt: 1 });
+    if (name === 'removeDraftRecovery') return offline.removeDraftRecovery('guarded-recovery');
+    if (name === 'listDraftRecoveries') return offline.listDraftRecoveries();
     if (name === 'storeTrack') return offline.storeTrack(file());
     if (name === 'saveRoutine') return offline.saveRoutine(newRoutine(), null);
     if (name === 'publishRoutine') return offline.publishRoutine('routine-guard', 1);

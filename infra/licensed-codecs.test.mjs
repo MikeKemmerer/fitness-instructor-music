@@ -27,7 +27,7 @@ function fixture() {
       { route: '/*', allowedRoles: ['anonymous'] },
     ],
     globalHeaders: { 'X-Content-Type-Options': 'nosniff' },
-    mimeTypes: { '.wasm': 'application/wasm', '.gz': 'application/gzip' },
+    mimeTypes: { '.wasm': 'application/wasm', '.gz': 'application/gzip', '.tar.gz': 'application/gzip' },
   };
   const manifest = { 'index.html': { file: 'assets/app-AbCd1234.js', isEntry: true,
     assets: [buildPath(glue), buildPath(wasm)] } };
@@ -249,6 +249,8 @@ test('exact anonymous source route and codec MIME mappings are required without 
   for (const mutate of [
     config => { config.mimeTypes['.wasm'] = 'application/octet-stream'; },
     config => { delete config.mimeTypes['.gz']; },
+    config => { delete config.mimeTypes['.tar.gz']; },
+    config => { config.mimeTypes['.tar.gz'] = 'application/x-tar'; },
     config => { config.routes.splice(4, 1); },
     config => { config.routes[4].route = '/sources/*'; },
     config => { config.routes.push({ route: '/sources*', allowedRoles: ['anonymous'] }); },

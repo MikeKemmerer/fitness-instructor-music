@@ -18,6 +18,7 @@ interface StoredTrack {
 }
 
 interface RehearsalDatabase extends DBSchema {
+  draftRecovery: { key: string; value: DraftRecovery };
   tracks: { key: string; value: StoredTrack };
   routines: { key: string; value: Routine };
   cloudRoutines: { key: string; value: Routine };
@@ -89,7 +90,7 @@ function captureMutationSession(): MutationSession | undefined {
 
 async function database(session = captureMutationSession()) {
   session?.assert();
-  const connection = await openDB<RehearsalDatabase>('fitness-rehearsal', 5, {
+  const connection = await openDB<RehearsalDatabase>('fitness-rehearsal', 6, {
     upgrade(connection, oldVersion, _newVersion, transaction) {
       try { session?.assert(); }
       catch { transaction.abort(); return; }
@@ -100,6 +101,7 @@ async function database(session = captureMutationSession()) {
       if (oldVersion < 2) connection.createObjectStore('meta');
       if (oldVersion < 3) connection.createObjectStore('cloudRoutines');
       if (oldVersion < 4) connection.createObjectStore('fillerRecordings');
+      if (oldVersion < 6) connection.createObjectStore('draftRecovery');
       if (oldVersion < 5) {
         for (const name of ['routineHistory', 'cloudRoutineHistory', 'musicPlaylists', 'musicPlaylistHistory',
           'cloudMusicPlaylists', 'classSetups', 'classSetupHistory', 'cloudClassSetups'] as const) connection.createObjectStore(name);
@@ -124,7 +126,7 @@ async function database(session = captureMutationSession()) {
   return connection;
 }
 
-type StoreName = 'tracks' | 'routines' | 'cloudRoutines' | 'fillerRecordings' | 'meta' | 'routineHistory' |
+type StoreName = 'draftRecovery' | 'tracks' | 'routines' | 'cloudRoutines' | 'fillerRecordings' | 'meta' | 'routineHistory' |
   'cloudRoutineHistory' | 'musicPlaylists' | 'musicPlaylistHistory' | 'cloudMusicPlaylists' |
   'classSetups' | 'classSetupHistory' | 'cloudClassSetups';
 
@@ -163,6 +165,54 @@ async function digest(blob: Blob): Promise<string | undefined> {
   if (!globalThis.crypto?.subtle) return undefined;
   const result = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
   return Array.from(new Uint8Array(result), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export interface DraftRecovery {
+  id: string;
+  kind: 'routine' | 'playlist' | 'class';
+  source: 'local' | 'household';
+  value: Routine | MusicPlaylist | ClassSetup;
+  baseRevision: number | null;
+  media: Record<string, import('../../shared/routine').AudioAsset>;
+  updatedAt: number;
+}
+
+export async function saveDraftRecovery(record: DraftRecovery): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = structuredClone(record);
+  const size = (value: DraftRecovery) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  if (!snapshot.id || !['routine', 'playlist', 'class'].includes(snapshot.kind) ||
+    !['local', 'household'].includes(snapshot.source) || !snapshot.value?.id ||
+    snapshot.value.locked || snapshot.value.published || !Number.isFinite(snapshot.updatedAt) ||
+    size(snapshot) > 256 * 1024) throw new Error('recovery_limit');
+  await mutate(session, ['draftRecovery'], async transaction => {
+    const store = transaction.objectStore('draftRecovery');
+    const records = (await store.getAll()).filter(value => value.id !== snapshot.id);
+    if (records.length >= 64 || records.reduce((total, value) => total + size(value), size(snapshot)) > 4 * 1024 * 1024) {
+      throw new Error('recovery_limit');
+    }
+    await store.put(snapshot, snapshot.id);
+  });
+}
+
+export async function listDraftRecoveries(): Promise<DraftRecovery[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const values = await connection.getAll('draftRecovery');
+    session?.assert();
+    return values.sort((left, right) => right.updatedAt - left.updatedAt);
+  } finally { connection.close(); }
+}
+
+export async function removeDraftRecovery(id: string, updatedAt?: number): Promise<void> {
+  const session = captureMutationSession();
+  await mutate(session, ['draftRecovery'], async transaction => {
+    const store = transaction.objectStore('draftRecovery');
+    const current = await store.get(id);
+    if (updatedAt !== undefined && current && current.updatedAt !== updatedAt) throw new Error('routine_conflict');
+    await store.delete(id);
+  });
 }
 
 function checkRoutine(routine: Routine): void {

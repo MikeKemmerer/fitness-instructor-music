@@ -1,5 +1,28 @@
 @import url('./theme.css');
 
+.readiness dl { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); gap: 6px 16px; }
+.readiness dt { font-weight: 600; }
+.readiness dd { margin: 0; overflow-wrap: anywhere; }
+.readiness > p, .draft-protection { overflow-wrap: anywhere; }
+.draft-protection { flex-wrap: wrap; }
+.recovery-library { margin-block: 16px; }
+.class-composition { border-block: 1px solid var(--border); margin-block: 16px; padding-block: 16px; }
+.class-composition h2 { font-size: 1.1rem; margin-block: 0 12px; }
+.phase-toggles { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.phase-toggles .field { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.phase-setup:empty { display: none; }
+.phase-setup { margin-block-start: 16px; }
+.phase-identity { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; gap: 12px; }
+.phase-identity p { overflow-wrap: anywhere; }
+.phase-setup > .button { margin-block: 12px; }
+.class-phase-config { border-inline-start: 3px solid var(--accent); padding-inline-start: 16px; }
+.class-phase-config h2 { font-size: 1.15rem; }
+.class-phase-config > fieldset > .button { margin: 12px 8px 0 0; max-inline-size: 100%; }
+.phase-identity, .class-phase-config fieldset { border: 0; padding: 0; margin-inline: 0; min-inline-size: 0; }
+@media (max-width: 600px) {
+  .class-phase-config .field-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; }
@@ -189,6 +212,20 @@ input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
 .track-editor[open] > summary::before { content: '-'; }
 .track-editor > summary .track-title { flex: 1; min-inline-size: 0; overflow-wrap: anywhere; }
 .track-editor-body { padding: 0 14px 24px; }
+.after-track-status { display: grid; gap: 4px; margin: -6px 0 14px 20px; padding: 8px 14px; border-inline-start: 3px solid var(--control-border); overflow-wrap: anywhere; font-size: .9rem; }
+.after-track-status.active { border-inline-start-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--background)); }
+.after-track-status.active strong { color: var(--accent); }
+.button.custom-filler-active { border-color: var(--accent); color: var(--accent); }
+.after-track-button { flex: none; }
+@media (max-width: 600px) {
+  .track-editor > summary { display: grid; grid-template-columns: 12px 44px 22px minmax(0, 1fr) auto; }
+  .track-editor > summary::before { grid-column: 1; grid-row: 1; }
+  .track-editor > summary .track-reorder-grip { grid-column: 2; grid-row: 1; }
+  .track-editor > summary .track-number { grid-column: 3; grid-row: 1; }
+  .track-editor > summary .track-title { grid-column: 4 / 6; grid-row: 1; }
+  .track-editor > summary .mono { grid-column: 4; grid-row: 2; }
+  .track-editor > summary .after-track-button { grid-column: 5; grid-row: 2; }
+}
 .track-preview { position: sticky; inset-block-start: 0; z-index: 4; background: var(--background); display: grid; grid-template-columns: 44px minmax(0, 1fr) 11ch; gap: 4px 12px; align-items: center; padding-block: 8px; margin-block-end: 18px; border-block-end: 1px solid var(--border); }
 .track-preview .preview-status:empty { display: none; }
 .preview-clock { text-align: end; font-size: .8rem; white-space: nowrap; }

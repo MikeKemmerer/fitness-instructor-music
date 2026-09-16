@@ -10,6 +10,7 @@ import { defaultExportColumns, defaultPdfColumns, exportColumns, type ExportSnap
 import { startApplication } from '../frontend/src/bootstrap';
 import { formatCueTime, parseCueTime } from '../frontend/src/cue-time';
 import { createClassPanel } from '../frontend/src/class-panel';
+import { createClassComposition } from '../frontend/src/class-composition';
 import type { ClassSetup, MusicPlaylist, PreparedClass } from '../shared/class-plan';
 
 describe('cue time text', () => {
@@ -31,6 +32,7 @@ describe('cue time text', () => {
 });
 
 const mocks = vi.hoisted(() => ({
+  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), setActiveRoutine: vi.fn(), saveRoutine: vi.fn(),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), renderEditor: vi.fn(),
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
@@ -642,6 +644,36 @@ describe('editor committed controls', () => {
     expect(routine.filler.sound).toBe('drums');
     expect(input(t('fillerBpm')).disabled).toBe(false);
     session.dispose();
+  });
+
+  it('shows active custom filler immediately after its collapsed track and distinguishes dormant or disabled rules', async () => {
+    const { routine, track, session, host, preview, changed, button } = await setup();
+    routine.tracks.push({ ...structuredClone(track), id: 'next-song', title: 'Next song' });
+    const status = host.querySelectorAll('.after-track-status')[0]!;
+    const details = host.querySelectorAll('.track-editor')[0]!;
+    details.open = false;
+    session.syncAvailability(); expect(status.hidden).toBe(true);
+    track.after = { mode: 'custom', filler: { mode: 'hold', sound: 'drums', bpm: 100, seconds: 0, gain: 0.5 }, crossfade: 2 };
+    session.syncAvailability();
+    expect(status.hidden).toBe(false); expect(status.classList.contains('active')).toBe(true);
+    expect(status.children[0]!.textContent).toBe(t('customGapActive', { name: track.title }));
+    expect(status.children[1]!.textContent).toContain(t('drums'));
+    expect(status.children[1]!.textContent).toContain(t('openHold'));
+    expect(details.parentNode!.children[details.parentNode!.children.indexOf(details) + 1]).toBe(status);
+    expect(button(t('afterTrack', { name: track.title })).attributes.get('aria-describedby')).toBe(`after-track-${track.id}`);
+    routine.locked = true; session.syncAvailability();
+    expect(status.hidden).toBe(false); expect(button(t('afterTrack', { name: track.title })).disabled).toBe(true);
+    routine.tracks.reverse(); session.syncAvailability();
+    expect(status.classList.contains('active')).toBe(false);
+    expect(status.children[0]!.textContent).toBe(t('customGapInactive', { name: track.title }));
+    routine.tracks.reverse();
+    track.after.filler.mode = 'timed'; track.after.filler.seconds = 12; session.syncAvailability();
+    expect(status.children[1]!.textContent).toContain('12 s'); expect(status.classList.contains('active')).toBe(true);
+    track.after.filler.seconds = 0; session.syncAvailability(); expect(status.classList.contains('active')).toBe(false);
+    track.after = { mode: 'none' }; session.syncAvailability();
+    expect(status.children[0]!.textContent).toBe(t('customGapDisabled', { name: track.title }));
+    delete track.after; session.syncAvailability(); expect(status.hidden).toBe(true);
+    expect(changed).not.toHaveBeenCalled(); expect(preview.playFiller).not.toHaveBeenCalled(); session.dispose();
   });
 
   it('retains invalid text and last valid seconds, marks the draft invalid, and accepts fractional timestamp correction', async () => {
@@ -1462,9 +1494,100 @@ describe('real IndexedDB filler cancellation', () => {
   }, 60_000);
 });
 
+describe('inline class sequence', () => {
+  beforeEach(() => {
+    vi.resetAllMocks(); nodes.length = 0; stubDocument(); vi.stubGlobal('window', new EventTarget());
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    mocks.listMusicPlaylists.mockResolvedValue([]);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+  function harness(initial: ClassSetup | null = null) {
+    const routine = newRoutine(); routine.id = 'routine-a';
+    const state = { saved: true, busy: false, selection: initial ? { setup: initial, source: 'local' as const } : null };
+    const selected = vi.fn(value => { state.selection = value; });
+    const component = createClassComposition({ hosted: false, routine: () => routine, routineSaved: () => state.saved,
+      source: () => 'local', selection: () => state.selection, busy: () => state.busy, recordings: () => [],
+      select: selected, managePlaylists: vi.fn(), message: vi.fn(), changed: vi.fn() });
+    component.sync();
+    const controls = component.controls as unknown as TestElement;
+    const toggle = (label: string, value: boolean) => {
+      const input = controls.querySelectorAll('label').find(node => node.textContent === label)!.children[0]!;
+      input.checked = value; input.dispatchEvent(new Event('change'));
+    };
+    const button = (label: string) => controls.querySelectorAll('button').find(node => node.title === label)!;
+    return { component, routine, state, selected, controls, toggle, button };
+  }
+
+  it('orders independently enabled phases and retains disabled choices until saving', async () => {
+    const fixture = harness();
+    const arrival: MusicPlaylist = { schemaVersion: 1, id: 'arrival', name: 'Arrival', revision: 2, published: false, locked: false, tracks: [] };
+    const departure = { ...arrival, id: 'departure', name: 'Departure' };
+    mocks.listMusicPlaylists.mockResolvedValue([arrival, departure]);
+    fixture.toggle(t('enableWalkIn'), true);
+    await vi.waitFor(() => expect(fixture.controls.querySelectorAll('input').every(node => !node.disabled)).toBe(true));
+    expect(fixture.button(t('saveClassSetup')).disabled).toBe(true);
+    fixture.toggle(t('enableWalkOut'), true); fixture.toggle(t('enableAfter'), true); fixture.toggle(t('enableBefore'), true);
+    const before = fixture.component.beforeTracks as unknown as TestElement;
+    const after = fixture.component.afterTracks as unknown as TestElement;
+    expect(before.children.map(node => node.dataset.classPhase)).toEqual(['walkIn', 'before']);
+    expect(after.children.map(node => node.dataset.classPhase)).toEqual(['after', 'walkOut']);
+    for (const [root, id] of [[before, 'arrival'], [after, 'departure']] as const) {
+      const select = root.querySelectorAll('label').find(node => node.textContent === t('selectMusicPlaylist'))!.children[0]!;
+      select.value = JSON.stringify({ id, revision: 2, published: false }); select.dispatchEvent(new Event('change'));
+    }
+    fixture.toggle(t('enableWalkIn'), false); expect(before.children.map(node => node.dataset.classPhase)).toEqual(['before']);
+    fixture.toggle(t('enableWalkIn'), true);
+    expect(before.querySelectorAll('select')[0]!.value).toContain('arrival');
+    fixture.toggle(t('enableAfter'), false);
+    mocks.saveClassSetup.mockImplementation(async (value: ClassSetup) => ({ ...value, revision: 1 }));
+    fixture.button(t('saveClassSetup')).click();
+    await vi.waitFor(() => expect(fixture.selected).toHaveBeenCalledOnce());
+    const saved = mocks.saveClassSetup.mock.calls[0]!;
+    expect(saved[1]).toBeNull();
+    expect(saved[0]).toMatchObject({ walkIn: { id: 'arrival', revision: 2 }, walkOut: { id: 'departure', revision: 2 }, before: { mode: 'hold' } });
+    expect(saved[0].after).toBeUndefined(); expect(fixture.component.pending()).toBe(false);
+    fixture.component.dispose();
+  });
+
+  it.each(['locked', 'published'] as const)('keeps %s setup controls read-only even on forced changes', flag => {
+    const value: ClassSetup = { schemaVersion: 1, id: 'class-a', name: 'Class', revision: 4, locked: false, published: false,
+      routine: { id: 'routine-a', revision: 1, published: false }, crossfade: 2, [flag]: true };
+    const fixture = harness(value);
+    fixture.toggle(t('enableBefore'), true);
+    expect(fixture.component.beforeTracks.children.length).toBe(0);
+    expect(fixture.component.hasUnsaved()).toBe(false);
+    expect(fixture.button(t('saveClassSetup')).disabled).toBe(true);
+    expect(mocks.saveClassSetup).not.toHaveBeenCalled(); fixture.component.dispose();
+  });
+
+  it('does not block an already saved class while fetching playlist display names', async () => {
+    const pending = deferred(); mocks.listMusicPlaylists.mockReturnValue(pending.promise.then(() => []));
+    const value: ClassSetup = { schemaVersion: 1, id: 'class-a', name: 'Class', revision: 4, locked: false, published: false,
+      routine: { id: 'routine-a', revision: 1, published: false }, walkIn: { id: 'arrival', revision: 1, published: false }, crossfade: 2 };
+    const fixture = harness(value);
+    expect(fixture.component.working()).toBe(true);
+    expect(fixture.component.pending()).toBe(false);
+    pending.resolve(); await vi.waitFor(() => expect(fixture.component.working()).toBe(false));
+    fixture.component.dispose();
+  });
+
+  it('preserves edited content on save conflict and keeps missing-playlist or unsaved-routine setups unpreparable', async () => {
+    const fixture = harness(); fixture.state.saved = false;
+    fixture.toggle(t('enableBefore'), true);
+    expect(fixture.button(t('saveClassSetup')).disabled).toBe(true); expect(fixture.component.pending()).toBe(true);
+    fixture.state.saved = true; fixture.component.sync();
+    mocks.saveClassSetup.mockRejectedValue(new Error('routine_conflict'));
+    fixture.button(t('saveClassSetup')).click();
+    await vi.waitFor(() => expect(fixture.button(t('saveClassSetup')).disabled).toBe(false));
+    expect(fixture.component.hasUnsaved()).toBe(true); expect(fixture.selected).not.toHaveBeenCalled();
+    fixture.component.dispose();
+  });
+});
+
 describe('class panel saved references and local actions', () => {
   beforeEach(() => {
     vi.resetAllMocks(); nodes.length = 0; stubDocument(); vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('window', new EventTarget());
     mocks.listMusicPlaylists.mockResolvedValue([]); mocks.listClassSetups.mockResolvedValue([]); mocks.listRoutines.mockResolvedValue([]);
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -2305,8 +2428,8 @@ describe('UI persistence and transport wiring', () => {
     button(t('prepare')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     button(t('startClass')).click();
-    const listener = vi.mocked(window.addEventListener).mock.calls.find(call => call[0] === 'pagehide')![1] as (event: PageTransitionEvent) => void;
-    listener({ persisted: true } as PageTransitionEvent);
+    const listeners = vi.mocked(window.addEventListener).mock.calls.filter(call => call[0] === 'pagehide').map(call => call[1] as (event: PageTransitionEvent) => void);
+    for (const listener of listeners) listener({ persisted: true } as PageTransitionEvent);
     expect(nodes.some(node => node.classList.contains('class-mode'))).toBe(false);
     expect(mocks.player.pause).toHaveBeenCalledOnce();
     expect(mocks.preview.stop).toHaveBeenCalled();
@@ -2315,9 +2438,9 @@ describe('UI persistence and transport wiring', () => {
 
   it('cancels jobs and releases preview resources on page teardown', async () => {
     await open();
-    const listener = vi.mocked(window.addEventListener).mock.calls.find(call => call[0] === 'pagehide')![1] as (event: PageTransitionEvent) => void;
+    const listeners = vi.mocked(window.addEventListener).mock.calls.filter(call => call[0] === 'pagehide').map(call => call[1] as (event: PageTransitionEvent) => void);
     mocks.editorSession.dispose.mockClear();
-    listener({ persisted: false } as PageTransitionEvent);
+    for (const listener of listeners) listener({ persisted: false } as PageTransitionEvent);
     expect(mocks.editorSession.cancelJobs).toHaveBeenCalled();
     expect(mocks.editorSession.dispose).toHaveBeenCalledOnce();
     expect(mocks.preview.dispose).toHaveBeenCalledOnce();

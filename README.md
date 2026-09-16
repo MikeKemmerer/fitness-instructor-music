@@ -6,18 +6,19 @@ Private household fitness-class PWA. Public code, private music.
 
 September 15: [current user instructions](docs/user-guide.md),
 [separate workflow review](docs/workflow-review.md), and
-[the revised UI/class-session plan](docs/plan.md#september-15-workflow-revision)
+[the consolidated review plan](docs/plan.md#september-16-review-plan)
 describe how to create/share, revise/fine-tune and teach a routine. The guide now
 covers implemented silent Class entry, Practice cue editing, per-song fillers and
 independent walk-in/announcement/walk-out phases. The review and plan retain their
-historical findings. The class-control visibility and Stop/Previous follow-up is
-local, not yet deployed; check the installed app's footer build timestamp.
+historical findings. Cloud wording, automatic list loading, visible after-track
+filler indicators and inline class sequence controls are included in this source.
+Check the deployed app's footer build timestamp for its installed release.
 
 ## Current Milestone
 
 The cloud workflow is deployed on Azure Static Web Apps Free with managed Node 22 Functions and private Blob storage. Individual username/password accounts and roles are configured only in server settings; there is no Microsoft-account requirement or public registration. Hosted builds use `VITE_HOSTED_PILOT=true`; ordinary local builds do not require sign-in. The user has created two accounts and confirmed successful sign-in. Physical device acceptance remains pending. See [Deployment and account setup](infra/README.md).
 
-Choose local or household routines on **Edit**; **Teach** contains playback, not library selection. **Save on this device** changes only local storage. **Save to household** updates the current household draft after confirmation; it is not automatic background sync. Owners/editors can explicitly open a published routine's current draft or use **Update existing household routine** to replace a selected draft with confirmation. A new publication is a new immutable revision, not an overwrite of the previous published bytes. Locks and stale-revision conflicts still block changes, including owner changes. Playback-only accounts select published routines without authoring controls. Preparation downloads and verifies the complete selected audio before playback; selection or cloud refresh never replaces an already-playing snapshot. Cloud transfers use authenticated chunks, not public music URLs. Browser-local imports are not automatically uploaded.
+Choose local or cloud routines on **Edit**; **Teach** contains playback, not library selection. **Save on this device** changes only local storage. **Save to household** updates the current cloud draft after confirmation; it is not automatic background sync. Owners/editors can explicitly open a published routine's current draft or use **Update existing cloud routine** to replace a selected draft with confirmation. A new publication is a new immutable revision, not an overwrite of the previous published bytes. Locks and stale-revision conflicts still block changes, including owner changes. Playback-only accounts select published routines without authoring controls. Preparation downloads and verifies the complete selected audio before playback; selection or cloud refresh never replaces an already-playing snapshot. Cloud transfers use authenticated chunks, not public music URLs. Browser-local imports are not automatically uploaded.
 
 Server sessions last 12 hours. Ordinary expiry marks cloud access as requiring sign-in without stopping music, redirecting, purging downloads or disabling local class controls. Previously admitted prepared classes remain usable when offline or expired. Explicit sign-out or account switching is different: it invalidates other tabs and removes this app's private browser data. Offline copies cannot be remotely revoked. Keep the foreground app open during class; crash/reload recovery and real iPhone/Bluetooth reliability are not established by desktop tests.
 
@@ -25,6 +26,8 @@ The standalone local build does not contact Azure or Plex and has no cloud login
 
 - Two generated demo songs, or explicit local audio imports in a user-editable order.
 - Settings > Demos > Disable demos hides and blocks demo loading on this device. The preference survives reloads and never deletes existing routines or audio.
+- Class readiness shows the exact prepared phase queue and offers a guarded sound audition plus manual speaker/power checks. It never claims to detect the physical speaker automatically.
+- Undo/redo for routines, music playlists and class setups; bounded automatic local recovery copies in Routines > Recoverable drafts. Restore creates a separate draft, never overwrites a saved household revision, and leaves prepared playback alone. Cloud Save/Publish remains explicit.
 - Saved routines, independent duplication, local lock/unlock, and revision conflicts between tabs.
 - Drag tracks by their header grips on Edit, including touch dragging with automatic scrolling. Move up/down buttons and grip arrow keys remain available. Cues, audio and gains move together; a prepared or playing routine stays unchanged until explicitly prepared again. Escape or dropping outside the track list cancels the move. Locked, published and playback-only views cannot reorder tracks.
 - Current/next move, cue markers, elapsed/remaining times, body-area notes and cue sheet.
@@ -35,7 +38,7 @@ The standalone local build does not contact Azure or Plex and has no cloud login
 - Independent periodic, per-second countdown and single remaining-time warning beeps; coincident alerts merge.
 - Deterministic filler: none, timed, or hold until Continue; crossfades, speech-volume reduction and separate beep controls. Saved song and filler gain are independent, non-destructive 0-1.5 multipliers (1 is neutral).
 - Each song's header Filler action can inherit the routine default, disable its gap, or configure its own sound, level, mode and crossfade.
-- Walk-in / walk-out music beside Prepare opens independent saved playlists and class setups. Prepare both distinct lists, optional before/after announcement loops and the routine together; run every phase without leaving Class Mode. Walk-in repeats until explicit advance; walk-out plays once.
+- Class sequence checkboxes below Import audio enable walk-in music, pre-routine filler, post-routine filler and walk-out music. Their settings appear in playback order around Track order. Choose distinct saved playlists, configure held filler, then Save class setup and Prepare; operate every phase without leaving Class Mode. Walk-in repeats until explicit advance; walk-out plays once. Manage music playlists opens the reusable library.
 - Stop rewinds the current song silently, preserving its phase and later queued music. Previous restarts the song, or selects the previous song in that list when pressed within its first second. Both controls work in Practice and Class Mode.
 - Full-track EBU R128 loudness analysis proposes song gain toward -18 LUFS, limited by a 1.5 boost cap and -1 dBFS sample-peak headroom. Apply is explicit; files and playback timing are unchanged. This is not a true-peak limiter: manual boosts and overlapping mixed audio can still clip. Existing routines keep their previous levels unless edited.
 - Recorded **Lo-fi instrumental (CC0)** filler, bundled and verified for offline use. Existing synthetic presets remain unchanged. Recorded tempo/pitch stay original; BPM matching is not applied to this preset.
@@ -48,6 +51,11 @@ The standalone local build does not contact Azure or Plex and has no cloud login
 **Not ready to rely on for a live class until rehearsed on the actual iPhone/tablet and Bluetooth speaker.** Desktop tests cannot establish iPhone audio memory, wake-lock, interruption or offline reliability.
 
 ## Run Locally
+
+This resource-limited development workstation uses Azure for interactive testing.
+Do not start or restore a local preview here. The commands below are for a separate
+development environment with adequate resources; browser suites also start local
+servers and require explicit approval on this workstation.
 
 Node **22.12+** and npm are required. From this project directory:
 
@@ -84,7 +92,7 @@ Practice seeking changes transport only; dragging a cue changes the matching unl
 
 ## Filler Library
 
-Use **Settings > Filler library** to import a named recording, preview it, refresh the household list, or confirm removal. Owners/editors manage the shared library; playback-only accounts use recordings referenced by published routines. The standalone library belongs only to this browser. Built-in sounds remain separate and are not deleted by library removal.
+Use **Settings > Filler library** to import a named recording, preview it, refresh the cloud list, or confirm removal. Owners/editors manage the shared library; playback-only accounts use recordings referenced by published routines. The standalone library belongs only to this browser. Built-in sounds remain separate and are not deleted by library removal.
 
 On Edit, choose the recording under Between tracks and set its gain and timed/hold behavior for that routine. Recordings repeat at original pitch and tempo; arbitrary uploaded files may click at the loop boundary and are not automatically made seamless. A cold preview first downloads/prepares the recording and then asks for another tap to start audio. Prepare routine also downloads a missing selected recording before declaring readiness; a fully prepared class needs no network requests.
 
@@ -108,7 +116,7 @@ depends on the connection and storage/API response time.
 
 An explicitly approved cloud-media compaction creates new M4A assets and media-entry
 IDs while preserving cues, order and levels in a new routine revision. After such a
-migration, reopen the household routine before editing; a stale draft should conflict
+migration, reopen the cloud routine before editing; a stale draft should conflict
 rather than overwrite the migration. Existing device caches are not remotely erased.
 Retiring old cloud history and deleting its WAVs requires separate confirmation and
 a verified private rollback backup; routine deletion alone is not a storage cleanup.
@@ -119,7 +127,7 @@ Current local import limits: **32 MiB per file, six minutes per track, mono/ster
 
 New Opus imports, and supported audio formats that cannot be played directly, are converted locally to **AAC-LC in M4A, targeting 256 kbps at 48 kHz**, preserving mono/stereo channels. This applies to songs and custom fillers. A four-minute track is roughly 7.7 MB at the target bitrate, not the roughly 46 MB of the former stereo PCM fallback. Actual AAC bitrate varies with content. Conversion is lossy; original files on disk remain untouched. Existing saved WAVs and immutable household downloads are not automatically converted.
 
-Natively playable MP3, M4A, WAV, ADTS AAC, Ogg, FLAC and audio-only WebM retain their encoded bytes and bitrate. New Opus imports always use the M4A fallback, including Opus in supported containers. Video, protected/DRM content, multiple audio streams, unsupported codecs and out-of-bounds audio fail explicitly. The local encoder's supported formats are listed in [Bundled asset documentation](docs/third-party-assets.md). No music is sent to a conversion service; household upload remains an explicit action after local validation.
+Natively playable MP3, M4A, WAV, ADTS AAC, Ogg, FLAC and audio-only WebM retain their encoded bytes and bitrate. New Opus imports always use the M4A fallback, including Opus in supported containers. Video, protected/DRM content, multiple audio streams, unsupported codecs and out-of-bounds audio fail explicitly. The local encoder's supported formats are listed in [Bundled asset documentation](docs/third-party-assets.md). No music is sent to a conversion service; cloud upload remains an explicit action after local validation.
 
 Conversion requires the bundled codec to be available, then runs in a serialized worker. After the offline shell is ready, it can run without a network connection. Source input stays limited to 32 MiB, output to 16 MiB, duration to six minutes and equivalent decoded audio to 128 MiB; long stereo tracks may reach the decoded limit before six minutes. Source metadata counts toward the source-file limit, but large Opus tags are not treated as decoded audio. Conversion has a five-minute deadline; stalled native validation reports an error and prevents overlapping native decoders until the earlier operation settles. Physical low-memory iPhone testing is still required.
 
