@@ -131,6 +131,7 @@ export function validateCodecRoutes(config, approved) {
     'Unapproved source route.');
   const sourceRoute = config.routes.find(route => route.route === source.publicPath);
   assert(sourceRoute, 'Missing exact corresponding-source route.');
+  assert.equal(config.mimeTypes?.['.tar.gz'], source.mimeType, 'Missing compound source MIME mapping.');
   for (const [name, artifact] of approved) {
     assert.equal(codecArtifact(name), artifact, 'Untrusted codec route metadata.');
     const route = config.routes.find(candidate => candidate.route === `/${name}` ||
