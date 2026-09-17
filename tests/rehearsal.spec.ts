@@ -89,7 +89,9 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   const value = cue.getByLabel('Value', { exact: true });
   await expect(value).toHaveAttribute('type', 'text');
   await value.fill('1:60'); await value.press('Tab'); await expect(value).toHaveAttribute('aria-invalid', 'true');
-  await page.clock.install();
+  const clockStart = new Date('2026-01-01T12:00:00Z');
+  await page.clock.install({ time: clockStart });
+  await page.clock.pauseAt(new Date(clockStart.getTime() + 1000));
   await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
   await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(29_999); await expect(page.locator('.notice.notice-error')).toBeVisible();
