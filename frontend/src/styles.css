@@ -25,7 +25,7 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; }
+html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; scrollbar-gutter: stable; }
 body { margin: 0; min-inline-size: 280px; }
 .bootstrap-error { min-block-size: 100svh; padding: 48px 24px; font-family: 'DM Sans', sans-serif; color: #243B39; background: #F0F6F5; }
 .bootstrap-error h1 { font-family: inherit; font-size: 1.8rem; line-height: 1.2; margin-block-end: 16px; }
@@ -202,7 +202,7 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .menu-chevron svg { inline-size: 16px; block-size: 16px; }
 .track-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block-end: 18px; }
 .editor-section .track-section-heading h2 { margin: 0; min-inline-size: 0; }
-.routine-chooser-open { overflow: hidden; scrollbar-gutter: stable; }
+.routine-chooser-open { overflow: hidden; }
 .routine-chooser { inline-size: min(760px, calc(100% - 32px)); max-block-size: calc(100dvh - 32px); overflow: hidden; }
 .routine-chooser[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 12px; }
 .routine-chooser > * { margin: 0; }
