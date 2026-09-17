@@ -574,6 +574,19 @@ describe('worker stream and packet admission', () => {
     }
   });
 
+  it.each([undefined, 0, 6])('detects CENC packets before rejecting untrusted channel metadata %s', async channels => {
+    const streams = [{ ...audio, codec_name: 'aac', channels }];
+    const encrypted = await workerProbe(streams, { packets: [
+      { stream_index: 0, side_data_list: [{ side_data_type: 'Encryption info' }] },
+    ] });
+    expect(encrypted.reply).toEqual({ kind: 'error', error: 'conversion_protected_audio' });
+    expect(encrypted.core.exec).not.toHaveBeenCalled();
+    vi.resetModules();
+    const unencrypted = await workerProbe(streams);
+    expect(unencrypted.reply).toEqual({ kind: 'error', error: 'conversion_channel_limit' });
+    expect(unencrypted.core.exec).not.toHaveBeenCalled();
+  });
+
   it.each(['streams', 'packets'] as const)('fails closed on oversized %s JSON and cleans temporary entries', async overflow => {
     const result = await workerProbe([audio, picture], { overflow });
     expect(result.reply).toEqual({ kind: 'error', error: 'conversion_invalid_audio' });
