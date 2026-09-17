@@ -2447,6 +2447,9 @@ describe('UI persistence and transport wiring', () => {
     await open(); button(t('edit')).click(); await settled();
     const host = () => mocks.renderEditor.mock.lastCall![0] as unknown as TestElement;
     const input = (label: string) => host().querySelectorAll('label').find(node => node.textContent === label)!.children[0]!;
+    const nameLabel = host().querySelectorAll('label').find(node => node.textContent === t('routineName'))!;
+    expect(nameLabel.querySelectorAll('button')).toHaveLength(0);
+    expect(nameLabel.parentNode!.querySelectorAll('button')).toHaveLength(1);
     input(t('routineName')).value = 'Real editor history'; input(t('routineName')).dispatchEvent(new Event('input'));
     const addCue = host().querySelectorAll('button').find(node => node.title === t('addCue'))!;
     expect(addCue.disabled).toBe(false); addCue.click();

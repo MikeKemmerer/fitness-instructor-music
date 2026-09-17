@@ -113,8 +113,9 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
   };
   const nameFields = content(t('routineName'));
   const nameInput = textInput(routine.name, 160, value => mutate(() => { routine.name = value; }));
-  const nameField = field(t('routineName'), nameInput); nameField.classList.add('routine-name-field');
-  nameField.append(iconButton(t('routineName'), Pencil, () => { if (editable()) { nameInput.focus(); nameInput.select(); } }));
+  const nameField = element('div', 'routine-name-field');
+  nameField.append(field(t('routineName'), nameInput),
+    iconButton(t('routineName'), Pencil, () => { if (editable()) { nameInput.focus(); nameInput.select(); } }));
   nameFields.append(nameField);
   form.append(nameFields);
   const tracks = element('section', 'editor-section');

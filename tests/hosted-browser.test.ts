@@ -152,7 +152,7 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
     await ready(page);
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     const input = { name: 'synthetic.opus', mimeType: 'audio/opus', buffer: encoded };
-    await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles(input);
+    await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles(input);
     await browserExpect(page.locator('.notice')).toContainText('Imported 1 audio file', { timeout: 30000 });
     const converted = await audio(page, true);
     expect(converted).toHaveLength(1);
@@ -201,7 +201,7 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
       await offline.goto(origin);
       await offline.waitForFunction(() => navigator.serviceWorker.controller !== null);
       await offline.getByRole('tab', { name: 'Routines', exact: true }).click();
-      await offline.locator('input[type=file][aria-label="Import audio"]').setInputFiles(input);
+      await offline.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles(input);
       await browserExpect(offline.locator('.notice')).toContainText('Imported 1 audio file', { timeout: 30000 });
       const reimported = await audio(offline, true);
       expect(reimported).toHaveLength(2);
@@ -342,14 +342,14 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     page.on('dialog', dialog => dialog.accept()); await login(page); await demo(page);
     const actions = page.locator('.edit-panel .routine-overflow'); await actions.locator('summary').click();
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toBeDisabled();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     const published = (await (await page.request.get('/api/routines?published=true')).json()).routines[0] as { id: string; name: string; revision: number };
     await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
-    await page.getByLabel('Routine name', { exact: true }).fill('Newer draft'); await upload(page);
+    await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Newer draft'); await upload(page);
     if (pendingCloud) {
       await page.route(`**/api/routines/${published.id}`, route => route.request().method() === 'PUT'
         ? route.fulfill({ status: 412, contentType: 'application/json', body: JSON.stringify({ error: 'routine_conflict' }) }) : route.continue());
-      await page.getByLabel('Routine name', { exact: true }).fill('Pending draft');
+      await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Pending draft');
       await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
       await browserExpect(page.getByRole('button', { name: 'Save to Cloud', exact: true })).toBeEnabled();
     }
@@ -360,14 +360,14 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const rows = page.locator('.routine-library-row').filter({ has: page.locator('.muted', { hasText: 'Cloud / Published' }) });
     await browserExpect(rows).toHaveCount(1);
     await rows.getByRole('button', { name: `Open ${published.name}`, exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toHaveValue(published.name);
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toBeDisabled();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue(published.name);
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     expect((await workingCopies(page))[0]).toEqual(before);
     await browserExpect(page.locator('.draft-identity')).toContainText('Published');
     if (!(await actions.evaluate(node => (node as HTMLDetailsElement).open))) await actions.locator('summary').click();
     await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toHaveValue(before.envelope.routine.name);
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toBeEnabled();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue(before.envelope.routine.name);
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeEnabled();
     expect((await workingCopies(page))[0]).toEqual(before);
     expect(calls.filter(call => call.method !== 'GET')).toHaveLength(writes);
   }));
@@ -458,12 +458,12 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       if (outcome === 'lost') await route.abort('failed'); else await route.fulfill({ response });
     });
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await page.getByLabel('Routine name', { exact: true }).fill('Attempt A');
+    await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Attempt A');
     await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click(); await reachedServer;
     const other = await context.newPage();
     await other.route('**/api/**', route => route.abort('internetdisconnected'));
     await other.goto('/'); await other.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await other.getByLabel('Routine name', { exact: true }).fill('Local B');
+    await other.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Local B');
     await other.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
     await browserExpect.poll(async () => (await workingCopies(other))[0]?.envelope.routine.name).toBe('Local B');
     expect((await workingCopies(other))[0]!.cloudAttempt!.envelope.routine.name).toBe('Attempt A');
@@ -486,16 +486,18 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const first = (await workingCopies(page))[0]!;
     await page.getByRole('button', { name: 'Save and lock', exact: true }).click();
     await browserExpect(page.getByRole('button', { name: 'Unlock routine', exact: true })).toBeEnabled();
+    const locked = (await workingCopies(page))[0]!;
+    expect(locked.localVersion).toBe(first.localVersion + 1);
     await page.getByRole('button', { name: 'Unlock routine', exact: true }).click();
     await browserExpect(page.getByRole('button', { name: 'Save to Cloud', exact: true })).toBeEnabled();
-    expect((await workingCopies(page))[0]!.localVersion).toBe(first.localVersion);
-    await page.getByLabel('Routine name', { exact: true }).fill('After unlock'); await upload(page);
+    expect((await workingCopies(page))[0]!.localVersion).toBe(locked.localVersion);
+    await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('After unlock'); await upload(page);
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toBeDisabled();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
-    await page.getByLabel('Routine name', { exact: true }).fill('After publication'); await upload(page);
+    await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('After publication'); await upload(page);
     const final = (await workingCopies(page))[0]!;
-    expect(final.localVersion).toBe(first.localVersion + 2); expect(final.pendingCloud).toBe(false);
+    expect(final.localVersion).toBe(locked.localVersion + 2); expect(final.pendingCloud).toBe(false);
     expect(final.envelope.routine.name).toBe('After publication');
   }));
 
@@ -504,7 +506,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.getByRole('button', { name: 'Load demo', exact: true }).click();
     await page.route('**/api/**', route => route.abort('internetdisconnected'));
     for (const name of ['Local one', 'Local two', 'Local three']) {
-      await page.getByLabel('Routine name', { exact: true }).fill(name);
+      await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill(name);
       await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
       await browserExpect(page.getByRole('button', { name: 'Save to Cloud', exact: true })).toBeEnabled();
     }
@@ -563,13 +565,13 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
   test('review cold cached chooser opens non-active local and Cloud publications across offline reload', () => withHosted(async ({ page, context, calls }) => {
     page.on('dialog', dialog => dialog.accept()); await login(page); await demo(page); await ready(page);
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await page.getByLabel('Routine name', { exact: true }).fill('Cached publication'); await upload(page);
+    await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Cached publication'); await upload(page);
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toBeDisabled();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     await page.getByRole('button', { name: 'Close routine', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Discard changes', exact: true }).click();
     await demo(page);
-    await page.getByLabel('Routine name', { exact: true }).fill('Cached draft'); await upload(page);
+    await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Cached draft'); await upload(page);
     await page.getByRole('button', { name: 'Close routine', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Discard changes', exact: true }).click();
     await context.setOffline(true); await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
@@ -578,8 +580,8 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await library.getByRole('checkbox', { name: 'Local', exact: true }).uncheck();
     await library.getByRole('checkbox', { name: 'Draft', exact: true }).uncheck();
     await library.getByRole('button', { name: 'Open Cached publication', exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toHaveValue('Cached publication');
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toBeDisabled();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Cached publication');
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     await automaticReady(page); await browserExpect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     await page.getByRole('button', { name: 'Open different routine', exact: true }).click();
@@ -588,7 +590,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await library.getByRole('checkbox', { name: 'Draft', exact: true }).check();
     await library.getByRole('button', { name: 'Open Cached draft', exact: true }).click();
     await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await browserExpect(page.getByLabel('Routine name', { exact: true })).toHaveValue('Cached draft');
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Cached draft');
     expect(calls).toHaveLength(start);
   }));
   test('custom form rejects wrong credentials, authenticates with secure cookies, and fits desktop/mobile', () => withHosted(async ({ page, context }) => {
@@ -1047,10 +1049,10 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await observe(author); await login(author, 'editor');
     await author.getByRole('tab', { name: 'Routines', exact: true }).click();
     await author.getByRole('button', { name: 'New routine', exact: true }).click();
-    await browserExpect(author.getByRole('combobox', { name: 'Filler sound', exact: true }).locator('option').filter({ hasText: /^UserFiller$/ })).toHaveCount(1);
+    await browserExpect(author.getByRole('combobox', { name: 'Filler sound', exact: true }).locator('option').filter({ hasText: /^UserFiller \(1 s\)$/ })).toHaveCount(1);
     await author.getByRole('tab', { name: 'Settings', exact: true }).click();
     await browserExpect(library(author).getByRole('button', { name: 'Refresh filler library', exact: true })).toBeEnabled();
-    await library(author).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller' });
+    await library(author).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller (1 s)' });
     await browserExpect(library(author).getByLabel('Recording BPM', { exact: true })).toHaveValue('120');
     await library(author).getByLabel('Recording BPM', { exact: true }).fill('60');
     await library(author).getByRole('button', { name: 'Apply BPM metadata', exact: true }).click();
@@ -1083,7 +1085,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const playing = await probe(page);
     await page.getByRole('tab', { name: 'Settings', exact: true }).click();
     await browserExpect(library(page).getByRole('button', { name: 'Refresh filler library', exact: true })).toBeEnabled();
-    await library(page).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller' });
+    await library(page).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller (1 s)' });
     await library(page).getByRole('button', { name: 'Remove recording', exact: true }).click();
     await browserExpect(library(page).locator('.filler-library-feedback')).toContainText('Recording removed');
     expect(await probe(page)).toEqual(playing);

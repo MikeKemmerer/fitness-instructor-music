@@ -82,10 +82,12 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   await setSlider(page.getByRole('slider', { name: 'Beep volume', exact: true }), 40);
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-  const value = edit.locator('.cue-row').first().getByLabel('Value', { exact: true });
+  const cue = edit.locator('.cue-row').first();
+  await cue.getByRole('combobox', { name: 'Source', exact: true }).selectOption('timestamp');
+  const value = cue.getByLabel('Value', { exact: true });
   await value.fill('1:60'); await value.press('Tab'); await expect(value).toHaveAttribute('aria-invalid', 'true');
   await page.clock.install();
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
+  await edit.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
   await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(29_999); await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(1); await expect(page.locator('.notice.notice-error')).toBeHidden();
@@ -103,7 +105,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     const edit = page.locator('#panel-edit');
     await expect(edit.getByRole('button', { name: 'New routine', exact: true })).toBeHidden();
     await expect(edit.locator('.routine-library')).toBeHidden();
-    await edit.getByLabel('Routine name', { exact: true }).fill(`Unified synthetic ${viewport.width}`);
+    await edit.locator('.routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill(`Unified synthetic ${viewport.width}`);
     await edit.getByLabel('Pre-routine filler', { exact: true }).check();
     await edit.getByLabel('Post-routine filler', { exact: true }).check();
     await expect(edit.locator('[data-class-phase="before"] input[readonly]')).toHaveValue('');
@@ -154,7 +156,7 @@ function syntheticWav(seconds: number): Buffer {
 }
 
 const savedTracks = (page: Page) => page.evaluate(async () => {
-  const stored = await new Promise<{ routines: Routine[]; copies: RoutineWorkingCopy[]; media: { id: string; blob: Blob }[] }>((accept, reject) => {
+  const stored = await new Promise<{ routines: Routine[]; localHeads: Routine[]; copies: RoutineWorkingCopy[]; media: { id: string; blob: Blob }[] }>((accept, reject) => {
     const request = indexedDB.open('fitness-rehearsal');
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
@@ -167,12 +169,12 @@ const savedTracks = (page: Page) => page.evaluate(async () => {
       transaction.oncomplete = () => {
         database.close();
         accept({ routines: [...new Map([...routines.result, ...copies.result.map(copy => copy.envelope.routine)].map(routine => [routine.id, routine])).values()],
-          copies: copies.result, media: tracks.result.map((record, index) => ({ id: String(keys.result[index]), blob: record.blob })) });
+          localHeads: routines.result, copies: copies.result, media: tracks.result.map((record, index) => ({ id: String(keys.result[index]), blob: record.blob })) });
       };
       transaction.onabort = () => { database.close(); reject(transaction.error); };
     };
   });
-  return { routines: stored.routines, localVersions: Object.fromEntries(stored.copies.map(copy => [copy.envelope.routine.id, copy.localVersion])), media: await Promise.all(stored.media.map(async ({ id, blob }) => ({
+  return { routines: stored.routines, localHeads: stored.localHeads, localVersions: Object.fromEntries(stored.copies.map(copy => [copy.envelope.routine.id, copy.localVersion])), media: await Promise.all(stored.media.map(async ({ id, blob }) => ({
     id, bytes: blob.size, contentType: blob.type,
     hash: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())), byte => byte.toString(16).padStart(2, '0')).join(''),
   }))) };
@@ -183,7 +185,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
   await demo(page);
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({
     name: 'Synthetic third track.wav', mimeType: 'audio/wav', buffer: syntheticWav(20),
   });
   await expect(page.locator('details[data-track-id]')).toHaveCount(3);
@@ -428,6 +430,8 @@ test('track reorder: locked drafts block forced pointer, grip arrows and both mo
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
   const original = await trackOrder(page);
   const saved = await savedTracks(page);
+  expect(saved.localHeads).toHaveLength(1);
+  expect(saved.localHeads[0]).toMatchObject({ locked: true, tracks: saved.routines[0]!.tracks });
   const status = await page.locator('.draft-status').textContent();
   const grip = page.locator('.track-reorder-grip').first();
   await expect(grip).toBeDisabled();
@@ -471,12 +475,24 @@ test('duplicate preserves locked original and stale tab cannot unlock it', async
   await expect(other.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue(originalName);
   await page.getByRole('button', { name: 'Save and lock', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
+  const locked = await savedTracks(page);
+  expect(locked.localHeads).toHaveLength(1);
+  expect(locked.localHeads[0]).toMatchObject({ name: originalName, locked: true });
+  await other.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Stale unlocked edit');
   await other.getByRole('button', { name: 'Save on this device', exact: true }).click();
-  await expect(other.getByRole('alert')).toContainText('changed elsewhere');
-  await page.getByRole('button', { name: 'Duplicate routine', exact: true }).click();
+  await expect(other.getByRole('alert')).toHaveText('Unlock the routine before editing.');
+  await expect(other.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Stale unlocked edit');
+  expect(await savedTracks(other)).toEqual(locked);
+  await page.getByRole('button', { name: 'Duplicate to New Routine', exact: true }).click();
   await page.getByRole('dialog').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Second class');
   await page.getByRole('dialog').getByRole('button', { name: 'Apply', exact: true }).click();
   await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await expect(page.locator('#panel-edit .draft-status')).not.toContainText('Unsaved');
+  const duplicated = await savedTracks(page);
+  expect(duplicated.localHeads).toEqual(locked.localHeads);
+  expect(duplicated.routines.find(routine => routine.id === locked.routines[0]!.id)).toEqual(locked.routines[0]);
+  expect(duplicated.localVersions[locked.routines[0]!.id]).toBe(locked.localVersions[locked.routines[0]!.id]);
+  expect(duplicated.routines.find(routine => routine.name === 'Second class')).toMatchObject({ locked: false, published: false });
   await page.getByRole('button', { name: 'Open different routine', exact: true }).click();
   const routines = page.locator('.routine-library-rows');
   await expect(routines.locator('.routine-library-row')).toHaveCount(2);
@@ -580,13 +596,14 @@ test('invalid timestamps block saving, cue marker seeks never add cues, and dele
   const cueId = await song.locator('.cue-row').first().getAttribute('data-cue-id');
   const row = song.locator(`[data-cue-id="${cueId}"]`);
   const cueNote = await row.getByRole('textbox', { name: 'Move / note', exact: true }).inputValue();
+  await row.getByRole('combobox', { name: 'Source', exact: true }).selectOption('timestamp');
   const timing = row.getByLabel('Value', { exact: true });
   await timing.fill('1:60');
   await timing.press('Tab');
   await expect(timing).toHaveValue('1:60');
   await expect(timing).toHaveAttribute('aria-invalid', 'true');
   await expect(page.getByRole('button', { name: 'Save on this device', exact: true })).toBeDisabled();
-  const duplicate = page.getByRole('button', { name: 'Duplicate routine', exact: true });
+  const duplicate = page.getByRole('button', { name: 'Duplicate to New Routine', exact: true });
   await expect(duplicate).toBeDisabled();
   await duplicate.dispatchEvent('click');
   await row.getByRole('combobox', { name: 'Source', exact: true }).selectOption('count');
@@ -721,7 +738,7 @@ test('independent local playlist copied into one routine prepares silently and r
   await page.getByRole('region', { name: 'Class sequence', exact: true }).getByRole('checkbox', { name: 'Walk-in music', exact: true }).check();
   await page.getByRole('region', { name: 'Walk-in music', exact: true })
     .getByRole('combobox', { name: 'Music playlist', exact: true }).selectOption({ label: 'Lobby / Local / Draft' });
-  await page.getByLabel('Routine name', { exact: true }).fill('Morning');
+  await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Morning');
   await expect(page.getByRole('button', { name: 'Save class setup', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Routine saved locally.');
@@ -825,7 +842,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   await page.goto('/'); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Synthetic full class');
-  await page.locator('.visually-hidden[aria-label="Import audio"]').setInputFiles([
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles([
     { name: 'Routine A.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
     { name: 'Routine B.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
   ]);
@@ -1037,6 +1054,7 @@ test('readiness, undo and recovered drafts preserve the saved routine and prepar
   await page.locator('.draft-protection').first().getByRole('button', { name: 'Redo edit', exact: true }).click();
   await expect(name).toHaveValue('Recover my routine');
   await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await expect(page.locator('#panel-edit .draft-status')).not.toContainText('Unsaved');
   const saved = (await savedTracks(page)).routines[0]!;
   await page.locator('.draft-protection').first().getByRole('button', { name: 'Undo edit', exact: true }).click();
   await expect(name).toHaveValue(original.name);
@@ -1157,7 +1175,7 @@ test('playlist and class authoring recover independent copies with undo after sa
   await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await recovery.locator(':scope > summary').click();
   await recovery.locator('.routine-library-row').filter({ hasText: 'Morning' }).getByRole('button', { name: 'Restore as new draft', exact: true }).click();
-  const setupName = page.getByLabel('Routine name', { exact: true });
+  const setupName = page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true });
   await expect(setupName).toHaveValue('Morning (recovered)');
   await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
   await setupName.fill('Morning recovered'); await setupName.press('Tab');
@@ -1266,7 +1284,7 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   await library.getByRole('button', { name: 'Add recording', exact: true }).click();
   await expect(library.locator('.filler-library-feedback')).toHaveText('Recording added on this device.');
   const recordings = library.getByRole('combobox', { name: 'Custom recordings', exact: true });
-  await expect(recordings.locator('option:checked')).toHaveText('UserFiller');
+  await expect(recordings.locator('option:checked')).toHaveText('UserFiller (1 s)');
   await expect(library.locator('.filler-recording-details')).toContainText('0:01');
   await library.getByRole('button', { name: 'Preview filler', exact: true }).click();
   await expect.poll(async () => (await probe()).starts).toBe(1);
@@ -1298,10 +1316,10 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   const clock = await page.locator('.class-clock').textContent();
   await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   await expect(library.getByRole('button', { name: 'Refresh filler library', exact: true })).toBeEnabled();
-  await recordings.selectOption({ label: 'UserFiller' });
+  await recordings.selectOption({ label: 'UserFiller (1 s)' });
   page.once('dialog', async dialog => { expect(dialog.message()).toContain('UserFiller'); await dialog.dismiss(); });
   await library.getByRole('button', { name: 'Remove recording', exact: true }).click();
-  await expect(recordings.locator('option:checked')).toHaveText('UserFiller');
+  await expect(recordings.locator('option:checked')).toHaveText('UserFiller (1 s)');
   page.once('dialog', dialog => dialog.accept());
   await library.getByRole('button', { name: 'Remove recording', exact: true }).click();
   await expect(recordings.locator('option')).toHaveCount(1);
@@ -1488,7 +1506,7 @@ test('editor acceptance workflow preserves 1:05.5, analyzed levels and bounded t
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('My fitness routine');
   const wav = syntheticWav(70);
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
   const song = page.locator('details[data-track-id]').first();
   await expect(song).toBeVisible();
   if (!await song.evaluate(node => (node as HTMLDetailsElement).open)) await song.locator(':scope > summary').click();
