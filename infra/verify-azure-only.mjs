@@ -108,6 +108,32 @@ export function prepareSyntheticWorkspace(projectRoot = root) {
   return directory;
 }
 
+export function failedTests(report) {
+  const clean = value => String(value ?? '').replace(/\u001b\[[0-9;]*m/g, '')
+    .replace(/(AccountKey=)[^;\s]+/gi, '$1[redacted]')
+    .replace(/((?:password|token|secret|authorization)["']?\s*[:=]\s*)[^\s,}\]]+/gi, '$1[redacted]')
+    .replace(/[A-Za-z0-9+/=_-]{64,}/g, '[redacted-long-value]').slice(0, 3000);
+  const failures = [];
+  for (const file of report.testResults ?? []) {
+    for (const entry of file.assertionResults ?? []) if (entry.status === 'failed') failures.push({
+      file: clean(file.name).replace(/^.*\/(tests|api\/testing)\//, '$1/'), name: clean(entry.fullName),
+      messages: (entry.failureMessages ?? []).slice(0, 2).map(clean),
+    });
+    if (file.status === 'failed' && !(file.assertionResults ?? []).some(entry => entry.status === 'failed')) {
+      failures.push({ file: clean(file.name), messages: [clean(file.message)] });
+    }
+  }
+  const visit = suites => { for (const suite of suites ?? []) {
+    for (const spec of suite.specs ?? []) for (const entry of spec.tests ?? []) {
+      if (entry.status === 'unexpected') failures.push({ file: clean(spec.file), name: clean(spec.title),
+        messages: entry.results.flatMap(result => result.errors ?? []).slice(0, 2).map(error => clean(error.message)) });
+    }
+    visit(suite.suites);
+  } };
+  visit(report.suites);
+  return failures.slice(0, 100);
+}
+
 export function collectScreenshots(source, destination) {
   assert(!lstatSync(source).isSymbolicLink(), 'Symlink screenshot root.');
   mkdirSync(destination, { recursive: true });
@@ -164,6 +190,13 @@ async function main() {
     } finally { closeSync(descriptor); }
     if (result.status !== 0 || result.signal || result.error) {
       const failure = failedGateReport(gate.name, result);
+      const reportPath = resolve(reports, `${gate.name}.json`);
+      if (ci && existsSync(reportPath)) {
+        const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+        failure.tests = failedTests(report);
+        failure.passed = report.numPassedTests;
+        failure.failed = report.numFailedTests;
+      }
       writeFileSync(resolve(reports, 'summary.json'), `${JSON.stringify(failure, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
       console.error(JSON.stringify(failure));
       throw new Error('Raw child output withheld; no verification receipt or upload approval produced.');

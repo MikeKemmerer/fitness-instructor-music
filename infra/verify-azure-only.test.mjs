@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { assertBuildMode, assertSourceCoverage, collectScreenshots, failedGateReport, requiredPlaywrightTests,
+import { assertBuildMode, assertSourceCoverage, collectScreenshots, failedGateReport, failedTests, requiredPlaywrightTests,
   prepareSyntheticWorkspace, verificationEnvironment, verificationPlan } from './verify-azure-only.mjs';
 import { verifyPublicRelease } from './verify-azure-live.mjs';
 
@@ -89,6 +89,21 @@ test('fresh CI creates the synthetic codec parent and refuses existing media or 
     assert.throws(() => prepareSyntheticWorkspace(other), /screenshot directory must start empty/);
     assert(!existsSync(resolve(other, 'local-media')));
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('synthetic failure diagnostics retain assertions but redact credential-shaped values', () => {
+  const diagnostics = failedTests({ testResults: [{ name: '/runner/project/tests/example.test.ts', assertionResults: [
+    { status: 'passed', fullName: 'passed' },
+    { status: 'failed', fullName: 'preserves newer edits', failureMessages: [
+      `Expected 2 to equal 1; AccountKey=private-value; token=private-token ${'a'.repeat(80)}`,
+    ] },
+  ] }] });
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].file, 'tests/example.test.ts');
+  assert.match(diagnostics[0].messages[0], /Expected 2 to equal 1/);
+  assert(!JSON.stringify(diagnostics).includes('private-value'));
+  assert(!JSON.stringify(diagnostics).includes('private-token'));
+  assert(!JSON.stringify(diagnostics).includes('a'.repeat(80)));
 });
 
 test('build-mode discriminator rejects duplicate or stale worker flags', () => {
