@@ -151,8 +151,13 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
     await login(page);
     await ready(page);
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+    await page.getByRole('button', { name: 'New routine', exact: true }).click();
     const input = { name: 'synthetic.opus', mimeType: 'audio/opus', buffer: encoded };
-    await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles(input);
+    await browserExpect(page.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
+    await browserExpect(page.getByRole('button', { name: 'Import audio', exact: true })).toBeEnabled();
+    const importAudio = page.locator('#app > input[type=file][aria-label="Import audio"]');
+    await browserExpect(importAudio).toBeEnabled();
+    await importAudio.setInputFiles(input);
     await browserExpect(page.locator('.notice')).toContainText('Imported 1 audio file', { timeout: 30000 });
     const converted = await audio(page, true);
     expect(converted).toHaveLength(1);
@@ -201,7 +206,12 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
       await offline.goto(origin);
       await offline.waitForFunction(() => navigator.serviceWorker.controller !== null);
       await offline.getByRole('tab', { name: 'Routines', exact: true }).click();
-      await offline.locator('input[type=file][aria-label="Import audio"]').setInputFiles(input);
+      await offline.getByRole('button', { name: 'New routine', exact: true }).click();
+      await browserExpect(offline.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
+      await browserExpect(offline.getByRole('button', { name: 'Import audio', exact: true })).toBeEnabled();
+      const offlineImport = offline.locator('#app > input[type=file][aria-label="Import audio"]');
+      await browserExpect(offlineImport).toBeEnabled();
+      await offlineImport.setInputFiles(input);
       await browserExpect(offline.locator('.notice')).toContainText('Imported 1 audio file', { timeout: 30000 });
       const reimported = await audio(offline, true);
       expect(reimported).toHaveLength(2);
@@ -230,6 +240,27 @@ async function automaticReady(page: Page) {
   await page.getByRole('tab', { name: 'Teach', exact: true }).click();
   await browserExpect(page.locator('.readiness')).toContainText('Audio verified on this device');
   await browserExpect(page.getByRole('button', { name: 'Start class', exact: true })).toBeEnabled();
+}
+const activeRoutinePointers = (page: Page) => page.evaluate(async () => new Promise<unknown[]>((accept, reject) => {
+  const request = indexedDB.open('fitness-rehearsal'); request.onerror = () => reject(request.error);
+  request.onsuccess = () => {
+    const database = request.result; const transaction = database.transaction('meta');
+    const active = transaction.objectStore('meta').get('active');
+    const exact = transaction.objectStore('meta').get('activeRoutineSelection');
+    transaction.oncomplete = () => {
+      database.close(); accept([active.result ?? null, exact.result ?? null,
+        localStorage.getItem('fitness-cloud-active'), localStorage.getItem('fitness-class-active')]);
+    };
+    transaction.onabort = () => { database.close(); reject(transaction.error); };
+  };
+}));
+async function closeRoutine(page: Page) {
+  await page.getByRole('button', { name: 'Close routine', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Close routine', exact: true });
+  await dialog.getByRole('button', { name: 'Discard changes', exact: true }).click();
+  await browserExpect(dialog).toHaveCount(0);
+  await browserExpect(page.getByRole('button', { name: 'New routine', exact: true })).toBeVisible();
+  await browserExpect.poll(() => activeRoutinePointers(page)).toEqual([null, null, null, null]);
 }
 async function setSlider(control: Locator, percent: number) {
   await browserExpect(control).toBeEnabled();
@@ -528,6 +559,10 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const initial = (await workingCopies(page))[0]!; expect(initial.envelope.routine.revision).toBe(9);
     await page.unrouteAll();
     let intercepted = false;
+    let allowReadback = false;
+    const routinePath = `/api/routines/${initial.envelope.routine.id}`;
+    await page.route(`**${routinePath}`, route => intercepted && !allowReadback && route.request().method() === 'GET'
+      ? route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'storage_unavailable' }) }) : route.continue());
     await page.route('**/api/routines', async route => {
       if (route.request().method() !== 'POST' || intercepted) { await route.continue(); return; }
       intercepted = true;
@@ -539,10 +574,16 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect.poll(() => intercepted).toBe(true);
     await browserExpect.poll(async () => (await workingCopies(page))[0]?.cloudAttempt?.envelope.routine.revision).toBe(1);
     await browserExpect(page.getByRole('button', { name: 'Save to Cloud', exact: true })).toBeEnabled();
-    await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
+    const pending = (await workingCopies(page))[0]!;
+    expect(pending.pendingCloud).toBe(true); expect(pending.cloudBaseRevision).toBeNull();
+    const recoveryStart = calls.length; allowReadback = true;
+    await page.getByRole('button', { name: 'Refresh cloud', exact: true }).click();
     await browserExpect.poll(async () => (await workingCopies(page))[0]?.pendingCloud).toBe(false);
-    expect((await workingCopies(page))[0]!.envelope.routine.id).toBe(initial.envelope.routine.id);
+    expect((await workingCopies(page))[0]).toMatchObject({ localVersion: pending.localVersion, cloudBaseRevision: 1,
+      envelope: { routine: { id: initial.envelope.routine.id, revision: 1 } } });
     expect(calls.filter(call => call.path === '/api/routines' && call.method === 'POST')).toHaveLength(1);
+    expect(calls.filter(call => call.path === routinePath && call.method === 'PUT')).toEqual([]);
+    expect(calls.slice(recoveryStart).every(call => call.method === 'GET' && !call.path.startsWith('/api/media/'))).toBe(true);
   }));
 
   test('review explicit Cloud Delete finishes before working-copy CAS removal and preserves media', () => withHosted(async ({ page, calls }) => {
@@ -568,15 +609,18 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Cached publication'); await upload(page);
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
-    await page.getByRole('button', { name: 'Close routine', exact: true }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Discard changes', exact: true }).click();
+    await closeRoutine(page);
     await demo(page);
     await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Cached draft'); await upload(page);
-    await page.getByRole('button', { name: 'Close routine', exact: true }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Discard changes', exact: true }).click();
+    await closeRoutine(page);
+    await page.getByRole('button', { name: 'Refresh cloud', exact: true }).click();
+    await browserExpect(page.getByRole('button', { name: 'Refresh cloud', exact: true })).toBeEnabled();
+    expect(await activeRoutinePointers(page)).toEqual([null, null, null, null]);
     await context.setOffline(true); await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     const start = calls.length;
     const library = page.locator('.routine-library');
+    await browserExpect(library).toBeVisible();
+    expect(await activeRoutinePointers(page)).toEqual([null, null, null, null]);
     await library.locator('.filter-menu > summary').filter({ hasText: /^Location$/ }).click();
     await library.getByRole('checkbox', { name: 'Local', exact: true }).uncheck();
     await library.locator('.filter-menu > summary').filter({ hasText: /^Status$/ }).click();
@@ -722,14 +766,17 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.getByRole('button', { name: 'Pause', exact: true }).click();
     const seek = page.getByRole('slider', { name: 'Seek current song', exact: true });
     const position = await seek.getAttribute('aria-valuenow');
-    const mediaReads = calls.filter(call => call.path.startsWith('/api/media/') && call.method === 'GET').length;
+    const mediaReads = calls.filter(call => /^\/api\/media\/[^/]+\/chunks\//.test(call.path) && call.method === 'GET').length;
+    const savedCopy = (await workingCopies(page))[0]!;
     await page.getByRole('button', { name: 'Edit cue times', exact: true }).click();
     const timing = page.getByRole('textbox', { name: 'Cue time (m:ss.s)', exact: true });
     const original = await timing.inputValue();
     await page.getByRole('button', { name: 'Move cue later', exact: true }).click();
     await browserExpect(timing).not.toHaveValue(original);
+    const saveStart = calls.length;
     await page.getByRole('button', { name: 'Save to Cloud', exact: true }).click();
     await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to Cloud.');
+    const savedCalls = calls.slice(saveStart);
     await browserExpect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible();
     await browserExpect(seek).toHaveAttribute('aria-valuenow', position!);
     await browserExpect(page.locator('.snapshot-status')).toHaveText('Prepared on this device');
@@ -737,7 +784,21 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await automaticReady(page);
     await browserExpect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible();
     await browserExpect(seek).toHaveAttribute('aria-valuenow', position!);
-    expect(calls.filter(call => call.path.startsWith('/api/media/') && call.method === 'GET')).toHaveLength(mediaReads);
+    expect(calls.filter(call => /^\/api\/media\/[^/]+\/chunks\//.test(call.path) && call.method === 'GET')).toHaveLength(mediaReads);
+    const routinePath = `/api/routines/${savedCopy.envelope.routine.id}`;
+    expect(calls.slice(beforeLogin).filter(call => call.path.startsWith('/api/routines'))).toEqual([
+      { path: '/api/routines', method: 'GET', status: 200 },
+      { path: '/api/routines?published=true', method: 'GET', status: 200 },
+      { path: routinePath, method: 'GET', status: 200 },
+      { path: routinePath, method: 'GET', status: 200 },
+      { path: routinePath, method: 'PUT', status: 200 },
+    ]);
+    expect(savedCalls).toEqual([
+      { path: routinePath, method: 'GET', status: 200 },
+      ...savedCopy.envelope.routine.tracks.map(track => ({ path: `/api/media/${savedCopy.envelope.media[track.id]!.id}`, method: 'GET', status: 200 })),
+      { path: routinePath, method: 'PUT', status: 200 },
+    ]);
+    expect(calls.slice(saveStart).filter(call => call.method === 'POST')).toEqual([]);
     expect(calls.filter(call => call.path.startsWith('/api/routines/') && call.method === 'PUT' && call.status === 200)).toHaveLength(1);
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
   }));
@@ -955,10 +1016,10 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const author = await device.newPage();
     author.on('dialog', dialog => dialog.accept());
     await login(author, 'editor'); await demo(author); await play(author);
+    const elapsed = await progress(author);
     await author.getByRole('tab', { name: 'Routines', exact: true }).click();
     await author.getByRole('combobox', { name: 'Filler sound', exact: true }).selectOption(`recording:${recording.id}`);
     await author.getByRole('combobox', { name: 'Filler mode', exact: true }).selectOption('timed');
-    const elapsed = await progress(author);
     await author.route(`**/api/media/${recording.asset.id}`, route => route.fulfill({ status: 500,
       contentType: 'application/json', body: JSON.stringify({ error: 'internal_error' }) }));
     await author.getByRole('tab', { name: 'Teach', exact: true }).click();

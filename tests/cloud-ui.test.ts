@@ -2024,6 +2024,7 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   appMocks.player.subscribe.mockImplementation((listener: (value: PlayerState) => void) => { emit = listener; listener(state); return () => {}; });
   appMocks.player.load.mockImplementation(async () => { state = { ...state, status: 'idle' }; emit(state); });
   appMocks.player.play.mockImplementation(async () => { state = { ...state, status: 'playing' }; emit(state); });
+  appMocks.player.pause.mockImplementation(() => { state = { ...state, status: 'paused' }; emit(state); });
   const server = { envelope: data.envelope, authStatus: 200, writeStatus: 200, fillers: [] as FillerRecording[], classes: [] as ClassSetup[],
     analyses: new Map<string, FillerAnalysis>() };
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
@@ -2262,6 +2263,63 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(panel.querySelector('.filler-library-feedback')!.textContent).not.toBe(t('fillerBpmSaved'));
   });
 
+  it('review Refresh retries a saved local revision after revalidation and reconciles a lost create without another POST', async () => {
+    const app = await bootCloudApp({ local: true });
+    const envelope = structuredClone(app.data.envelope); envelope.routine.revision = 9;
+    app.working.set(envelope.routine.id, { envelope, localVersion: 3, cloudBaseRevision: null, pendingCloud: true, savedAt: 1 });
+    let created: CloudRoutine | null = null;
+    const lostResponse = pending<void>();
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation(async (input, init) => {
+      if (String(input) === '/api/routines/routine-a' && init?.method === 'GET') {
+        return created ? json(created) : json({ error: 'routine_not_found' }, 404);
+      }
+      if (String(input) === '/api/routines' && init?.method === 'POST') {
+        created = JSON.parse(String(init.body)) as CloudRoutine;
+        expect(created.routine.revision).toBe(1);
+        await lostResponse.promise;
+        throw new TypeError('Lost create response');
+      }
+      return handler(input, init);
+    });
+    button(t('cloudRefresh')).click();
+    await vi.waitFor(() => expect(app.working.get(envelope.routine.id)?.cloudAttempt?.envelope.routine.revision).toBe(1));
+    expect(button(t('cloudRefresh')).disabled).toBe(true);
+    lostResponse.resolve();
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    await vi.waitFor(() => expect(appNodes.find(node => node.classList.contains('notice'))?.classList.contains('notice-error')).toBe(true));
+    expect(app.working.get(envelope.routine.id)).toMatchObject({ pendingCloud: true, cloudBaseRevision: null, localVersion: 3 });
+    const reads = app.fetcher.mock.calls.length;
+    await cloudClick(t('cloudRefresh'));
+    await vi.waitFor(() => expect(app.working.get(envelope.routine.id)?.pendingCloud).toBe(false));
+    expect(app.working.get(envelope.routine.id)).toMatchObject({ localVersion: 3, cloudBaseRevision: 1, envelope: { routine: { id: envelope.routine.id, revision: 1 } } });
+    expect(app.fetcher.mock.calls.filter(([path, init]) => path === '/api/routines' && init?.method === 'POST')).toHaveLength(1);
+    expect(app.fetcher.mock.calls.slice(reads).every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('review Close awaits both source pointers and Refresh never restores a closed working copy', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('cloudSave'));
+    const before = structuredClone(app.working.get('routine-a'));
+    const closing = pending<void>(); appMocks.clearActiveRoutine.mockReturnValueOnce(closing.promise);
+    app.store.setItem(classSelectionStorageKey, 'synthetic-reference');
+    button(t('closeRoutine')).click();
+    const dialog = appNodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+    dialog.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
+    expect(appMocks.clearActiveRoutine).toHaveBeenCalledOnce();
+    expect(dialog.open).toBe(true); expect(app.store.getItem(hostedCloudSelectionKey)).not.toBeNull();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    closing.resolve();
+    await vi.waitFor(() => expect(dialog.open).toBe(false));
+    expect(app.store.getItem(hostedCloudSelectionKey)).toBeNull(); expect(app.store.getItem(classSelectionStorageKey)).toBeNull();
+    expect(button(t('newRoutine')).hidden).toBe(false);
+    expect(appNodes.find(node => node.className === 'routine-library')!.hidden).toBe(false);
+    await cloudClick(t('cloudRefresh'));
+    expect(button(t('newRoutine')).hidden).toBe(false); expect(app.store.getItem(hostedCloudSelectionKey)).toBeNull();
+    expect(app.working.get('routine-a')).toEqual(before); expect(appMocks.deleteRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).toHaveBeenCalledOnce(); expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
   it('review pending Open Draft preserves local content and never rebases an unrelated remote head', async () => {
     const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('cloudSave'));
     app.server.writeStatus = 412; appMocks.editor.routine!.name = 'Pending local choreography'; appMocks.editor.changed!();
@@ -2377,6 +2435,15 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appNodes.filter(node => node.tag === 'select').some(node => node.children.some(option => option.value === 'routine-a'))).toBe(true);
   });
 
+  it.each(['local', 'cached'] as const)('review hosted startup retains automatic preparation through Cloud refresh for %s selection', async source => {
+    const app = await bootCloudApp({ local: source === 'local', cached: source === 'cached' });
+    await vi.waitFor(() => expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine));
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    expect(button(t('startClass')).disabled).toBe(false);
+    expect(app.fetcher.mock.calls.filter(([path]) => path === '/api/routines')).toHaveLength(1);
+  });
+
   it.each(['offline', 'signin-required'] as const)('keeps cached %s startup network-free and prepares silently without starting playback', async access => {
     const app = await bootCloudApp({ role: 'player', cached: true, access });
     expect(app.fetcher).not.toHaveBeenCalled();
@@ -2388,6 +2455,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each(['owner', 'editor'] as const)('manages the household filler catalog as %s only in Settings, with explicit consent and retained class audio', async role => {
     const app = await bootCloudApp({ role, local: true });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     const local: FillerRecording = { id: 'local-recording', name: 'My loop', duration: 8,
       asset: { ...app.data.asset, id: 'local-recording-asset' } };
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, sound: 'recording', recording: structuredClone(local) };
@@ -2578,6 +2647,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each(['owner', 'editor', 'player'] as const)('downloads a cold selected recording before all readiness checks and loading for %s', async role => {
     const app = await bootCloudApp({ role, local: role !== 'player', cached: role === 'player' });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     const startupRequests = app.fetcher.mock.calls.length;
     const recording = { id: 'known-filler', name: 'Loop', duration: 8, asset: app.data.asset };
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording', recording };
@@ -2590,7 +2661,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.cacheFillerRecording).toHaveBeenCalledWith(recording, expect.any(Blob));
     expect(appMocks.cacheFillerRecording.mock.invocationCallOrder[0]).toBeLessThan(appMocks.getReadiness.mock.invocationCallOrder.at(-1)!);
     expect(appMocks.getReadiness.mock.invocationCallOrder.at(-1)).toBeLessThan(appMocks.player.load.mock.invocationCallOrder[0]!);
-    expect(appMocks.player.load).toHaveBeenCalledWith(appMocks.editor.routine);
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(appMocks.editor.routine);
   });
 
   it.each(['401', '403', 'network', 'readiness'] as const)('keeps the previous prepared playing class on a cold filler %s failure', async failure => {
@@ -2616,6 +2687,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each(['stop', 'pause', 'draft', 'identity', 'new-prepare'] as const)('fences a late cold filler response after %s', async interruption => {
     const app = await bootCloudApp({ local: true });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     const startupRequests = app.fetcher.mock.calls.length;
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording',
       recording: { id: 'known-filler', name: 'Loop', duration: 8, asset: app.data.asset } };
@@ -2698,6 +2771,26 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.player.load).toHaveBeenCalledOnce();
     for (const command of [appMocks.player.stop, appMocks.player.dispose, appMocks.player.pause, appMocks.player.seek,
       appMocks.player.updateCues]) expect(command).not.toHaveBeenCalled();
+  });
+
+  it('review paused Practice cue Save uses authoritative preflight and manifests without POST, chunks, reload or replay', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await enterTeach();
+    button(t('play')).click(); await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
+    button(t('pause')).click(); expect(button(t('resume')).disabled).toBe(false);
+    button(t('editCueTimes')).click(); button(t('laterCue')).click();
+    expect(appMocks.editor.routine!.tracks[0]!.cues[0]!.anchor).toEqual({ kind: 'timestamp', seconds: 1.1 });
+    const requests = app.fetcher.mock.calls.length;
+    await cloudClick(t('cloudSave'));
+    expect(app.fetcher.mock.calls.slice(requests).map(([path, init]) => [path, init?.method ?? 'GET'])).toEqual([
+      ['/api/routines/routine-a', 'GET'], ['/api/media/asset-a', 'GET'], ['/api/routines/routine-a', 'PUT'],
+    ]);
+    expect(app.working.get('routine-a')?.pendingCloud).toBe(false);
+    expect(app.server.envelope.routine.tracks[0]!.cues[0]!.anchor).toEqual({ kind: 'timestamp', seconds: 1.1 });
+    await enterTeach();
+    expect(button(t('resume')).disabled).toBe(false);
+    expect(appMocks.player.load).toHaveBeenCalledOnce(); expect(appMocks.player.play).toHaveBeenCalledOnce();
+    expect(appMocks.player.pause).toHaveBeenCalledOnce(); expect(appMocks.player.stop).not.toHaveBeenCalled();
+    expect(appMocks.player.seek).not.toHaveBeenCalled(); expect(appMocks.player.updateCues).toHaveBeenCalledOnce();
   });
 
   it.each([401, 403, 412, 423])('keeps live cue timing and playback after a rejected household cue Save (%s)', async status => {
@@ -2794,11 +2887,17 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     ]));
     const reconciles = appMocks.reconcileRoutineWorkingCopy.mock.calls.length;
     const mutations = app.fetcher.mock.calls.filter(([, init]) => init?.method !== 'GET').length;
+    const version = appNodes.find(node => node.tag === 'select' && node.attributes.get('aria-label') === t('cloudVersion'))!;
+    expect(version.value).toBe('draft');
+    const opening = app.fetcher.mock.calls.length;
     const publishedRow = cloudRows.find(row => row.querySelector('.muted')!.textContent.endsWith(t('exportPublished')))!;
     publishedRow.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: publication.routine.name }))!.click();
     await vi.waitFor(() => expect(appMocks.editor.routine!.published).toBe(true));
     await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
     expect(appMocks.editor.routine).toEqual(publication.routine);
+    expect(version.value).toBe('draft');
+    expect(app.fetcher.mock.calls.slice(opening).filter(([path]) => String(path).startsWith('/api/routines/'))
+      .map(([path, init]) => [path, init?.method])).toEqual([['/api/routines/routine-a?published=true', 'GET']]);
     expect(appMocks.editor.canEdit!()).toBe(false);
     expect(appMocks.reconcileRoutineWorkingCopy).toHaveBeenCalledTimes(reconciles);
     expect(app.working.get('routine-a')).toEqual(before);
@@ -2887,6 +2986,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it('recovers a same-ID create collision only through explicit target confirmation and keeps local edits on Cancel/412', async () => {
     const app = await bootCloudApp({ local: true });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     button(t('edit')).click();
     await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
     appMocks.editor.routine!.name = 'Unsaved local source'; appMocks.editor.changed!();

@@ -358,16 +358,17 @@ async function loadHousehold(transfer: CloudTransfer): Promise<void> {
   renderCloudList();
 }
 
-const cloudRefresh = iconButton(t('cloudRefresh'), RefreshCw, () => { void runCloud(refreshHousehold); });
+const cloudRefresh = iconButton(t('cloudRefresh'), RefreshCw, () => { void runCloud(async transfer => {
+  await refreshHousehold(transfer);
+  await syncPending(transfer);
+}); });
 cloudMode.addEventListener('change', () => {
   cloudRoutines = [];
   renderCloudList();
   void runCloud(refreshHousehold);
 });
-const cloudOpen = iconButton(t('cloudOpen'), Download, () => { void runCloud(async transfer => {
-  if (!cloudSelect.value || (dirty && !confirm(t('confirmSwitch', { name: draft.name })))) return;
-  const id = cloudSelect.value;
-  const published = cloudMode.value === 'published';
+async function openCloudRoutine(id: string, published: boolean, transfer: CloudTransfer): Promise<void> {
+  if (!id || (dirty && !confirm(t('confirmSwitch', { name: draft.name })))) return;
   stopEditorAudio();
   const local = !published ? await getRoutineWorkingCopy(id) : null;
   if (local?.pendingCloud) { acceptWorkingCopy(local); requestPreparation(); return; }
@@ -384,7 +385,12 @@ const cloudOpen = iconButton(t('cloudOpen'), Download, () => { void runCloud(asy
   }
   const envelope = await cloudLibrary.open(id, published, transfer);
   await acceptCloudEnvelope(envelope, published);
-}); });
+}
+const cloudOpen = iconButton(t('cloudOpen'), Download, () => {
+  const id = cloudSelect.value;
+  const published = cloudMode.value === 'published';
+  void runCloud(transfer => openCloudRoutine(id, published, transfer));
+});
 const cloudUpload = iconButton(t('shareRoutine'), CloudUpload, () => { void runCloud(transfer => saveCloudDraft('save', transfer)); }, true);
 const cloudOpenDraft = iconButton(t('cloudOpenDraft'), Pencil, () => { void runCloud(async transfer => {
   if (!cloudSelection || !['owner', 'editor'].includes(getCloudRole() ?? '')) return;
@@ -1038,7 +1044,7 @@ function renderRoutineLibrary(): void {
         }
         clearCloudSelection(); acceptWorkingCopy(current); selectedClass = null; requestPreparation();
       }); return; }
-      if (source === 'household') { cloudMode.value = value.published ? 'published' : 'draft'; cloudSelect.value = value.id; syncCloudControls(); cloudOpen.click(); }
+      if (source === 'household') { void runCloud(transfer => openCloudRoutine(value.id, value.published, transfer)); }
       else if (value.published) { void runEditor(async () => {
         if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
         const identity = hostedPilot ? captureCloudIdentity() : () => {};
@@ -1456,14 +1462,14 @@ function acceptWorkingCopy(copy: RoutineWorkingCopy): void {
 function requestPreparation(): void { preparationFailed = false; autoPrepareRequested = true; schedulePreparation(); }
 function schedulePreparation(): void {
   if (!autoPrepareRequested || appDisposed || editorBusy || transportOperation.pending || composition?.working()) return;
-  autoPrepareRequested = false;
-  if (!routineOpen || !draft.tracks.length || validateRoutine(draft).length || composition?.pending()) return;
+  if (!routineOpen || !draft.tracks.length || validateRoutine(draft).length || composition?.pending()) { autoPrepareRequested = false; return; }
   if (loaded && state.status !== 'error' && preparedClassKey === classKey() && (selectedClass
     ? loaded.id === selectedClass.setup.routine.id && loaded.revision === selectedClass.setup.routine.revision
     : loaded.id === draft.id && loaded.revision === draft.revision && preparedCloudBase === selectionKey()
-      && contentFingerprint(loaded) === contentFingerprint(draft))) return;
+      && contentFingerprint(loaded) === contentFingerprint(draft))) { autoPrepareRequested = false; return; }
   queueMicrotask(() => {
-    if (!appDisposed && !editorBusy && !transportOperation.pending) {
+    if (autoPrepareRequested && !appDisposed && !editorBusy && !transportOperation.pending && !composition?.working()) {
+      autoPrepareRequested = false;
       stopEditorAudio();
       void transportOperation.run(async current => {
         try { await prepareRoutine(current); }
@@ -1474,13 +1480,17 @@ function schedulePreparation(): void {
 }
 
 async function retryPending(): Promise<void> {
-  if (!hostedPilot || retryingPending || editorBusy || appDisposed || getCloudContext().access !== 'online') return;
+  if (!editorBusy) await syncPending();
+}
+
+async function syncPending(transfer: CloudTransfer = {}): Promise<void> {
+  if (!hostedPilot || retryingPending || appDisposed || getCloudContext().access !== 'online') return;
   retryingPending = true;
   const identity = captureCloudIdentity();
   try {
     const copies = await listRoutineWorkingCopies(); identity();
     for (const copy of copies.filter(value => value.pendingCloud)) {
-      const result = await routineSaver.sync(copy); identity();
+      const result = await routineSaver.sync(copy, transfer); identity();
       if (appDisposed) return;
       if (result && routineOpen && draft.id === result.envelope.routine.id && workingCopy?.localVersion === copy.localVersion) {
         if (!dirty) acceptWorkingCopy(result);
