@@ -153,8 +153,8 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     await page.getByRole('button', { name: 'New routine', exact: true }).click();
     const input = { name: 'synthetic.opus', mimeType: 'audio/opus', buffer: encoded };
-    await browserExpect(page.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
-    await browserExpect(page.getByRole('button', { name: 'Import audio', exact: true })).toBeEnabled();
+    await browserExpect(page.locator('#panel-edit').getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
+    await browserExpect(page.locator('#panel-edit').getByRole('button', { name: 'Import audio', exact: true })).toBeEnabled();
     const importAudio = page.locator('#app > input[type=file][aria-label="Import audio"]');
     await browserExpect(importAudio).toBeEnabled();
     await importAudio.setInputFiles(input);
@@ -207,8 +207,8 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
       await offline.waitForFunction(() => navigator.serviceWorker.controller !== null);
       await offline.getByRole('tab', { name: 'Routines', exact: true }).click();
       await offline.getByRole('button', { name: 'New routine', exact: true }).click();
-      await browserExpect(offline.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
-      await browserExpect(offline.getByRole('button', { name: 'Import audio', exact: true })).toBeEnabled();
+      await browserExpect(offline.locator('#panel-edit').getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
+      await browserExpect(offline.locator('#panel-edit').getByRole('button', { name: 'Import audio', exact: true })).toBeEnabled();
       const offlineImport = offline.locator('#app > input[type=file][aria-label="Import audio"]');
       await browserExpect(offlineImport).toBeEnabled();
       await offlineImport.setInputFiles(input);
@@ -635,6 +635,9 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await library.getByRole('checkbox', { name: 'Cloud', exact: true }).uncheck();
     await library.getByRole('checkbox', { name: 'Draft', exact: true }).check();
     await library.getByRole('button', { name: 'Open Cached draft', exact: true }).click();
+    await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Cached draft');
+    const selectedCopy = (await workingCopies(page)).find(copy => copy.envelope.routine.name === 'Cached draft')!;
+    await browserExpect.poll(async () => (await activeRoutinePointers(page))[0]).toBe(selectedCopy.envelope.routine.id);
     await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Cached draft');
     expect(calls).toHaveLength(start);

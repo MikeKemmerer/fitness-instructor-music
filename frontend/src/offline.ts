@@ -455,6 +455,10 @@ export async function reconcileRoutineWorkingCopy(envelope: CloudRoutine): Promi
       snapshot.routine.revision === (current.cloudBaseRevision ?? current.envelope.routine.revision) &&
       workingContent(snapshot) !== workingContent(current.envelope)) throw new Error('routine_conflict');
     checkRoutineDowngrade(current.envelope.routine, snapshot.routine);
+    if (snapshot.routine.revision === current.cloudBaseRevision
+      && snapshot.routine.locked === current.envelope.routine.locked
+      && snapshot.routine.published === current.envelope.routine.published
+      && snapshot.routine.savedAt === current.envelope.routine.savedAt) return current;
     await cacheWorkingEnvelope(transaction, snapshot);
     const refreshed = { ...current, envelope: snapshot, cloudBaseRevision: snapshot.routine.revision,
       savedAt: snapshot.routine.savedAt ?? current.savedAt };

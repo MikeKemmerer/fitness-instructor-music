@@ -695,6 +695,16 @@ describe('unified working-copy review repairs', () => {
     }
   });
 
+  it('reopening an identical acknowledged Cloud revision does not restamp the local save', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const acknowledged = { ...first.envelope, routine: { ...first.envelope.routine, savedAt: first.savedAt + 1000 } };
+    await acknowledgeRoutineWorkingCopy(first.envelope.routine.id, first.localVersion, acknowledged);
+    const before = await getRoutineWorkingCopy(first.envelope.routine.id);
+    expect(before!.savedAt).not.toBe(acknowledged.routine.savedAt);
+    expect(await reconcileRoutineWorkingCopy(acknowledged)).toEqual(before);
+    expect(await getRoutineWorkingCopy(first.envelope.routine.id)).toEqual(before);
+  });
+
   it('returns authoritative clean content, rejects stale heads and accepts the returned local handle', async () => {
     const first = await saveRoutineWorkingCopy(envelope(), options);
     const id = first.envelope.routine.id;
