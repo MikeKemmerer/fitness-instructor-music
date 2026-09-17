@@ -1933,7 +1933,9 @@ class AppNode extends EventTarget {
 }
 
 async function bootCloudApp(options: { role?: CloudSession['user']['role']; local?: boolean; cached?: boolean;
-  access?: 'offline' | 'signin-required'; earlyEdit?: boolean; unready?: boolean; cachedClasses?: ClassSetup[]; cachedRoutines?: Routine[] } = {}) {
+  access?: 'offline' | 'signin-required'; earlyEdit?: boolean; unready?: boolean; cachedClasses?: ClassSetup[]; cachedRoutines?: Routine[];
+  pendingWorkingCopy?: boolean; readinessDeferred?: ReturnType<typeof pending<{ ready: boolean; missing: string[] }>>;
+  syncDeferred?: ReturnType<typeof pending<void>> } = {}) {
   vi.resetModules();
   vi.clearAllMocks();
   appNodes.length = 0;
@@ -1961,6 +1963,10 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   const blobs = new Map<string, Blob>([['entry-a', data.blob]]);
   const cached = new Map<string, Routine>();
   const working = new Map<string, RoutineWorkingCopy>();
+  if (options.pendingWorkingCopy) working.set(data.envelope.routine.id, {
+    envelope: structuredClone(data.envelope), localVersion: 1, cloudBaseRevision: data.envelope.routine.revision,
+    pendingCloud: true, savedAt: Date.now(),
+  });
   appMocks.listClassSetups.mockResolvedValue([]); appMocks.listMusicPlaylists.mockResolvedValue([]);
   appMocks.listCachedClassSetups.mockResolvedValue(options.cachedClasses ?? []); appMocks.getActiveRoutineSelection.mockResolvedValue(null);
   appMocks.listRoutinePublications.mockResolvedValue([]);
@@ -2017,6 +2023,7 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   appMocks.cacheCloudTrack.mockImplementation(async (id: string, blob: Blob) => { blobs.set(id, blob); });
   appMocks.cacheCloudRoutine.mockImplementation(async (routine: Routine) => { cached.set(routine.id, structuredClone(routine)); });
   appMocks.getReadiness.mockResolvedValue(options.unready ? { ready: false, missing: ['entry-a'] } : { ready: true, missing: [] });
+  if (options.readinessDeferred) appMocks.getReadiness.mockReturnValueOnce(options.readinessDeferred.promise);
   appMocks.filler.mockResolvedValue({});
   let state: PlayerState = { status: 'idle', trackIndex: 0, elapsed: 0, duration: 30, classElapsed: 0, currentCue: '', nextCue: '',
     nextCueIn: null, fillerRemaining: null, holding: false, ducked: false, beepsMuted: false, error: null };
@@ -2066,6 +2073,7 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
       next.routine.published = path.endsWith('/publish');
       server.envelope = structuredClone(next);
       server.envelope.routine.published = false;
+      if (path === '/api/routines/routine-a' && init.method === 'PUT') await options.syncDeferred?.promise;
       return json(next);
     }
     if (path.startsWith('/api/routines/')) return json(server.envelope);
@@ -2079,7 +2087,7 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   await import('../frontend/src/main');
   if (options.earlyEdit) { button(t('edit')).click(); localStartup.resolve(null); }
   await new Promise<void>(resolve => setImmediate(resolve));
-  await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+  if (!options.readinessDeferred && !options.syncDeferred) await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
   return { server, fetcher, data, store, navigate, cached, platform, working };
 }
 
@@ -2438,10 +2446,145 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
   it.each(['local', 'cached'] as const)('review hosted startup retains automatic preparation through Cloud refresh for %s selection', async source => {
     const app = await bootCloudApp({ local: source === 'local', cached: source === 'cached' });
     await vi.waitFor(() => expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine));
+    for (const tab of ['edit', 'settings'] as const) { button(t(tab)).click(); await enterTeach(); }
+    expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
     expect(appMocks.player.play).not.toHaveBeenCalled();
     expect(appMocks.player.unload).not.toHaveBeenCalled();
     expect(button(t('startClass')).disabled).toBe(false);
     expect(app.fetcher.mock.calls.filter(([path]) => path === '/api/routines')).toHaveLength(1);
+  });
+
+  it('prepares startup pending working copy exactly once after sync acknowledgment during held readiness', async () => {
+    const readinessDeferred = pending<{ ready: boolean; missing: string[] }>();
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, readinessDeferred, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.revision).toBe(app.data.envelope.routine.revision + 1));
+    expect(app.working.get('routine-a')!.pendingCloud).toBe(false);
+    readinessDeferred.resolve({ ready: true, missing: [] });
+    await vi.waitFor(() => {
+      expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
+      expect(button(t('startClass')).disabled).toBe(false);
+      expect(button(t('play')).disabled).toBe(false);
+      expect(appNodes.find(node => node.classList.contains('readiness'))!.querySelectorAll('p')
+        .find(node => node.attributes.get('role') === 'status')!.textContent).toBe(t('verifiedLocal'));
+    });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.server.envelope.routine);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('retries in-flight preparation for the newer saved generation returned by sync', async () => {
+    const readinessDeferred = pending<{ ready: boolean; missing: string[] }>();
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, access: 'offline', pendingWorkingCopy: true, readinessDeferred, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.getReadiness).toHaveBeenCalledOnce());
+    const { cloudClient } = await import('../frontend/src/cloud-client');
+    cloudClient.admitSession(session());
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    const newer = app.working.get('routine-a')!;
+    newer.localVersion++;
+    newer.envelope.routine.name = 'Newer saved class';
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.name).toBe('Newer saved class'));
+    readinessDeferred.resolve({ ready: true, missing: [] });
+    await vi.waitFor(() => {
+      expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
+      expect(button(t('startClass')).disabled).toBe(false);
+    });
+    expect(appMocks.getReadiness).toHaveBeenCalledTimes(2);
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.working.get('routine-a')!.envelope.routine);
+    expect(app.working.get('routine-a')).toMatchObject({ localVersion: 2, pendingCloud: false });
+    expect(appMocks.acknowledgeRoutineWorkingCopy).toHaveBeenCalledTimes(2);
+    expect(button(t('retryPreparation')).hidden).toBe(true);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('keeps playing audio and unsaved edits through a sync acknowledgment (dirty=%s)', async dirty => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, access: 'offline', pendingWorkingCopy: true, syncDeferred });
+    await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
+    button(t('play')).click();
+    await vi.waitFor(() => expect(appMocks.player.play.mock.settledResults[0]?.type).toBe('fulfilled'));
+    const { cloudClient } = await import('../frontend/src/cloud-client');
+    cloudClient.admitSession(session());
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    if (dirty) { appMocks.editor.routine!.name = 'Unsaved choreography'; appMocks.editor.changed!(); }
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(appMocks.editor.routine!.name).toBe(dirty ? 'Unsaved choreography' : app.data.envelope.routine.name);
+    expect(appMocks.player.load).toHaveBeenCalledOnce();
+    expect(appMocks.player.play).toHaveBeenCalledOnce();
+    expect(appMocks.player.pause).not.toHaveBeenCalled();
+    expect(appMocks.player.stop).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each(['close', 'reopen'] as const)('does not apply a late sync result after an explicit %s of the routine', async action => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    const original = structuredClone(appMocks.editor.routine!);
+    if (action === 'close') {
+      button(t('closeRoutine')).click();
+      const dialog = appNodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+      dialog.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
+      await vi.waitFor(() => expect(dialog.open).toBe(false));
+    } else await cloudClick(t('cloudOpenDraft'));
+    const newer = app.working.get('routine-a')!;
+    newer.localVersion++;
+    newer.envelope.routine.name = 'Separately saved generation';
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (action === 'close') {
+      expect(button(t('newRoutine')).hidden).toBe(false);
+      expect(button(t('startClass')).disabled).toBe(true);
+      expect(appMocks.player.load).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
+      expect(appMocks.editor.routine).toEqual(original);
+      expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(original);
+    }
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('keeps invalid unsaved input after sync without scheduling preparation retries', async () => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    appMocks.editor.routine!.crossfade = -1;
+    appMocks.editor.changed!();
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(appMocks.editor.routine!.crossfade).toBe(-1);
+    expect(appMocks.getReadiness).not.toHaveBeenCalled();
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(button(t('startClass')).disabled).toBe(true);
+  });
+
+  it('keeps a missing-media preparation failure actionable without automatically retrying', async () => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred, unready: true });
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await vi.waitFor(() => expect(button(t('retryPreparation')).hidden).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(appMocks.getReadiness).toHaveBeenCalledTimes(3);
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(button(t('startClass')).disabled).toBe(true);
+    expect(button(t('retryPreparation')).disabled).toBe(false);
+    expect(appNodes.find(node => node.classList.contains('notice'))?.classList.contains('notice-error')).toBe(true);
   });
 
   it.each(['offline', 'signin-required'] as const)('keeps cached %s startup network-free and prepares silently without starting playback', async access => {

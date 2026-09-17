@@ -1461,20 +1461,21 @@ function acceptWorkingCopy(copy: RoutineWorkingCopy): void {
 
 function requestPreparation(): void { preparationFailed = false; autoPrepareRequested = true; schedulePreparation(); }
 function schedulePreparation(): void {
-  if (!autoPrepareRequested || appDisposed || editorBusy || transportOperation.pending || composition?.working()) return;
+  if (!autoPrepareRequested || appDisposed || editorBusy || retryingPending || transportOperation.pending || composition?.working()) return;
   if (!routineOpen || !draft.tracks.length || validateRoutine(draft).length || composition?.pending()) { autoPrepareRequested = false; return; }
   if (loaded && state.status !== 'error' && preparedClassKey === classKey() && (selectedClass
     ? loaded.id === selectedClass.setup.routine.id && loaded.revision === selectedClass.setup.routine.revision
     : loaded.id === draft.id && loaded.revision === draft.revision && preparedCloudBase === selectionKey()
       && contentFingerprint(loaded) === contentFingerprint(draft))) { autoPrepareRequested = false; return; }
   queueMicrotask(() => {
-    if (autoPrepareRequested && !appDisposed && !editorBusy && !transportOperation.pending && !composition?.working()) {
+    if (autoPrepareRequested && !appDisposed && !editorBusy && !retryingPending && !transportOperation.pending && !composition?.working()) {
       autoPrepareRequested = false;
+      preparationFailed = false;
       stopEditorAudio();
       void transportOperation.run(async current => {
         try { await prepareRoutine(current); }
         catch (error) { if (current() && !appDisposed) preparationFailed = true; throw error; }
-      });
+      }).finally(schedulePreparation);
     }
   });
 }
@@ -1490,10 +1491,14 @@ async function syncPending(transfer: CloudTransfer = {}): Promise<void> {
   try {
     const copies = await listRoutineWorkingCopies(); identity();
     for (const copy of copies.filter(value => value.pendingCloud)) {
+      const source = draft;
       const result = await routineSaver.sync(copy, transfer); identity();
       if (appDisposed) return;
-      if (result && routineOpen && draft.id === result.envelope.routine.id && workingCopy?.localVersion === copy.localVersion) {
-        if (!dirty) acceptWorkingCopy(result);
+      if (result && routineOpen && draft === source && draft.id === result.envelope.routine.id && workingCopy?.localVersion === copy.localVersion) {
+        if (!dirty) {
+          acceptWorkingCopy(result);
+          if (!loaded || !['playing', 'filler', 'paused'].includes(state.status)) requestPreparation();
+        }
         else {
           workingCopy = result; draft.revision = result.envelope.routine.revision; draft.savedAt = result.envelope.routine.savedAt;
           cloudEnvelope = structuredClone(result.envelope); cloudSelection = { id: draft.id, revision: draft.revision, published: false };
@@ -1502,7 +1507,7 @@ async function syncPending(transfer: CloudTransfer = {}): Promise<void> {
       }
     }
   } catch (error) { if (!appDisposed) notify(cloudErrorMessage(error), true); }
-  finally { retryingPending = false; }
+  finally { retryingPending = false; schedulePreparation(); }
 }
 
 async function persistDraft(action: 'save' | 'lock' | 'unlock'): Promise<void> {
