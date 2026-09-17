@@ -7,7 +7,13 @@ const persistence = vi.hoisted(() => ({ saveDraftRecovery: vi.fn(async () => {})
 vi.mock('../frontend/src/offline', () => persistence);
 vi.mock('../frontend/src/ui', () => {
   const node = () => ({ textContent: '', disabled: false, children: [] as unknown[], append(...children: unknown[]) { this.children.push(...children); }, setAttribute() {} });
-  return { element: node, iconButton: (_label: string, _icon: unknown, action: () => void) => ({ ...node(), click() { if (!this.disabled) action(); } }) };
+  const transientText = (target: { textContent: string }) => ({
+    show(text: string) { target.textContent = text; },
+    refresh(text: string) { target.textContent = text; },
+    dismiss() { target.textContent = ''; },
+    dispose() {},
+  });
+  return { element: node, iconButton: (_label: string, _icon: unknown, action: () => void) => ({ ...node(), click() { if (!this.disabled) action(); } }), transientText };
 });
 
 describe('local edit history', () => {
