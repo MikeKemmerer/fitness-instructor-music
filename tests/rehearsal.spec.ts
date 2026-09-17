@@ -57,8 +57,8 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   await mode.selectOption('timed'); await duration.fill('37');
   await mode.selectOption('hold'); await expect(duration).toHaveValue('');
   await mode.selectOption('timed'); await expect(duration).toHaveValue('37');
-  await edit.getByLabel('Pre-routine filler', { exact: true }).check();
-  await edit.getByLabel('Post-routine filler', { exact: true }).check();
+  await edit.getByRole('checkbox', { name: 'Pre-routine filler', exact: true }).check();
+  await edit.getByRole('checkbox', { name: 'Post-routine filler', exact: true }).check();
   for (const card of await edit.locator('details[data-track-id]').all()) {
     if (!await card.evaluate(node => (node as HTMLDetailsElement).open)) await card.locator(':scope > summary').click();
     const analysis = card.locator('.analysis-details');
@@ -82,12 +82,15 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   await setSlider(page.getByRole('slider', { name: 'Beep volume', exact: true }), 40);
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-  const cue = edit.locator('.cue-row').first();
+  const cueId = await edit.locator('.cue-row').first().getAttribute('data-cue-id');
+  const cue = edit.locator(`.cue-row[data-cue-id="${cueId}"]`);
   await cue.getByRole('combobox', { name: 'Source', exact: true }).selectOption('timestamp');
+  await expect(cue.getByRole('combobox', { name: 'Source', exact: true })).toHaveValue('timestamp');
   const value = cue.getByLabel('Value', { exact: true });
+  await expect(value).toHaveAttribute('type', 'text');
   await value.fill('1:60'); await value.press('Tab'); await expect(value).toHaveAttribute('aria-invalid', 'true');
   await page.clock.install();
-  await edit.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
+  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
   await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(29_999); await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(1); await expect(page.locator('.notice.notice-error')).toBeHidden();
@@ -106,13 +109,13 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(edit.getByRole('button', { name: 'New routine', exact: true })).toBeHidden();
     await expect(edit.locator('.routine-library')).toBeHidden();
     await edit.locator('.routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill(`Unified synthetic ${viewport.width}`);
-    await edit.getByLabel('Pre-routine filler', { exact: true }).check();
-    await edit.getByLabel('Post-routine filler', { exact: true }).check();
+    await edit.getByRole('checkbox', { name: 'Pre-routine filler', exact: true }).check();
+    await edit.getByRole('checkbox', { name: 'Post-routine filler', exact: true }).check();
     await expect(edit.locator('[data-class-phase="before"] input[readonly]')).toHaveValue('');
     await edit.getByRole('button', { name: 'Undo edit', exact: true }).click();
-    await expect(edit.getByLabel('Post-routine filler', { exact: true })).not.toBeChecked();
+    await expect(edit.getByRole('checkbox', { name: 'Post-routine filler', exact: true })).not.toBeChecked();
     await edit.getByRole('button', { name: 'Redo edit', exact: true }).click();
-    await expect(edit.getByLabel('Post-routine filler', { exact: true })).toBeChecked();
+    await expect(edit.getByRole('checkbox', { name: 'Post-routine filler', exact: true })).toBeChecked();
     await expect(edit.getByRole('button', { name: 'Save class setup', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true })).toHaveCount(0);
     await edit.getByRole('button', { name: 'Save on this device', exact: true }).click();
@@ -185,7 +188,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
   await demo(page);
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({
+  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({
     name: 'Synthetic third track.wav', mimeType: 'audio/wav', buffer: syntheticWav(20),
   });
   await expect(page.locator('details[data-track-id]')).toHaveCount(3);
@@ -842,7 +845,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   await page.goto('/'); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Synthetic full class');
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles([
+  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles([
     { name: 'Routine A.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
     { name: 'Routine B.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
   ]);
@@ -1302,7 +1305,7 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   await setSlider(page.getByRole('slider', { name: 'Filler level', exact: true }), Number('0.5') * 100);
   await page.getByRole('combobox', { name: 'Filler mode', exact: true }).selectOption('timed');
   await page.getByRole('spinbutton', { name: 'Filler duration (seconds)', exact: true }).fill('2');
-  await page.getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
+  await page.getByRole('group', { name: 'Between tracks', exact: true }).getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
   await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
   await expect(page.locator('.notice [role="status"]')).toHaveText('Routine saved locally.');
   await page.getByRole('tab', { name: 'Teach', exact: true }).click();
@@ -1506,7 +1509,7 @@ test('editor acceptance workflow preserves 1:05.5, analyzed levels and bounded t
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('My fitness routine');
   const wav = syntheticWav(70);
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
+  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
   const song = page.locator('details[data-track-id]').first();
   await expect(song).toBeVisible();
   if (!await song.evaluate(node => (node as HTMLDetailsElement).open)) await song.locator(':scope > summary').click();

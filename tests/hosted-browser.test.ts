@@ -152,7 +152,7 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
     await ready(page);
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     const input = { name: 'synthetic.opus', mimeType: 'audio/opus', buffer: encoded };
-    await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles(input);
+    await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles(input);
     await browserExpect(page.locator('.notice')).toContainText('Imported 1 audio file', { timeout: 30000 });
     const converted = await audio(page, true);
     expect(converted).toHaveLength(1);
@@ -201,7 +201,7 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
       await offline.goto(origin);
       await offline.waitForFunction(() => navigator.serviceWorker.controller !== null);
       await offline.getByRole('tab', { name: 'Routines', exact: true }).click();
-      await offline.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles(input);
+      await offline.locator('input[type=file][aria-label="Import audio"]').setInputFiles(input);
       await browserExpect(offline.locator('.notice')).toContainText('Imported 1 audio file', { timeout: 30000 });
       const reimported = await audio(offline, true);
       expect(reimported).toHaveLength(2);
@@ -1073,7 +1073,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await setSlider(page.getByRole('slider', { name: 'Filler level', exact: true }), Number('0.5') * 100);
     await page.getByRole('combobox', { name: 'Filler mode', exact: true }).selectOption('timed');
     await page.getByRole('spinbutton', { name: 'Filler duration (seconds)', exact: true }).fill('2');
-    await page.getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
+    await page.getByRole('group', { name: 'Between tracks', exact: true }).getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
     page.on('dialog', dialog => dialog.accept());
     await upload(page);
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
