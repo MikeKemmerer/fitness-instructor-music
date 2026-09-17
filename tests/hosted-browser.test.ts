@@ -340,7 +340,7 @@ if (!hosted) test.skip('Requires frontend/dist built with VITE_HOSTED_PILOT=true
 describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only in-memory Blob storage', { timeout: 90_000 }, () => {
   test.each([false, true])('review older publication opens read-only and Return Draft preserves newer local work (pending=%s)', pendingCloud => withHosted(async ({ page, calls }) => {
     page.on('dialog', dialog => dialog.accept()); await login(page); await demo(page);
-    const actions = page.locator('.edit-panel .routine-overflow'); await actions.locator('summary').click();
+    const actions = page.locator('#panel-edit .routine-overflow'); await browserExpect(actions).toBeVisible();
     await page.getByRole('button', { name: 'Publish saved routine', exact: true }).click();
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     const published = (await (await page.request.get('/api/routines?published=true')).json()).routines[0] as { id: string; name: string; revision: number };
@@ -364,7 +364,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     expect((await workingCopies(page))[0]).toEqual(before);
     await browserExpect(page.locator('.draft-identity')).toContainText('Published');
-    if (!(await actions.evaluate(node => (node as HTMLDetailsElement).open))) await actions.locator('summary').click();
+    await browserExpect(actions).toBeVisible();
     await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue(before.envelope.routine.name);
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeEnabled();
@@ -577,7 +577,9 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await context.setOffline(true); await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     const start = calls.length;
     const library = page.locator('.routine-library');
+    await library.locator('.filter-menu > summary').filter({ hasText: /^Location$/ }).click();
     await library.getByRole('checkbox', { name: 'Local', exact: true }).uncheck();
+    await library.locator('.filter-menu > summary').filter({ hasText: /^Status$/ }).click();
     await library.getByRole('checkbox', { name: 'Draft', exact: true }).uncheck();
     await library.getByRole('button', { name: 'Open Cached publication', exact: true }).click();
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Cached publication');
@@ -706,6 +708,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.getByRole('button', { name: 'Open different routine', exact: true }).click();
     await browserExpect(page.getByRole('link', { name: 'Sign in', exact: true })).toBeHidden();
     const cloudRows = page.locator('.routine-library-rows');
+    await page.locator('.routine-library .filter-menu > summary').filter({ hasText: /^Location$/ }).click();
     await page.locator('.routine-library').getByRole('checkbox', { name: 'Local', exact: true }).uncheck();
     await browserExpect(cloudRows.getByRole('button', { name: 'Open Two-song practice', exact: true })).toBeVisible();
     const afterLogin = calls.slice(beforeLogin);
@@ -851,11 +854,13 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await upload(page);
     const cueId = await page.locator('.cue-row').first().getAttribute('data-cue-id');
     const cue = page.locator(`.cue-row[data-cue-id="${cueId}"]`);
+    await cue.getByRole('combobox', { name: 'Source', exact: true }).selectOption('timestamp');
     const timing = cue.getByLabel('Value', { exact: true });
+    await browserExpect(timing).toHaveAttribute('type', 'text');
     const originalTime = await timing.inputValue();
     const originalNote = await cue.getByRole('textbox', { name: 'Move / note', exact: true }).inputValue();
     await timing.fill('1:60'); await timing.press('Tab');
-    const duplicate = page.getByRole('button', { name: 'Duplicate saved cloud routine', exact: true });
+    const duplicate = page.getByRole('button', { name: 'Duplicate to New Routine', exact: true });
     await browserExpect(duplicate).toBeDisabled();
     const writesBefore = calls.filter(call => call.method !== 'GET').length;
     await duplicate.dispatchEvent('click');
