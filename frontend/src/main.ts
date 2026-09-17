@@ -947,6 +947,7 @@ const editorDemo = demoButton();
 editorActions.append(newDraft, editorDemo, save, routineOverflow, editorPrepare);
 const audioPicker = createAudioLibraryPicker({ library: cloudLibrary,
   preview: audioPreview, beforePreview: stopEditorAudio,
+  restoreFocus: () => { if (!appDisposed && routineOpen && activeTab === 'edit') addTrackMenu.trigger.focus({ preventScroll: true }); },
   hosted: hostedPilot, known: () => [{ routine: draft, media: { ...cloudEnvelope?.media, ...draftMedia } }],
   available: () => routineOpen && canEdit() && !draft.locked && !editorBusy && !transportOperation.pending && !appDisposed,
   identity: () => `${draft.id}:${draftGeneration}`, remaining: () => 100 - allRoutineTracks(draft).length,
@@ -1263,9 +1264,10 @@ function closeRoutine(): void {
   const id = draft.id;
   const dialog = element('dialog', 'library-dialog'); dialog.setAttribute('aria-label', t('closeRoutine'));
   const feedback = element('p'); const error = transientText(feedback);
-  const dismiss = () => { error.dispose(); dialog.close(); dialog.remove(); close.focus(); };
+  const dismiss = (restoreFocus = true) => { error.dispose(); dialog.close(); dialog.remove(); if (restoreFocus) close.focus(); };
   const finish = async (saving: boolean) => {
     if (editorBusy || draft.id !== id) return;
+    let completed = false;
     editorBusy = true; syncAvailability();
     try {
       if (saving) await saveWorkingRoutine();
@@ -1277,9 +1279,12 @@ function closeRoutine(): void {
       rememberClassSelection(localStorage, hostedPilot ? getCloudContext().user : null, null);
       clearCloudSelection(); routineOpen = false; chooserOpen = true; autoPrepareRequested = false;
       draft = newRoutine(); persistedRevision = null; dirty = false; draftGeneration++;
-      refreshDraft(true); dismiss();
+      refreshDraft(true); dismiss(false); completed = true;
     } catch (reason) { error.show(errorMessage(reason)); }
-    finally { editorBusy = false; syncAvailability(); }
+    finally {
+      editorBusy = false; syncAvailability();
+      if (completed && !appDisposed) (newDraft.hidden ? searchRoutines : newDraft).focus({ preventScroll: true });
+    }
   };
   dialog.addEventListener('cancel', event => { event.preventDefault(); if (!editorBusy) dismiss(); });
   const saveClose = iconButton(t(hostedPilot ? 'cloudSave' : 'save'), Save, () => { void finish(true); }, true);

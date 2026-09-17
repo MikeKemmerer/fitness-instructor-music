@@ -240,7 +240,7 @@ async function login(page: Page, username = 'owner') {
   await page.getByLabel('Username', { exact: true }).fill(username);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await browserExpect(page.locator('.local-status')).toHaveText('CLOUD');
+  await browserExpect(page.locator('.local-status')).toHaveText('Cloud');
 }
 async function demo(page: Page) {
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
@@ -272,6 +272,7 @@ async function closeRoutine(page: Page) {
   await dialog.getByRole('button', { name: 'Discard changes', exact: true }).click();
   await browserExpect(dialog).toHaveCount(0);
   await browserExpect(page.getByRole('button', { name: 'New routine', exact: true })).toBeVisible();
+  await browserExpect(page.getByRole('button', { name: 'New routine', exact: true })).toBeFocused();
   await browserExpect.poll(() => activeRoutinePointers(page)).toEqual([null, null, null, null]);
 }
 async function setSlider(control: Locator, percent: number) {
@@ -295,7 +296,7 @@ async function ready(page: Page) {
   await page.waitForFunction(async () => (await navigator.serviceWorker.getRegistration())?.active?.state === 'activated');
   await page.reload();
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  await browserExpect(page.locator('.local-status')).toHaveText('CLOUD');
+  await browserExpect(page.locator('.local-status')).toHaveText('Cloud');
 }
 const progress = async (page: Page) => Number(await page.getByRole('progressbar', { name: 'Track progress', exact: true }).getAttribute('aria-valuenow'));
 async function play(page: Page) {
@@ -467,6 +468,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       expect(new Set(downloads.map(call => call.path.split('/')[3])).size).toBe(1);
       await picker.getByRole('button', { name: 'Cancel', exact: true }).click();
       await browserExpect.poll(activeVoices).toBe(0); await browserExpect(picker).toHaveCount(0);
+      await browserExpect(cold.locator('.track-section-heading > .command-menu > summary')).toBeFocused();
       await browserExpect(cold.locator('details[data-track-id]')).toHaveCount(0);
       await openTrackSources(cold);
       await cold.getByRole('button', { name: 'From audio library', exact: true }).click();
@@ -787,6 +789,8 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     expect(afterLogin.filter(call => call.path === '/api/auth/login' && call.method === 'POST')).toHaveLength(1);
     expect(afterLogin.filter(call => call.path === '/api/routines' && call.method === 'GET')).toHaveLength(1);
     expect(afterLogin.some(call => call.path.startsWith('/api/media/'))).toBe(false);
+    await cloudRows.getByRole('button', { name: 'Open Two-song practice', exact: true }).click();
+    await closeRoutine(page);
     await cloudRows.getByRole('button', { name: 'Open Two-song practice', exact: true }).click();
     await automaticReady(page);
     await page.getByRole('button', { name: 'Play', exact: true }).click();
@@ -1283,6 +1287,6 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     release(); await (await delivered).finished();
     await page.waitForLoadState('networkidle');
     expect(downloads).toEqual([]);
-    await browserExpect(page.getByRole('button', { name: 'Export PDF packet', exact: true })).toBeDisabled();
+    await browserExpect(page.locator('.export-section').getByRole('button', { name: 'Export PDF packet', exact: true, includeHidden: true })).toBeDisabled();
   }, true));
 });
