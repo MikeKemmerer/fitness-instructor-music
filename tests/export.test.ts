@@ -137,7 +137,8 @@ describe('export registry and snapshots', () => {
       expect(JSON.stringify(output)).not.toContain('Private gap');
     }
     const workbook = buildWorkbookSheets(snapshot, ['cue.note']);
-    expect(workbook.flatMap(sheet => sheet.data.flatMap(row => row.map(cell => cell?.value)))).not.toContain(1.25);
+    expect(workbook.flatMap(sheet => sheet.data.flatMap(row => row.map(cell =>
+      cell && typeof cell === 'object' && 'value' in cell ? cell.value : cell)))).not.toContain(1.25);
     const packet = buildPdfPacket(snapshot, ['cue.note']);
     expect(packet.settings).toEqual([]);
     expect(packet.tracks.every(track => track.details === '' && track.columns.every(column => column.id === 'cue.note'))).toBe(true);
