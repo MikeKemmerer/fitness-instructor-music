@@ -136,6 +136,7 @@ async function convert(blob: Blob, coreURL: string, wasmURL: string): Promise<{ 
     const audio = streams.filter(stream => stream.codec_type === 'audio');
     if (!audio.length) fail('conversion_no_audio');
     if (audio.length !== 1) fail('conversion_multiple_audio');
+    probe('/input.bin', true);
     const stream = audio[0];
     const channels = stream.channels;
     if (!channels || !Number.isInteger(channels) || channels < 1 || channels > AAC_IMPORT.maxChannels) fail('conversion_channel_limit');
@@ -143,7 +144,6 @@ async function convert(blob: Blob, coreURL: string, wasmURL: string): Promise<{ 
     if (Number.isFinite(declaredDuration) && declaredDuration <= 0) fail('conversion_invalid_audio');
     if (declaredDuration > AAC_IMPORT.maxDuration + FRAME_SECONDS) fail('conversion_duration_limit');
     if (Math.ceil(declaredDuration * AAC_IMPORT.sampleRate) * channels * 4 > MAX_DECODED_BYTES) fail('conversion_memory_limit');
-    probe('/input.bin', true);
     let decodedBytes = 0;
     core.FS.registerDevice(231, { write: (_stream, _buffer, _offset, length) => {
       decodedBytes += length;

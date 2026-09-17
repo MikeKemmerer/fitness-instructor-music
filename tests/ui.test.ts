@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createClassMode, createTransportOperation, cueAtSeconds, nextMoveCountdown, watchOfflineShell } from '../frontend/src/ui';
+import { createClassMode, createTransportOperation, cueAtSeconds, gainSlider, nextMoveCountdown, transientText, watchOfflineShell } from '../frontend/src/ui';
+import { fillerControls, fillerSoundLabel } from '../frontend/src/filler-controls';
+import { createRoutineSave, sameSavedContent } from '../frontend/src/routine-save';
+import { createAudioLibraryPicker } from '../frontend/src/audio-library-picker';
+import * as cloudState from '../frontend/src/cloud-client';
+import { CloudRequestError } from '../frontend/src/cloud-client';
+import { cloudErrorMessage } from '../frontend/src/cloud-ui';
+import type { CloudRoutine } from '../shared/cloud-contract';
+import type { DraftRecovery, RoutineWorkingCopy } from '../frontend/src/offline';
+import type { createCloudLibrary } from '../frontend/src/cloud-library';
 import { cueSeconds, newRoutine, type Cue, type FillerRecording, type Routine, type Track } from '../shared/routine';
 import type { PlayerState } from '../shared/player-contract';
 import type { AudioPreview, PreviewState } from '../shared/preview-contract';
@@ -11,7 +20,64 @@ import { startApplication } from '../frontend/src/bootstrap';
 import { formatCueTime, parseCueTime } from '../frontend/src/cue-time';
 import { createClassPanel } from '../frontend/src/class-panel';
 import { createClassComposition } from '../frontend/src/class-composition';
-import type { ClassSetup, MusicPlaylist, PreparedClass } from '../shared/class-plan';
+import { createRecoveryPanel } from '../frontend/src/draft-protection';
+import type { ClassSetup, MusicPlaylist, PreparedClass, RevisionReference } from '../shared/class-plan';
+import { readFileSync } from 'node:fs';
+
+describe('unified review source guards', () => {
+  const source = (file: string) => readFileSync(new URL(`../frontend/src/${file}`, import.meta.url), 'utf8');
+  it('limits visible numeric revisions to header metadata and chosen export content', () => {
+    const catalog = source('locales/en-US.ts').split('\n').filter(line => line.includes('{revision}'));
+    expect(catalog).toHaveLength(2); expect(catalog[0]).toContain('routineMetadata:'); expect(catalog[1]).toContain('exportPdfRevision:');
+    expect(source('class-panel.ts')).not.toContain('${reference.revision}');
+    expect(t('duplicate')).toBe('Duplicate to New Routine'); expect(t('existingAudio')).toBe('From Audio Library');
+  });
+  it('places name before chronological phases and uses symmetric spacing and stacked gain output', () => {
+    const editor = source('editor.ts');
+    expect(editor.indexOf('form.append(nameFields)')).toBeLessThan(editor.indexOf('form.append(context.beforeTracks)'));
+    expect(editor.indexOf('form.append(context.beforeTracks)')).toBeLessThan(editor.indexOf('form.append(tracks)'));
+    expect(editor.indexOf('form.append(tracks)')).toBeLessThan(editor.indexOf('form.append(context.afterTracks)'));
+    const css = source('styles.css');
+    expect(css).toMatch(/\.before-routine-phases, \.after-routine-phases \{[^}]*margin-block: 24px/);
+    expect(css).toMatch(/\.routine-name-field \{[^}]*margin-block: 16px/);
+    expect(css).toMatch(/\.gain-control \.field \{[^}]*grid-template-columns: minmax\(0, 1fr\);/);
+    for (const engine of ['webkit-slider-runnable-track', 'moz-range-track']) {
+      expect(css).toContain(`::-${engine}`);
+    }
+    expect(css).toContain('var(--accent) 80%, #c93240 100%');
+  });
+  it('routes owned inline errors through deadline-aware helpers without direct error writes', () => {
+    expect(source('filler-library.ts')).toContain("errors.show(t('audioByteLimit'))");
+    expect(source('filler-library.ts')).not.toMatch(/feedback\.textContent\s*=/);
+    expect(source('export-panel.ts')).not.toMatch(/feedback\.textContent\s*=/);
+    expect(source('editor.ts')).not.toMatch(/timePreview\.textContent\s*=/);
+    expect(source('draft-protection.ts')).toContain("feedback.show(t('recoveryFailed'))");
+  });
+  it('records staged attempts before committing and retains the final local CAS check', () => {
+    const saver = source('routine-save.ts');
+    expect(saver).toContain('sameSavedContent(head, attempt.envelope)');
+    expect(saver.indexOf('saveRoutineWorkingCopy(staged')).toBeLessThan(saver.indexOf('recordRoutineSyncAttempt('));
+    expect(saver.indexOf('recordRoutineSyncAttempt(')).toBeLessThan(saver.lastIndexOf('current.localVersion !== queued.localVersion'));
+    expect(saver.lastIndexOf('current.localVersion !== queued.localVersion')).toBeLessThan(saver.indexOf('library.commit(staged'));
+    expect(saver).toContain('if (queued.cloudBaseRevision === null) staged.routine.revision = 1');
+  });
+  it('reconciles authoritative lifecycle state and awaits the local row active pointer', () => {
+    const main = source('main.ts');
+    expect(main).toContain('await reconcileRoutineWorkingCopy(envelope)');
+    expect(main).toMatch(/await setActiveRoutine\(value.id\); identity\(\);[\s\S]*clearCloudSelection\(\); acceptWorkingCopy\(current\)/);
+    expect(main).toContain('await listCloudRoutines()'); expect(main).toContain('await listRoutinePublications()');
+    expect(main).not.toContain('localDelete.disabled ||= !!workingCopy');
+    expect(main.indexOf("await cloudLibrary.command(cloudEnvelope, 'delete'")).toBeLessThan(main.indexOf('await deleteRoutineWorkingCopy(id, copy.localVersion)'));
+  });
+  it('uses exact class authority and cache resolution without converting player selections', () => {
+    const library = source('class-library.ts'); const main = source('main.ts');
+    expect(library).toContain('{ classId: setup.id, revision: setup.revision }');
+    expect(library).toContain('const resolved = await prepare(selection, transfer)');
+    expect(library).not.toContain('await media.open(setup.routine.id');
+    expect(main).toMatch(/selectedClass = structuredClone\(selection\);[\s\S]*rememberClassSelection\(localStorage, getCloudContext\(\).user, selection\)/);
+    expect(main).toContain('if (playlist?.tracks.length) sequence[phase]');
+  });
+});
 
 describe('cue time text', () => {
   it.each(['', ' ', '1:60', '1:60.1', '-1', 'NaN', 'Infinity', '1:2', '1:02:03', '1e2', '.5'])('rejects %j without coercion', value => {
@@ -32,21 +98,28 @@ describe('cue time text', () => {
 });
 
 const mocks = vi.hoisted(() => ({
-  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
+  getRoutineWorkingCopy: vi.fn(), listRoutineWorkingCopies: vi.fn(async (): Promise<RoutineWorkingCopy[]> => []), saveRoutineWorkingCopy: vi.fn(), acknowledgeRoutineWorkingCopy: vi.fn(), clearActiveRoutine: vi.fn(),
+  recordRoutineSyncAttempt: vi.fn(), reconcileRoutineWorkingCopy: vi.fn<(envelope: CloudRoutine) => Promise<RoutineWorkingCopy | null>>(async () => null), deleteRoutineWorkingCopy: vi.fn(),
+  listCloudRoutines: vi.fn(async (): Promise<Routine[]> => []), listRoutinePublications: vi.fn(async (): Promise<Routine[]> => []),
+  getCloudRoutine: vi.fn(), cacheCloudRoutine: vi.fn(),
+  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async (): Promise<DraftRecovery[]> => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), setActiveRoutine: vi.fn(), saveRoutine: vi.fn(),
+  getActiveRoutineSelection: vi.fn<() => Promise<RevisionReference | null>>(async () => null), setActiveRoutineSelection: vi.fn(), listCachedClassSetups: vi.fn(async () => []),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), renderEditor: vi.fn(),
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
   cacheFillerRecording: vi.fn(), getFillerRecordingBlob: vi.fn(),
   listMusicPlaylists: vi.fn(), getMusicPlaylist: vi.fn(), saveMusicPlaylist: vi.fn(), cacheMusicPlaylist: vi.fn(), deleteMusicPlaylist: vi.fn(),
   listClassSetups: vi.fn(), getClassSetup: vi.fn(), saveClassSetup: vi.fn(), cacheClassSetup: vi.fn(), deleteClassSetup: vi.fn(),
-  publishRoutine: vi.fn(), deleteRoutine: vi.fn(),
+  publishRoutine: vi.fn(), deleteRoutine: vi.fn(), deleteRoutineAndWorkingCopy: vi.fn(),
   getCachedClassSetup: vi.fn(), getPreparedClass: vi.fn(),
   getTrackBlob: vi.fn(), cacheCloudTrack: vi.fn(),
   createAudioPreview: vi.fn(), detectBpm: vi.fn(), analyzeLoudness: vi.fn(),
   exportExcel: vi.fn(), exportPdf: vi.fn(), downloadExport: vi.fn(),
-  preview: { stop: vi.fn(), dispose: vi.fn(), playFiller: vi.fn() },
+  preview: { stop: vi.fn(), dispose: vi.fn(), playFiller: vi.fn(), playTrack: vi.fn(), pause: vi.fn(),
+    getState: vi.fn(() => ({ kind: 'idle', trackId: null, playing: false, loading: false, elapsed: 0, duration: 0, error: null })),
+    subscribe: vi.fn(() => () => {}) },
   editorSession: { syncAvailability: vi.fn(), cancelJobs: vi.fn(), refreshFillers: vi.fn(), dispose: vi.fn() },
-  player: { load: vi.fn(), play: vi.fn(), pause: vi.fn(), stop: vi.fn(), previous: vi.fn(), next: vi.fn(),
+  player: { unload: vi.fn(), load: vi.fn(), play: vi.fn(), pause: vi.fn(), stop: vi.fn(), previous: vi.fn(), next: vi.fn(),
     seek: vi.fn(), updateCues: vi.fn(), advance: vi.fn(),
     hold: vi.fn(), continue: vi.fn(), setVolume: vi.fn(), setBeepVolume: vi.fn(),
     setDucked: vi.fn(), setBeepsMuted: vi.fn(), subscribe: vi.fn(), dispose: vi.fn() },
@@ -195,6 +268,474 @@ function pointer(target: TestElement, type: string, clientX: number, pointerId =
 function key(target: EventTarget, value: string, shiftKey = false): void {
   target.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key: value, shiftKey }));
 }
+
+describe('unified routine controls', () => {
+  beforeEach(() => { stubDocument(); vi.stubGlobal('window', new EventTarget()); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('loads an already-open recovery panel when startup or preparation becomes available', async () => {
+    let allowed = false;
+    const routine = newRoutine(); routine.name = 'Morning';
+    const record = { id: 'morning-recovery', kind: 'routine' as const, source: 'local' as const,
+      value: routine, baseRevision: null, media: {}, updatedAt: 1000 };
+    mocks.listDraftRecoveries.mockReset().mockResolvedValue([record]);
+    const restore = vi.fn(async () => {});
+    const panel = createRecoveryPanel({ allowed: () => allowed, restore, message: vi.fn() });
+    try {
+      const root = panel.element as unknown as TestElement;
+      root.open = true; root.dispatchEvent(new Event('toggle'));
+      expect(mocks.listDraftRecoveries).not.toHaveBeenCalled();
+      allowed = true; panel.sync();
+      await vi.waitFor(() => expect(root.querySelectorAll('.routine-library-row')).toHaveLength(1));
+      root.querySelectorAll('button').find(button => button.title === t('restoreCopy'))!.click();
+      expect(restore).toHaveBeenCalledWith(record);
+      panel.sync(); panel.sync();
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(1);
+      root.open = false; allowed = false; panel.sync(); allowed = true; panel.sync();
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(1);
+      panel.dispose(); root.open = true; allowed = false; panel.sync(); allowed = true; panel.sync();
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(1);
+    } finally { panel.dispose(); mocks.listDraftRecoveries.mockReset().mockResolvedValue([]); }
+  });
+
+  it('retries an open recovery read interrupted by preparation and ignores stale results', async () => {
+    let allowed = true;
+    const routine = newRoutine(); routine.name = 'Morning';
+    const record = { id: 'morning-recovery', kind: 'routine' as const, source: 'local' as const,
+      value: routine, baseRevision: null, media: {}, updatedAt: 1000 };
+    const first = deferred();
+    mocks.listDraftRecoveries.mockReset().mockImplementationOnce(async () => { await first.promise; return []; }).mockResolvedValue([record]);
+    const panel = createRecoveryPanel({ allowed: () => allowed, restore: vi.fn(async () => {}), message: vi.fn() });
+    try {
+      const root = panel.element as unknown as TestElement;
+      root.open = true; root.dispatchEvent(new Event('toggle'));
+      allowed = false; panel.sync();
+      allowed = true; panel.sync();
+      await vi.waitFor(() => expect(root.querySelectorAll('.routine-library-row')).toHaveLength(1));
+      first.resolve(); await Promise.resolve(); await Promise.resolve();
+      expect(root.querySelectorAll('.routine-library-row')).toHaveLength(1);
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(2);
+      panel.sync(); expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(2);
+    } finally { first.resolve(); panel.dispose(); mocks.listDraftRecoveries.mockReset().mockResolvedValue([]); }
+  });
+
+  it('preserves an over-limit stored gain until the percentage slider is adjusted', () => {
+    let gain = 1.5;
+    const control = gainSlider(t('trackGain'), () => gain, value => { gain = value; });
+    const root = control.element as unknown as TestElement;
+    const slider = root.querySelector('input')!;
+    expect(slider.type).toBe('range'); expect(root.querySelectorAll('input')).toHaveLength(1);
+    expect(root.querySelector('output')!.textContent).toBe('150%'); expect(gain).toBe(1.5);
+    expect(root.querySelector('.gain-warning')!.hidden).toBe(false);
+    slider.value = '125'; slider.dispatchEvent(new Event('input'));
+    expect(gain).toBe(1.25); expect(root.querySelector('output')!.textContent).toBe('125%');
+  });
+
+  it('does not change a disabled gain control through a dispatched event', () => {
+    let gain = 1.4;
+    const control = gainSlider(t('trackGain'), () => gain, value => { gain = value; }, () => false);
+    const slider = (control.element as unknown as TestElement).querySelector('input')!;
+    slider.value = '10'; slider.dispatchEvent(new Event('input')); expect(gain).toBe(1.4);
+  });
+
+  it('shows a blank held duration and restores the retained timed duration', () => {
+    const filler = { ...newRoutine().filler, mode: 'hold' as const, seconds: 37 } as Routine['filler'];
+    const root = fillerControls(filler, () => [], () => {}, () => true) as unknown as TestElement;
+    const input = root.querySelectorAll('label').find(value => value.textContent === t('fillerDuration'))!.children[0]!;
+    expect(input.value).toBe(''); expect(filler.seconds).toBe(37);
+    const mode = root.querySelectorAll('select')[0]!; mode.value = 'timed'; mode.dispatchEvent(new Event('change'));
+    expect(input.value).toBe('37'); expect(filler.seconds).toBe(37);
+    expect(fillerSoundLabel({ ...filler, sound: 'lofi' })).toContain('(16 s)');
+  });
+
+  it('expires only the latest error and preserves unrelated invalid form state', async () => {
+    vi.useFakeTimers();
+    const feedback = new TestElement('p'); const input = new TestElement('input'); input.setAttribute('aria-invalid', 'true');
+    const error = transientText(feedback as unknown as HTMLElement);
+    error.show('First'); await vi.advanceTimersByTimeAsync(20_000); error.show('Second');
+    await vi.advanceTimersByTimeAsync(10_000); expect(feedback.textContent).toBe('Second');
+    await vi.advanceTimersByTimeAsync(20_000); expect(feedback.hidden).toBe(true);
+    expect(input.attributes.get('aria-invalid')).toBe('true'); error.dispose();
+  });
+
+  it('clears overdue background errors on return without renewing errors during rendering', () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const feedback = new TestElement('p'); const error = transientText(feedback as unknown as HTMLElement);
+    error.show('Invalid'); vi.setSystemTime(20_000); error.refresh('Invalid');
+    vi.setSystemTime(31_001); document.dispatchEvent(new Event('visibilitychange'));
+    expect(feedback.hidden).toBe(true);
+    error.refresh('Invalid'); expect(feedback.hidden).toBe(true);
+    error.show('Invalid'); expect(feedback.hidden).toBe(false);
+    error.dispose(); vi.setSystemTime(70_000); document.dispatchEvent(new Event('visibilitychange'));
+    expect(feedback.textContent).toBe('Invalid'); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps an enabled unselected phase incomplete and restores it without a second save or history', () => {
+    const routine = newRoutine(); const changed = vi.fn();
+    const composition = createClassComposition({ hosted: false, routine: () => routine, source: () => 'local', busy: () => false,
+      recordings: () => [], managePlaylists: () => {}, changed, message: () => {} });
+    composition.sync();
+    composition.restore({ enabled: { walkIn: true, before: false, after: false, walkOut: false }, retained: {} });
+    expect(composition.pending()).toBe(true);
+    const root = composition.controls as unknown as TestElement;
+    expect(root.querySelectorAll('button').some(button => button.title === t('saveClassSetup'))).toBe(false);
+    expect(root.querySelectorAll('.draft-protection')).toHaveLength(0);
+    const input = root.querySelectorAll('input')[0]!; input.checked = false; input.dispatchEvent(new Event('change'));
+    expect(composition.pending()).toBe(false); expect(changed).toHaveBeenCalledTimes(1); composition.dispose();
+  });
+
+  it('edits owned walk-in and walk-out gains through routine history without altering the source playlist', () => {
+    const routine = newRoutine(); const changed = vi.fn();
+    const track: Track = { id: 'arrival', title: 'Arrival', duration: 30, firstBeat: 0, bodyArea: '', cues: [], gain: 1.4 };
+    routine.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [structuredClone(track)] }, walkOut: { name: 'Exit', tracks: [{ ...track, id: 'exit' }] } };
+    const composition = createClassComposition({ hosted: false, routine: () => routine, source: () => 'local', busy: () => false,
+      recordings: () => [], managePlaylists: () => {}, changed, message: () => {} });
+    composition.sync();
+    for (const [root, phase] of [[composition.beforeTracks, 'walkIn'], [composition.afterTracks, 'walkOut']] as const) {
+      const slider = (root as unknown as TestElement).querySelector('.gain-control')!.querySelector('input')!;
+      slider.value = '110'; slider.dispatchEvent(new Event('input'));
+      expect(routine.sequence[phase]!.tracks[0]!.gain).toBe(1.1);
+    }
+    expect(changed).toHaveBeenCalledTimes(2); expect(track.gain).toBe(1.4);
+    routine.locked = true;
+    const slider = (composition.beforeTracks as unknown as TestElement).querySelector('.gain-control')!.querySelector('input')!;
+    slider.value = '50'; slider.dispatchEvent(new Event('input'));
+    expect(routine.sequence.walkIn!.tracks[0]!.gain).toBe(1.1); composition.dispose();
+  });
+
+  it('reenables owned phase sliders after preparation and lock transitions without rebuilding the sequence', () => {
+    const routine = newRoutine(); let busy = true;
+    routine.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [{ id: 'arrival', title: 'Arrival', duration: 30, firstBeat: 0, bodyArea: '', cues: [] }] } };
+    const composition = createClassComposition({ hosted: false, routine: () => routine, source: () => 'local', busy: () => busy,
+      recordings: () => [], managePlaylists: () => {}, changed: () => {}, message: () => {} });
+    composition.sync(); const input = (composition.beforeTracks as unknown as TestElement).querySelector('.gain-control')!.querySelector('input')!;
+    expect(input.disabled).toBe(true); busy = false; composition.sync(); expect(input.disabled).toBe(false);
+    routine.locked = true; composition.sync(); expect(input.disabled).toBe(true);
+    routine.locked = false; composition.sync(); expect(input.disabled).toBe(false); composition.dispose();
+  });
+
+  it('refuses count conversion when imported BPM is unknown', () => {
+    const track: Track = { id: 'unknown', title: 'Unknown', duration: 30, firstBeat: 0, bodyArea: '', cues: [] };
+    expect(cueAtSeconds(track, { id: 'cue', note: 'Move', anchor: { kind: 'count', count: 1 } }, 5, 30)).toBeNull();
+    expect(cueAtSeconds(track, { id: 'cue', note: 'Move', anchor: { kind: 'timestamp', seconds: 1 } }, 5, 30)?.anchor).toEqual({ kind: 'timestamp', seconds: 5 });
+  });
+});
+
+describe('unified audio picker', () => {
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+  async function previewHarness() {
+    const owner = stubDocument(); const root = new TestElement('body'); Object.assign(owner, { body: root });
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', expiresAt: Date.now() + 3600_000,
+      user: { id: 'author', username: 'author', role: 'editor', authVersion: 1 } });
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
+    let validIdentity = true;
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => { if (!validIdentity) throw new Error('cloud_cancelled'); });
+    let identityChanged = () => {};
+    const unsubscribeIdentity = vi.fn();
+    vi.spyOn(cloudState, 'subscribeCloudSession').mockImplementation(listener => {
+      identityChanged = () => listener(cloudState.getCloudContext()); return unsubscribeIdentity;
+    });
+    const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
+    const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
+    const items = ['First', 'Second'].map(title => ({ title, duration: 30,
+      asset: { id: title.toLowerCase(), bytes: blob.size, contentType: blob.type, sha256 } }));
+    const cache = new Map<string, Blob>();
+    mocks.getTrackBlob.mockImplementation(async id => cache.get(id));
+    mocks.cacheCloudTrack.mockImplementation(async (id, value) => { cache.set(id, value); });
+    const library = { audioPage: vi.fn(async () => ({ items })),
+      downloadTracks: vi.fn(async (tracks: Track[], _media: CloudRoutine['media'], _transfer: { signal?: AbortSignal }) => {
+        cache.set(tracks[0]!.id, blob);
+      }) };
+    let state: PreviewState = { kind: 'idle', trackId: null, playing: false, loading: false, elapsed: 0, duration: 0, error: null };
+    const listeners = new Set<(state: PreviewState) => void>();
+    const emit = (value: Partial<PreviewState>) => { state = { ...state, ...value }; for (const listener of listeners) listener(state); };
+    const unsubscribePreview = vi.fn();
+    const preview: AudioPreview = {
+      playTrack: vi.fn(async track => emit({ kind: 'track', trackId: track.id, playing: true, duration: track.duration })),
+      playFiller: vi.fn(async () => {}), getState: () => state, seek: vi.fn(), dispose: vi.fn(),
+      stop: vi.fn(() => emit({ kind: 'idle', trackId: null, playing: false, loading: false })),
+      pause: vi.fn(() => emit({ playing: false, loading: false })),
+      subscribe: listener => { listeners.add(listener); listener(state); return () => { listeners.delete(listener); unsubscribePreview(); }; },
+    };
+    const added = vi.fn(); const beforePreview = vi.fn(); let source = 'draft:1';
+    const picker = createAudioLibraryPicker({ library: library as unknown as ReturnType<typeof createCloudLibrary>,
+      preview, beforePreview, available: () => true, identity: () => source, remaining: () => 10, added, duration: async () => 30 });
+    picker.element.click();
+    await vi.waitFor(() => expect(root.querySelectorAll('.audio-library-row')).toHaveLength(2));
+    const row = (title = 'First') => root.querySelectorAll('.audio-library-row').find(node => node.querySelector('label')?.textContent === title)!;
+    const choose = (title = 'First') => { const checkbox = row(title).querySelector('input')!; checkbox.checked = true; checkbox.dispatchEvent(new Event('change')); };
+    const button = (label: string) => root.querySelectorAll('button').find(node => node.title === label)!;
+    const play = (title = 'First') => row(title).querySelectorAll('button').find(node => node.title === t('playPreview'))!.click();
+    return { root, picker, preview, library, added, beforePreview, items, cache, blob, row, choose, button, play,
+      unsubscribeIdentity, unsubscribePreview, invalidate: () => { validIdentity = false; identityChanged(); },
+      changeSource: () => { source = 'draft:2'; picker.sync(); } };
+  }
+
+  it('previews only a checked asset, keeps Open/search metadata-only, and reuses verified bytes on explicit Add', async () => {
+    const harness = await previewHarness();
+    const search = harness.root.querySelectorAll('input').find(node => node.type === 'search')!;
+    search.value = 'First'; search.dispatchEvent(new Event('input'));
+    harness.play();
+    expect(harness.library.downloadTracks).not.toHaveBeenCalled(); expect(mocks.getTrackBlob).not.toHaveBeenCalled();
+    expect(harness.preview.playTrack).not.toHaveBeenCalled();
+    harness.choose(); harness.play();
+    await vi.waitFor(() => expect(harness.preview.playTrack).toHaveBeenCalledOnce());
+    const track = vi.mocked(harness.preview.playTrack).mock.calls[0]![0];
+    expect(harness.library.downloadTracks).toHaveBeenCalledExactlyOnceWith([expect.objectContaining({ title: 'First' })],
+      { [track.id]: harness.items[0]!.asset }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(harness.beforePreview).toHaveBeenCalledOnce(); expect(harness.added).not.toHaveBeenCalled();
+    harness.button(t('pausePreview')).click(); expect(harness.preview.pause).toHaveBeenCalledOnce();
+    harness.play(); await vi.waitFor(() => expect(harness.preview.playTrack).toHaveBeenCalledTimes(2));
+    expect(harness.library.downloadTracks).toHaveBeenCalledOnce();
+    harness.button(t('addSelectedAudio')).click(); await vi.waitFor(() => expect(harness.added).toHaveBeenCalledOnce());
+    const [tracks, media] = harness.added.mock.calls[0]!;
+    expect(tracks).toEqual([{ ...track, id: expect.any(String) }]); expect(tracks[0].id).not.toBe(track.id);
+    expect(media).toEqual({ [tracks[0].id]: harness.items[0]!.asset });
+    expect(harness.library.downloadTracks).toHaveBeenCalledOnce(); expect(harness.preview.getState().playing).toBe(false);
+    expect(harness.root.querySelector('dialog')).toBeNull(); expect(harness.preview.dispose).not.toHaveBeenCalled();
+    harness.picker.dispose();
+  });
+
+  it.each(['cancel', 'escape', 'close', 'dispose', 'identity', 'source', 'pause', 'stop', 'external-stop'] as const)(
+    'cancels a pending preview on %s and never starts or inserts late audio', async action => {
+      const harness = await previewHarness(); const wait = deferred();
+      harness.library.downloadTracks.mockImplementation(async tracks => { await wait.promise; harness.cache.set(tracks[0]!.id, harness.blob); });
+      harness.choose(); harness.play();
+      await vi.waitFor(() => expect(harness.library.downloadTracks).toHaveBeenCalledOnce());
+      const signal = harness.library.downloadTracks.mock.calls[0]![2].signal!;
+      if (action === 'cancel') harness.button(t('cancel')).click();
+      if (action === 'escape') harness.root.querySelector('dialog')!.dispatchEvent(new Event('cancel', { cancelable: true }));
+      if (action === 'close') harness.root.querySelector('dialog')!.dispatchEvent(new Event('close'));
+      if (action === 'dispose') harness.picker.dispose();
+      if (action === 'identity') harness.invalidate();
+      if (action === 'source') harness.changeSource();
+      if (action === 'pause') harness.button(t('pausePreview')).click();
+      if (action === 'stop') harness.button(t('stop')).click();
+      if (action === 'external-stop') harness.preview.stop();
+      expect(signal.aborted).toBe(true);
+      wait.resolve(); await new Promise<void>(resolve => setImmediate(resolve));
+      expect(harness.preview.playTrack).not.toHaveBeenCalled(); expect(harness.added).not.toHaveBeenCalled();
+      harness.picker.dispose(); expect(harness.unsubscribePreview).toHaveBeenCalledOnce(); expect(harness.unsubscribeIdentity).toHaveBeenCalledOnce();
+      expect(harness.preview.dispose).not.toHaveBeenCalled();
+    });
+
+  it.each(['cancel', 'dispose', 'identity', 'source', 'stop'] as const)('stops audible preview on %s without changing the draft', async action => {
+    const harness = await previewHarness(); harness.choose(); harness.play();
+    await vi.waitFor(() => expect(harness.preview.getState().playing).toBe(true));
+    if (action === 'cancel') harness.button(t('cancel')).click();
+    if (action === 'dispose') harness.picker.dispose();
+    if (action === 'identity') harness.invalidate();
+    if (action === 'source') harness.changeSource();
+    if (action === 'stop') harness.button(t('stop')).click();
+    expect(harness.preview.getState().playing).toBe(false); expect(harness.added).not.toHaveBeenCalled(); harness.picker.dispose();
+  });
+
+  it('rejects mismatched asset bytes before preview or insertion', async () => {
+    const harness = await previewHarness();
+    harness.library.downloadTracks.mockImplementation(async tracks => { harness.cache.set(tracks[0]!.id, new Blob([new Uint8Array(128).fill(1)])); });
+    harness.choose(); harness.play();
+    await vi.waitFor(() => expect(harness.root.querySelectorAll('p').some(node => node.textContent === cloudErrorMessage(new Error('cloud_hash_mismatch')))).toBe(true));
+    expect(harness.preview.playTrack).not.toHaveBeenCalled(); expect(harness.added).not.toHaveBeenCalled(); harness.picker.dispose();
+  });
+
+  it('offers only exact cached assets offline, including phase songs, with no catalog or download request', async () => {
+    const owner = stubDocument(); Object.assign(owner, { body: new TestElement('body') });
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'offline', expiresAt: 0, user: { id: 'author', username: 'author', role: 'editor', authVersion: 1 } });
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
+    const hash = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
+    const asset = { id: 'asset', bytes: 128, contentType: 'audio/wav', sha256: hash };
+    const routine = newRoutine();
+    const track: Track = { id: 'cached', title: 'Cached phase', duration: 30, firstBeat: 0, bodyArea: '', cues: [] };
+    routine.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [track] } };
+    routine.tracks = [{ ...track, id: 'missing', title: 'Missing' }, { ...track, id: 'bad', title: 'Mismatch' }];
+    mocks.listRoutineWorkingCopies.mockResolvedValue([{ envelope: { routine, media: { cached: asset, missing: { ...asset, id: 'missing' }, bad: { ...asset, id: 'bad', sha256: 'a'.repeat(64) } } }, localVersion: 1, cloudBaseRevision: 1, pendingCloud: false, savedAt: 1 }]);
+    mocks.listRoutines.mockResolvedValue([]); mocks.listCloudRoutines.mockResolvedValue([]);
+    mocks.getTrackBlob.mockImplementation(async id => id === 'missing' ? undefined : blob);
+    mocks.cacheCloudTrack.mockResolvedValue(undefined);
+    const library = { audioPage: vi.fn(), downloadTracks: vi.fn() }; const added = vi.fn();
+    const picker = createAudioLibraryPicker({ library: library as unknown as ReturnType<typeof createCloudLibrary>, available: () => true,
+      identity: () => 'draft', remaining: () => 5, added, duration: async () => 30 });
+    picker.sync(); expect(picker.element.disabled).toBe(false); picker.element.click();
+    const root = (owner as unknown as { body: TestElement }).body;
+    await vi.waitFor(() => expect(root.querySelectorAll('.audio-library-row')).toHaveLength(1));
+    const row = root.querySelector('.audio-library-row')!; expect(row.querySelector('label')!.textContent).toBe('Cached phase');
+    const checkbox = row.querySelector('input')!; checkbox.checked = true; checkbox.dispatchEvent(new Event('change'));
+    root.querySelectorAll('button').find(node => node.title === t('addSelectedAudio'))!.click();
+    await vi.waitFor(() => expect(added).toHaveBeenCalledTimes(1));
+    expect(added.mock.calls[0]![0][0]).toMatchObject({ title: 'Cached phase', cues: [], duration: 30 });
+    expect(added.mock.calls[0]![0][0].id).not.toBe('cached'); expect(added.mock.calls[0]![0][0].bpm).toBeUndefined();
+    expect(mocks.cacheCloudTrack).toHaveBeenCalledWith(expect.any(String), blob, hash);
+    expect(library.audioPage).not.toHaveBeenCalled(); expect(library.downloadTracks).not.toHaveBeenCalled(); picker.dispose();
+  });
+
+  it('browses metadata without downloading, then adds checked assets in selection order with fresh IDs', async () => {
+    const owner = stubDocument(); Object.assign(owner, { body: new TestElement('body') });
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', expiresAt: Date.now() + 3600_000, user: { id: 'author', username: 'author', role: 'editor', authVersion: 1 } });
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
+    const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
+    const asset = (id: string) => ({ id, bytes: 128, contentType: 'audio/wav', sha256 });
+    const library = { audioPage: vi.fn(async () => ({ items: [{ asset: asset('first'), title: 'First' }, { asset: asset('second'), title: 'Second', bpm: 120 }] })),
+      downloadTracks: vi.fn(async () => {}) };
+    mocks.getTrackBlob.mockResolvedValue(new Blob([new Uint8Array(128)], { type: 'audio/wav' }));
+    const added = vi.fn();
+    const picker = createAudioLibraryPicker({ library: library as unknown as ReturnType<typeof createCloudLibrary>, available: () => true,
+      identity: () => 'routine:1', remaining: () => 10, added, duration: async () => 30 });
+    picker.element.click();
+    const root = (owner as unknown as { body: TestElement }).body;
+    const choice = (name: string) => root.querySelectorAll('label').find(node => node.textContent === name)?.children[0];
+    await vi.waitFor(() => expect(choice('First')).toBeDefined());
+    expect(library.downloadTracks).not.toHaveBeenCalled(); expect(mocks.getTrackBlob).not.toHaveBeenCalled();
+    for (const name of ['Second', 'First']) { const checkbox = choice(name)!; checkbox.checked = true; checkbox.dispatchEvent(new Event('change')); }
+    root.querySelectorAll('button').find(node => node.title === t('addSelectedAudio'))!.click();
+    await vi.waitFor(() => expect(added).toHaveBeenCalledTimes(1));
+    const tracks = added.mock.calls[0]![0] as Track[];
+    expect(tracks.map(track => track.title)).toEqual(['Second', 'First']);
+    expect(new Set(tracks.map(track => track.id)).size).toBe(2); expect(tracks.map(track => track.id)).not.toContain('first');
+    expect(tracks.every(track => track.cues.length === 0)).toBe(true); expect(tracks[1]!.bpm).toBeUndefined();
+    expect(library.downloadTracks).toHaveBeenCalledTimes(2); picker.dispose();
+  });
+});
+
+describe('unified saved snapshots', () => {
+  const setup = () => {
+    const envelope: CloudRoutine = { routine: newRoutine(), media: {} };
+    const copy: RoutineWorkingCopy = { envelope, localVersion: 1, cloudBaseRevision: 3, pendingCloud: true, savedAt: 1 };
+    envelope.routine.revision = 3;
+    let stored = structuredClone(copy);
+    const library = { readHead: vi.fn(async (): Promise<CloudRoutine> => structuredClone(envelope)),
+      stage: vi.fn(async (routine: Routine, media: CloudRoutine['media']) => structuredClone({ routine, media })),
+      commit: vi.fn(async (value: CloudRoutine, base: number | null) => ({ ...structuredClone(value), routine: { ...value.routine, revision: (base ?? 0) + 1 } })) };
+    mocks.getRoutineWorkingCopy.mockReset().mockImplementation(async () => structuredClone(stored));
+    mocks.recordRoutineSyncAttempt.mockReset().mockImplementation(async (_id, localVersion, value, baseRevision) => {
+      if (stored.localVersion !== localVersion) throw new Error('routine_conflict');
+      stored.cloudAttempt = { envelope: structuredClone(value), localVersion, baseRevision };
+    });
+    mocks.acknowledgeRoutineWorkingCopy.mockReset().mockImplementation(async (_id, localVersion, value) => {
+      if (stored.localVersion === localVersion) stored = { ...stored, envelope: structuredClone(value), cloudBaseRevision: value.routine.revision, pendingCloud: false };
+      else if (stored.cloudAttempt?.localVersion === localVersion) stored.cloudBaseRevision = value.routine.revision;
+      delete stored.cloudAttempt;
+    });
+    mocks.saveRoutineWorkingCopy.mockReset().mockImplementation(async (value, options) => {
+      if (options.expectedLocalVersion !== stored.localVersion) throw new Error('routine_conflict');
+      stored = { ...stored, envelope: structuredClone(value), localVersion: stored.localVersion + 1 };
+      return structuredClone(stored);
+    });
+    return { copy, envelope, library, saver: createRoutineSave(library as unknown as ReturnType<typeof createCloudLibrary>) };
+  };
+  it('acknowledges a lost successful response by full authoritative content without another write', async () => {
+    const { copy, envelope, library, saver } = setup();
+    copy.cloudAttempt = { envelope: structuredClone(envelope), localVersion: 1, baseRevision: 3 };
+    const saved = { routine: { ...envelope.routine, revision: 4, savedAt: 900 }, media: {} };
+    library.readHead.mockResolvedValue(saved);
+    await saver.sync(copy);
+    expect(mocks.acknowledgeRoutineWorkingCopy).toHaveBeenCalledWith(envelope.routine.id, 1, saved);
+    expect(library.stage).not.toHaveBeenCalled(); expect(library.commit).not.toHaveBeenCalled();
+  });
+  it('does not mistake a changed sequence at the next revision for its lost acknowledgment', async () => {
+    const { copy, envelope, library, saver } = setup();
+    copy.cloudAttempt = { envelope: structuredClone(envelope), localVersion: 1, baseRevision: 3 };
+    library.readHead.mockResolvedValue({ routine: { ...envelope.routine, revision: 4, sequence: { crossfade: 3 } }, media: {} });
+    await expect(saver.sync(copy)).rejects.toThrow();
+    expect(mocks.acknowledgeRoutineWorkingCopy).not.toHaveBeenCalled(); expect(library.commit).not.toHaveBeenCalled();
+  });
+  it('refuses a locked head without changing the pending local snapshot', async () => {
+    const { copy, envelope, library, saver } = setup();
+    library.readHead.mockResolvedValue({ routine: { ...envelope.routine, locked: true }, media: {} });
+    await expect(saver.sync(copy)).rejects.toThrow();
+    expect(copy.pendingCloud).toBe(true); expect(library.stage).not.toHaveBeenCalled();
+  });
+  it('checks the local version immediately before committing to Cloud', async () => {
+    const { copy, library, saver } = setup();
+    mocks.getRoutineWorkingCopy.mockResolvedValue({ ...copy, localVersion: 2 });
+    await expect(saver.sync(copy)).rejects.toThrow('routine_conflict');
+    expect(library.commit).not.toHaveBeenCalled();
+  });
+  it('requires a recorded attempt even when an unrelated head has identical content', async () => {
+    const { copy, envelope, library, saver } = setup();
+    library.readHead.mockResolvedValue({ ...envelope, routine: { ...envelope.routine, revision: 4 } });
+    await expect(saver.sync(copy)).rejects.toThrow();
+    expect(mocks.acknowledgeRoutineWorkingCopy).not.toHaveBeenCalled(); expect(library.commit).not.toHaveBeenCalled();
+  });
+  it.each(['delayed', 'lost'] as const)('rebases B only from the proven %s acknowledgment of in-flight A', async outcome => {
+    const { copy, envelope, library, saver } = setup();
+    const gate = deferred();
+    const savedA = { ...structuredClone(envelope), routine: { ...envelope.routine, revision: 4 } };
+    library.commit.mockImplementationOnce(async () => {
+      await gate.promise;
+      library.readHead.mockResolvedValue(savedA);
+      if (outcome === 'lost') throw new Error('network');
+      return savedA;
+    });
+    const first = saver.sync(copy);
+    await vi.waitFor(() => expect(library.commit).toHaveBeenCalledTimes(1));
+    const newer = await mocks.saveRoutineWorkingCopy({ ...envelope, routine: { ...envelope.routine, name: 'B' } }, { expectedLocalVersion: 1 });
+    expect(newer.cloudAttempt.envelope.routine.name).toBe(envelope.routine.name);
+    gate.resolve();
+    if (outcome === 'lost') {
+      await expect(first).rejects.toThrow('network');
+      await saver.sync(await mocks.getRoutineWorkingCopy());
+    } else await first;
+    expect(mocks.acknowledgeRoutineWorkingCopy).toHaveBeenCalledWith(envelope.routine.id, 1, savedA);
+    expect(library.commit).toHaveBeenCalledTimes(2);
+    expect(library.commit.mock.calls[1]![0].routine.name).toBe('B');
+    expect(library.commit.mock.calls[1]![1]).toBe(4);
+    expect((await mocks.getRoutineWorkingCopy()).pendingCloud).toBe(false);
+    expect((await mocks.getRoutineWorkingCopy()).envelope.routine.name).toBe('B');
+  });
+  it('persists uploaded immutable descriptors before recording the commit attempt', async () => {
+    const { copy, envelope, library, saver } = setup();
+    const media = { entry: { id: 'uploaded', bytes: 44, contentType: 'audio/wav', sha256: 'a'.repeat(64) } };
+    library.stage.mockResolvedValue({ ...envelope, media });
+    await saver.sync(copy);
+    expect(mocks.saveRoutineWorkingCopy).toHaveBeenCalledWith({ ...envelope, media }, expect.objectContaining({ expectedLocalVersion: 1 }));
+    expect(mocks.recordRoutineSyncAttempt).toHaveBeenCalledWith(envelope.routine.id, 2, { ...envelope, media }, 3);
+    expect(mocks.saveRoutineWorkingCopy.mock.invocationCallOrder[0]).toBeLessThan(mocks.recordRoutineSyncAttempt.mock.invocationCallOrder[0]!);
+    expect(mocks.recordRoutineSyncAttempt.mock.invocationCallOrder[0]).toBeLessThan(library.commit.mock.invocationCallOrder[0]!);
+  });
+  it('retries the immutable outstanding A before B when the first request never committed', async () => {
+    const { copy, envelope, library, saver } = setup();
+    library.commit.mockRejectedValueOnce(new Error('network'));
+    await expect(saver.sync(copy)).rejects.toThrow('network');
+    const newer = await mocks.saveRoutineWorkingCopy({ ...envelope, routine: { ...envelope.routine, name: 'B after failed send' } }, { expectedLocalVersion: 1 });
+    library.commit.mockImplementation(async (value, base) => {
+      const saved = { ...structuredClone(value), routine: { ...value.routine, revision: (base ?? 0) + 1 } };
+      library.readHead.mockResolvedValue(saved); return saved;
+    });
+    await saver.sync(newer);
+    expect(library.commit.mock.calls.map(call => [call[0].routine.name, call[1]])).toEqual([
+      [envelope.routine.name, 3], [envelope.routine.name, 3], ['B after failed send', 4],
+    ]);
+    expect(mocks.recordRoutineSyncAttempt).toHaveBeenCalledTimes(2);
+    expect((await mocks.getRoutineWorkingCopy()).pendingCloud).toBe(false);
+  });
+  it('creates a stable Cloud identity at revision one from local revision nine and recovers a lost create response', async () => {
+    const { copy, library, saver } = setup();
+    copy.cloudBaseRevision = null; copy.envelope.routine.revision = 9;
+    library.readHead.mockRejectedValueOnce(new CloudRequestError('cloud_http_error', 404));
+    library.commit.mockImplementationOnce(async value => {
+      library.readHead.mockResolvedValue(structuredClone(value));
+      throw new Error('network');
+    });
+    await expect(saver.sync(copy)).rejects.toThrow('network');
+    expect(library.commit.mock.calls[0]![0].routine).toMatchObject({ id: copy.envelope.routine.id, revision: 1 });
+    const pending = await mocks.getRoutineWorkingCopy(); pending.cloudBaseRevision = null;
+    await saver.sync(pending);
+    expect(library.commit).toHaveBeenCalledTimes(1);
+    expect((await mocks.getRoutineWorkingCopy()).pendingCloud).toBe(false);
+  });
+  it('ignores field order and save timestamps but compares immutable media descriptors', () => {
+    const { envelope } = setup();
+    const reordered: CloudRoutine = { media: {}, routine: { ...Object.fromEntries(Object.entries(envelope.routine).reverse()) } as Routine };
+    expect(sameSavedContent(envelope, reordered)).toBe(true);
+    reordered.media['entry'] = { id: 'asset', bytes: 44, contentType: 'audio/wav', sha256: 'a'.repeat(64) };
+    expect(sameSavedContent(envelope, reordered)).toBe(false);
+  });
+});
 
 describe('practice cue timing and countdowns', () => {
   const track: Track = { id: 'song', title: 'Song', duration: 30, bpm: 120, firstBeat: 2, bodyArea: '', cues: [] };
@@ -602,7 +1143,7 @@ describe('editor committed controls', () => {
       subscribe: vi.fn(listener => { listener(state); return vi.fn(); }),
     };
     const detectBpm = vi.fn(async () => ({ bpm: 60, firstBeat: 8 }));
-    const analyzeLoudness = vi.fn(async () => ({ integratedLufs: -22, peakDbfs: -6, targetLufs: -18, recommendedGain: 1.5, limited: true }));
+    const analyzeLoudness = vi.fn(async () => ({ integratedLufs: -22, peakDbfs: -6, targetLufs: -8, recommendedGain: 1.25, limited: true, clippingRisk: false }));
     const guards = { current: true, busy: false };
     const changed = vi.fn();
     const host = new TestElement('div');
@@ -610,7 +1151,10 @@ describe('editor committed controls', () => {
     const session = actual.renderEditor(host as unknown as HTMLElement, routine, changed,
       { preview, detectBpm, analyzeLoudness, fillerRecordings: () => recordings,
         isBusy: () => guards.busy, isCurrent: () => guards.current });
-    const input = (label: string) => host.querySelectorAll('label').find(node => node.textContent === label)!.children[0]!;
+    const input = (label: string) => {
+      const wrapper = host.querySelectorAll('label').find(node => node.textContent === label || node.children.some(child => child.textContent === label))!;
+      return wrapper.children.find(child => ['input', 'select', 'textarea'].includes(child.tag))!;
+    };
     const button = (label: string) => host.querySelectorAll('button').find(node => node.title === label)!;
     const rows = () => host.querySelectorAll('.cue-row');
     return { routine, track: routine.tracks[0]!, preview, state, detectBpm, analyzeLoudness, guards, changed, host, session, input, button, rows };
@@ -629,14 +1173,15 @@ describe('editor committed controls', () => {
     expect(routine.filler.recording!.asset).not.toBe(recording.asset);
     expect(contentFingerprint(routine)).not.toBe(before);
     expect(input(t('fillerBpm')).disabled).toBe(true);
-    input(t('fillerGain')).value = '0.5'; input(t('fillerGain')).dispatchEvent(new Event('input'));
+    input(t('fillerGain')).value = '50'; input(t('fillerGain')).dispatchEvent(new Event('input'));
     expect(routine.filler.gain).toBe(0.5);
     recordings.length = 0;
     const fingerprint = contentFingerprint(routine);
     session.refreshFillers();
     expect(sound.value).toBe('recording:custom-a');
     expect(contentFingerprint(routine)).toBe(fingerprint);
-    expect(host.querySelectorAll('option').some(option => option.textContent === t('retainedFiller', { name: recording.name }))).toBe(true);
+    expect(host.querySelectorAll('option').find(option => option.value === 'recording:custom-a')!.textContent).toContain(recording.name);
+    expect(host.querySelectorAll('option').find(option => option.value === 'recording:custom-a')!.textContent).toContain('8 s');
     button(t('previewFiller')).click();
     expect(preview.playFiller).toHaveBeenCalledWith(expect.objectContaining({ sound: 'recording', recording, gain: 0.5 }));
     sound.value = 'drums'; sound.dispatchEvent(new Event('change'));
@@ -797,28 +1342,44 @@ describe('editor committed controls', () => {
 
   it('keeps saved gains independent and applies a loudness suggestion only explicitly', async () => {
     const { routine, track, preview, input, button, session } = await setup();
-    expect(input(t('trackGain')).value).toBe('1'); expect(input(t('fillerGain')).value).toBe('1');
-    input(t('fillerGain')).value = '0.75'; input(t('fillerGain')).dispatchEvent(new Event('input'));
+    expect(input(t('trackGain')).value).toBe('100'); expect(input(t('fillerGain')).value).toBe('100');
+    input(t('fillerGain')).value = '75'; input(t('fillerGain')).dispatchEvent(new Event('input'));
     expect(routine.filler.gain).toBe(0.75); expect(track.gain).toBeUndefined();
     expect(preview.stop).not.toHaveBeenCalled();
     button(t('analyzeLoudness')).click();
     await vi.waitFor(() => expect(button(t('applyGain')).disabled).toBe(false));
     expect(track.gain).toBeUndefined(); expect(preview.stop).not.toHaveBeenCalled();
     button(t('applyGain')).click();
-    expect(track.gain).toBe(1.5); expect(routine.filler.gain).toBe(0.75);
+    expect(track.gain).toBe(1.25); expect(routine.filler.gain).toBe(0.75);
     expect(preview.stop).toHaveBeenCalledOnce(); session.dispose();
+  });
+
+  it.each([true, false])('shows clipping risk independently of a unity recommendation: %s', async clippingRisk => {
+    const { track, host, analyzeLoudness, button, input, session } = await setup();
+    analyzeLoudness.mockResolvedValue({ integratedLufs: -8, peakDbfs: clippingRisk ? 2 : -2,
+      targetLufs: -8, recommendedGain: 1, limited: false, clippingRisk });
+    button(t('analyzeLoudness')).click();
+    await vi.waitFor(() => expect(button(t('applyGain')).disabled).toBe(false));
+    const warning = host.querySelectorAll('.clipping-warning')[0]!;
+    expect(warning.hidden).toBe(!clippingRisk);
+    expect(warning.textContent).toBe(clippingRisk ? t('clippingWarning') : '');
+    expect(host.querySelectorAll('.loudness-analysis')[0]!.children.some(node => node.textContent?.includes('100%'))).toBe(true);
+    expect(input(t('trackGain')).value).toBe('100');
+    expect(track.gain).toBeUndefined();
+    input(t('trackGain')).value = '80'; input(t('trackGain')).dispatchEvent(new Event('input'));
+    expect(warning.hidden).toBe(true); session.dispose();
   });
 
   it.each(['locked', 'replaced', 'removed', 'busy', 'gain'] as const)('discards a loudness result after %s changes', async reason => {
     const { routine, track, guards, analyzeLoudness, button, input, session } = await setup();
     const wait = deferred();
-    analyzeLoudness.mockImplementation(async () => { await wait.promise; return { integratedLufs: -22, peakDbfs: -6, targetLufs: -18, recommendedGain: 1.5, limited: true }; });
+    analyzeLoudness.mockImplementation(async () => { await wait.promise; return { integratedLufs: -22, peakDbfs: -6, targetLufs: -8, recommendedGain: 1.25, limited: true, clippingRisk: false }; });
     button(t('analyzeLoudness')).click();
     if (reason === 'locked') routine.locked = true;
     if (reason === 'replaced') guards.current = false;
     if (reason === 'removed') routine.tracks = [];
     if (reason === 'busy') guards.busy = true;
-    if (reason === 'gain') { input(t('trackGain')).value = '0.5'; input(t('trackGain')).dispatchEvent(new Event('input')); }
+    if (reason === 'gain') { input(t('trackGain')).value = '50'; input(t('trackGain')).dispatchEvent(new Event('input')); }
     session.syncAvailability(); wait.resolve();
     await wait.promise; await Promise.resolve();
     expect(button(t('applyGain')).disabled).toBe(true);
@@ -954,7 +1515,8 @@ describe('editor committed controls', () => {
     const bpm = input(t('fillerBpm'));
     expect(sound.children).toHaveLength(1);
     expect(sound.children[0]!.tag).toBe('optgroup');
-    expect(sound.querySelectorAll('option').map(option => option.textContent)).toEqual([t('lofi'), t('soft'), t('bright'), t('drums')]);
+    expect(sound.querySelectorAll('option').map(option => option.textContent)).toEqual(
+      (['lofi', 'soft', 'bright', 'drums'] as const).map(sound => fillerSoundLabel({ ...routine.filler, sound })));
     expect(routine.filler.sound).toBe('soft');
     sound.value = 'lofi';
     sound.dispatchEvent(new Event('change'));
@@ -1017,7 +1579,7 @@ describe('secure application bootstrap', () => {
 });
 
 describe('export panel controls', () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
   const setup = () => {
     stubDocument();
@@ -1061,7 +1623,7 @@ describe('export panel controls', () => {
     expect(button(t('exportDownload')).disabled).toBe(false);
     button(t('exportDefaults')).click();
     expect(checkboxes.filter(checkbox => checkbox.checked)).toHaveLength(defaultExportColumns().length);
-    const checkbox = checkboxes[0]!;
+    const checkbox = checkboxes.find(checkbox => !checkbox.checked)!;
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event('change'));
     expect(active().querySelectorAll('output')[0]!.textContent).toBe(t('exportSelection', {
@@ -1073,6 +1635,16 @@ describe('export panel controls', () => {
     button(t('exportNone')).click(); expect(button(t('exportDownload')).disabled).toBe(true);
     button(t('cancel')).click(); button(t('exportExcel')).click();
     expect(active().querySelectorAll('input').filter(input => input.checked)).toHaveLength(defaultExportColumns().length + 1);
+  });
+
+  it('expires zero-column feedback without enabling Download or closing the dialog on rerender', () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const { panel, button, active } = setup(); button(t('exportExcel')).click(); button(t('exportNone')).click();
+    const dialog = active(); const feedback = dialog.querySelector('.export-error')!;
+    vi.setSystemTime(20000); panel.syncAvailability();
+    vi.setSystemTime(31001); document.dispatchEvent(new Event('visibilitychange'));
+    expect(feedback.hidden).toBe(true); expect(dialog.open).toBe(true); expect(button(t('exportDownload')).disabled).toBe(true);
+    panel.syncAvailability(); expect(feedback.hidden).toBe(true); panel.dispose(); expect(vi.getTimerCount()).toBe(0);
   });
 
   it('freezes the selected draft and columns before awaiting the download while allowing later edits', async () => {
@@ -1099,8 +1671,9 @@ describe('export panel controls', () => {
     pending.resolve();
     await vi.waitFor(() => expect(actions.download).toHaveBeenCalledOnce());
     expect(actions.download.mock.calls[0]![1]).toBe('Selected.xlsx');
-    expect(root.querySelectorAll('.export-snapshot')[0]!.textContent).toContain('Different draft');
     expect(document.activeElement).toBe(button(t('exportExcel')));
+    button(t('exportExcel')).click(); expect(active().querySelectorAll('input')[0]!.value).toBe('Different-draft.xlsx');
+    expect(snapshot.routine.name).toBe('<Private routine>');
   });
 
   it('surfaces missing-font errors, restores actions and never claims a successful download', async () => {
@@ -1518,45 +2091,49 @@ describe('inline class sequence', () => {
     return { component, routine, state, selected, controls, toggle, button };
   }
 
-  it('orders independently enabled phases and retains disabled choices until saving', async () => {
+  it('adopts owned phase snapshots with unique entry IDs and retains disabled choices in one routine', async () => {
     const fixture = harness();
-    const arrival: MusicPlaylist = { schemaVersion: 1, id: 'arrival', name: 'Arrival', revision: 2, published: false, locked: false, tracks: [] };
+    const arrival: MusicPlaylist = { schemaVersion: 1, id: 'arrival', name: 'Arrival', revision: 2, published: false, locked: false,
+      tracks: [{ id: 'song', title: 'Song', duration: 30, firstBeat: 0, cues: [], bodyArea: '' }] };
     const departure = { ...arrival, id: 'departure', name: 'Departure' };
     mocks.listMusicPlaylists.mockResolvedValue([arrival, departure]);
+    mocks.getMusicPlaylist.mockImplementation(async id => structuredClone(id === arrival.id ? arrival : departure));
+    mocks.getTrackBlob.mockResolvedValue(new Blob([new Uint8Array(128)], { type: 'audio/wav' }));
     fixture.toggle(t('enableWalkIn'), true);
     await vi.waitFor(() => expect(fixture.controls.querySelectorAll('input').every(node => !node.disabled)).toBe(true));
-    expect(fixture.button(t('saveClassSetup')).disabled).toBe(true);
+    expect(fixture.component.pending()).toBe(true);
     fixture.toggle(t('enableWalkOut'), true); fixture.toggle(t('enableAfter'), true); fixture.toggle(t('enableBefore'), true);
     const before = fixture.component.beforeTracks as unknown as TestElement;
     const after = fixture.component.afterTracks as unknown as TestElement;
     expect(before.children.map(node => node.dataset.classPhase)).toEqual(['walkIn', 'before']);
     expect(after.children.map(node => node.dataset.classPhase)).toEqual(['after', 'walkOut']);
-    for (const [root, id] of [[before, 'arrival'], [after, 'departure']] as const) {
+    for (const [root, index] of [[before, '0'], [after, '1']] as const) {
       const select = root.querySelectorAll('label').find(node => node.textContent === t('selectMusicPlaylist'))!.children[0]!;
-      select.value = JSON.stringify({ id, revision: 2, published: false }); select.dispatchEvent(new Event('change'));
+      select.value = index; select.dispatchEvent(new Event('change'));
+      await vi.waitFor(() => expect(fixture.component.working()).toBe(false));
     }
     fixture.toggle(t('enableWalkIn'), false); expect(before.children.map(node => node.dataset.classPhase)).toEqual(['before']);
     fixture.toggle(t('enableWalkIn'), true);
-    expect(before.querySelectorAll('select')[0]!.value).toContain('arrival');
+    expect(fixture.routine.sequence?.walkIn?.name).toBe('Arrival');
     fixture.toggle(t('enableAfter'), false);
-    mocks.saveClassSetup.mockImplementation(async (value: ClassSetup) => ({ ...value, revision: 1 }));
-    fixture.button(t('saveClassSetup')).click();
-    await vi.waitFor(() => expect(fixture.selected).toHaveBeenCalledOnce());
-    const saved = mocks.saveClassSetup.mock.calls[0]!;
-    expect(saved[1]).toBeNull();
-    expect(saved[0]).toMatchObject({ walkIn: { id: 'arrival', revision: 2 }, walkOut: { id: 'departure', revision: 2 }, before: { mode: 'hold' } });
-    expect(saved[0].after).toBeUndefined(); expect(fixture.component.pending()).toBe(false);
+    expect(fixture.routine.sequence).toMatchObject({ walkIn: { source: { id: 'arrival', revision: 2 } }, walkOut: { source: { id: 'departure', revision: 2 } }, before: { mode: 'hold' } });
+    expect(fixture.routine.sequence!.walkIn!.tracks[0]!.id).not.toBe(fixture.routine.sequence!.walkOut!.tracks[0]!.id);
+    expect(fixture.routine.sequence!.walkIn!.tracks[0]!.id).not.toBe('song');
+    expect(fixture.routine.sequence!.after).toBeUndefined(); expect(fixture.component.pending()).toBe(false);
+    expect(mocks.saveClassSetup).not.toHaveBeenCalled(); expect(fixture.selected).not.toHaveBeenCalled();
     fixture.component.dispose();
   });
 
-  it.each(['locked', 'published'] as const)('keeps %s setup controls read-only even on forced changes', flag => {
+  it.each(['locked', 'published'] as const)('keeps %s routine phase controls read-only even on forced changes', flag => {
     const value: ClassSetup = { schemaVersion: 1, id: 'class-a', name: 'Class', revision: 4, locked: false, published: false,
       routine: { id: 'routine-a', revision: 1, published: false }, crossfade: 2, [flag]: true };
     const fixture = harness(value);
+    fixture.routine[flag] = true; fixture.component.sync();
     fixture.toggle(t('enableBefore'), true);
     expect(fixture.component.beforeTracks.children.length).toBe(0);
     expect(fixture.component.hasUnsaved()).toBe(false);
-    expect(fixture.button(t('saveClassSetup')).disabled).toBe(true);
+    expect(fixture.controls.querySelector('.phase-toggles')!.querySelectorAll('input').every(input => input.disabled)).toBe(true);
+    expect(fixture.controls.querySelectorAll('fieldset').every(fieldset => fieldset.disabled)).toBe(true);
     expect(mocks.saveClassSetup).not.toHaveBeenCalled(); fixture.component.dispose();
   });
 
@@ -1565,20 +2142,27 @@ describe('inline class sequence', () => {
     const value: ClassSetup = { schemaVersion: 1, id: 'class-a', name: 'Class', revision: 4, locked: false, published: false,
       routine: { id: 'routine-a', revision: 1, published: false }, walkIn: { id: 'arrival', revision: 1, published: false }, crossfade: 2 };
     const fixture = harness(value);
-    expect(fixture.component.working()).toBe(true);
+    fixture.routine.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [{ id: 'entry', title: 'Song', duration: 30, firstBeat: 0, bodyArea: '', cues: [] }] } };
+    fixture.component.sync();
+    const refresh = (fixture.component.beforeTracks as unknown as TestElement).querySelectorAll('button').find(button => button.title === t('refreshPlaylists'))!;
+    refresh.click(); expect(fixture.component.working()).toBe(true);
     expect(fixture.component.pending()).toBe(false);
     pending.resolve(); await vi.waitFor(() => expect(fixture.component.working()).toBe(false));
     fixture.component.dispose();
   });
 
-  it('preserves edited content on save conflict and keeps missing-playlist or unsaved-routine setups unpreparable', async () => {
+  it('preserves the routine when playlist adoption fails and keeps an unselected phase incomplete', async () => {
     const fixture = harness(); fixture.state.saved = false;
     fixture.toggle(t('enableBefore'), true);
-    expect(fixture.button(t('saveClassSetup')).disabled).toBe(true); expect(fixture.component.pending()).toBe(true);
-    fixture.state.saved = true; fixture.component.sync();
-    mocks.saveClassSetup.mockRejectedValue(new Error('routine_conflict'));
-    fixture.button(t('saveClassSetup')).click();
-    await vi.waitFor(() => expect(fixture.button(t('saveClassSetup')).disabled).toBe(false));
+    expect(fixture.routine.sequence?.before?.mode).toBe('hold'); expect(fixture.component.pending()).toBe(false);
+    mocks.listMusicPlaylists.mockResolvedValue([{ schemaVersion: 1, id: 'unavailable', name: 'Missing', revision: 1, locked: false, published: false, tracks: [] }]);
+    mocks.getMusicPlaylist.mockResolvedValue(null);
+    fixture.toggle(t('enableWalkIn'), true);
+    await vi.waitFor(() => expect(fixture.component.working()).toBe(false));
+    const choice = (fixture.component.beforeTracks as unknown as TestElement).querySelector('select')!;
+    choice.value = '0'; choice.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(fixture.component.working()).toBe(false));
+    expect(fixture.routine.sequence?.before?.mode).toBe('hold'); expect(fixture.routine.sequence?.walkIn).toBeUndefined();
     expect(fixture.component.hasUnsaved()).toBe(true); expect(fixture.selected).not.toHaveBeenCalled();
     fixture.component.dispose();
   });
@@ -1597,39 +2181,76 @@ describe('class panel saved references and local actions', () => {
     const root = panel.element as unknown as TestElement;
     const button = (title: string) => root.querySelectorAll('button').find(node => node.title === title)!;
     root.open = true; root.dispatchEvent(new Event('toggle'));
-    await vi.waitFor(() => expect(button(t('newClassSetup')).disabled).toBe(false));
-    return { panel, root, button, selected, message };
+    await vi.waitFor(() => expect(button(t('newPlaylist')).disabled).toBe(false));
+    const restore = (value: ClassSetup) => panel.restoreRecovery({ id: 'recovery-class', kind: 'class', source: 'local', value,
+      baseRevision: value.revision, media: {}, updatedAt: 1 });
+    return { panel, root, button, selected, message, restore };
   };
+
+  it('edits blank and known Settings BPM with independent undo and exposes the shared audio picker', async () => {
+    const track: Track = { id: 'unknown', title: 'Unknown', duration: 30, firstBeat: 0, bodyArea: '', cues: [] };
+    const playlist: MusicPlaylist = { schemaVersion: 2, id: 'playlist', name: 'Settings mix', revision: 5, locked: false, published: false,
+      tracks: [track, { ...track, id: 'known', title: 'Known', bpm: 100 }] };
+    mocks.listMusicPlaylists.mockResolvedValue([playlist]);
+    const routine = newRoutine(); const original = structuredClone(routine); const harness = await panelHarness(routine);
+    harness.button(t('openRoutine', { name: playlist.name })).click();
+    const inputs = () => harness.root.querySelectorAll('label').filter(node => node.textContent === t('bpm')).map(node => node.children[0]!);
+    await vi.waitFor(() => expect(inputs()).toHaveLength(2));
+    expect(inputs().map(input => input.value)).toEqual(['', '100']);
+    expect(harness.button(t('existingAudio')).disabled).toBe(false);
+    const input = inputs()[0]!; input.value = '126'; input.dispatchEvent(new Event('input'));
+    expect(harness.button(t('undoEdit')).disabled).toBe(false);
+    harness.button(t('undoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['', '100']);
+    harness.button(t('redoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['126', '100']);
+    const known = inputs()[1]!; known.value = ''; known.dispatchEvent(new Event('input'));
+    mocks.saveMusicPlaylist.mockImplementation(async value => ({ ...structuredClone(value), revision: 6 }));
+    harness.button(t('librarySave', { name: playlist.name, destination: t('localDestination') })).click();
+    await vi.waitFor(() => expect(mocks.saveMusicPlaylist).toHaveBeenCalledOnce());
+    expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks.map((entry: Track) => entry.bpm)).toEqual([126, undefined]);
+    expect(routine).toEqual(original); expect(playlist.tracks[0]!.bpm).toBeUndefined(); expect(playlist.tracks[1]!.bpm).toBe(100);
+    harness.panel.dispose();
+  });
 
   it('refuses an unsaved routine without creating a partial class or enabling selection', async () => {
     const harness = await panelHarness();
-    harness.button(t('newClassSetup')).click();
+    await harness.restore({ schemaVersion: 1, id: 'legacy', name: 'Legacy', revision: 1, published: false, locked: false,
+      routine: { id: 'unavailable', revision: 1, published: false }, crossfade: 0 });
     expect(harness.button(t('useClass')).disabled).toBe(true);
     const reference = harness.root.querySelectorAll('label').find(node => node.textContent === t('routine'))!.children[0]!;
     expect(reference.children.filter(option => option.value)).toHaveLength(0);
     expect(harness.root.querySelectorAll('.reference-revision').some(node => node.textContent === t('saveRoutineFirst'))).toBe(true);
-    harness.button(t('librarySave', { name: t('newClassSetup'), destination: t('localDestination') })).click();
+    harness.button(t('librarySave', { name: t('recoveryCopy', { name: 'Legacy' }), destination: t('localDestination') })).click();
     await vi.waitFor(() => expect(harness.message).toHaveBeenCalledWith(t('saveRoutineFirst'), true));
     expect(mocks.saveClassSetup).not.toHaveBeenCalled(); expect(harness.selected).not.toHaveBeenCalled();
     harness.panel.dispose();
   });
 
-  it('chooses only known drafts, publications and the saved historical reference without typed revisions', async () => {
+  it('requires an explicit known revision for a recovered historical reference without typed revision bypasses', async () => {
     const routine = newRoutine(); routine.id = 'routine-a'; routine.name = 'Current'; routine.revision = 5;
     const setup: ClassSetup = { schemaVersion: 1, id: 'class-a', name: 'Class', revision: 2, locked: false, published: false,
       routine: { id: routine.id, revision: 2, published: true }, crossfade: 1 };
     mocks.listRoutines.mockResolvedValue([routine]); mocks.getRoutine.mockResolvedValue({ ...routine, published: true });
     mocks.listClassSetups.mockResolvedValue([setup]); mocks.getClassSetup.mockResolvedValue(setup);
     const harness = await panelHarness(routine);
-    harness.button(t('openRoutine', { name: setup.name })).click();
-    await vi.waitFor(() => expect(harness.button(t('useClass'))?.disabled).toBe(false));
+    await harness.restore(setup);
     const reference = harness.root.querySelectorAll('label').find(node => node.textContent === t('routine'))!.children[0]!;
     expect(reference.children.filter(option => option.value).map(option => JSON.parse(option.value))).toEqual([
-      { id: routine.id, revision: 5, published: false }, { id: routine.id, revision: 5, published: true }, setup.routine,
+      { id: routine.id, revision: 5, published: false }, { id: routine.id, revision: 5, published: true },
     ]);
+    expect(reference.value).toBe(''); expect(harness.button(t('useClass')).disabled).toBe(true);
+    const name = t('recoveryCopy', { name: setup.name });
+    harness.button(t('librarySave', { name, destination: t('localDestination') })).click();
+    await vi.waitFor(() => expect(harness.message).toHaveBeenCalledWith(t('saveRoutineFirst'), true));
+    expect(mocks.saveClassSetup).not.toHaveBeenCalled();
+    const currentReference = harness.root.querySelectorAll('label').find(node => node.textContent === t('routine'))!.children[0]!;
+    currentReference.value = JSON.stringify({ id: routine.id, revision: 5, published: false }); currentReference.dispatchEvent(new Event('change'));
+    mocks.saveClassSetup.mockImplementation(async value => ({ ...value, revision: 1 }));
+    harness.button(t('librarySave', { name, destination: t('localDestination') })).click();
+    await vi.waitFor(() => expect(harness.button(t('useClass')).disabled).toBe(false));
     expect(harness.root.querySelectorAll('label').some(node => node.textContent === t('referenceRevision') || node.textContent === t('referencePublished'))).toBe(false);
     harness.button(t('useClass')).click();
-    expect(harness.selected).toHaveBeenLastCalledWith({ setup, source: 'local' });
+    expect(harness.selected).toHaveBeenLastCalledWith({ setup: expect.objectContaining({ name, revision: 1, routine: { id: routine.id, revision: 5, published: false } }), source: 'local' });
+    expect(harness.selected.mock.lastCall![0].setup.id).not.toBe(setup.id);
     expect(routine.revision).toBe(5); expect(mocks.saveRoutine).not.toHaveBeenCalled();
     harness.panel.dispose();
   });
@@ -1641,8 +2262,15 @@ describe('class panel saved references and local actions', () => {
       routine: { id: routine.id, revision: 1, published: false }, crossfade: 1 };
     mocks.listMusicPlaylists.mockResolvedValue([playlist]); mocks.getMusicPlaylist.mockResolvedValue(playlist);
     mocks.listClassSetups.mockResolvedValue([setup]); mocks.getClassSetup.mockResolvedValue(setup);
-    const harness = await panelHarness(routine); const value = kind === 'class' ? setup : playlist;
-    harness.button(t('openRoutine', { name: value.name })).click();
+    mocks.listRoutines.mockResolvedValue([routine]);
+    const harness = await panelHarness(routine); let value = kind === 'class' ? setup : playlist;
+    if (kind === 'class') {
+      await harness.restore(setup); mocks.saveClassSetup.mockImplementation(async value => ({ ...value, revision: 3 }));
+      harness.button(t('librarySave', { name: t('recoveryCopy', { name: setup.name }), destination: t('localDestination') })).click();
+      await vi.waitFor(() => expect(harness.button(t('useClass')).disabled).toBe(false));
+      value = await mocks.saveClassSetup.mock.results[0]!.value;
+      expect(value.id).not.toBe(setup.id);
+    } else harness.button(t('openRoutine', { name: value.name })).click();
     await vi.waitFor(() => expect(harness.button(t('libraryDelete', { name: value.name }))?.disabled).toBe(false));
     harness.button(t('libraryDelete', { name: value.name })).click();
     await vi.waitFor(() => expect(kind === 'class' ? mocks.deleteClassSetup : mocks.deleteMusicPlaylist).toHaveBeenCalledExactlyOnceWith(value.id, value.revision));
@@ -1666,6 +2294,12 @@ describe('UI persistence and transport wiring', () => {
   const settled = () => vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
   const open = async () => { await import('../frontend/src/main'); await settled(); };
   const choose = (id: string) => { selection().value = id; selection().dispatchEvent(new Event('change')); };
+  const duplicateRoutine = async () => {
+    const previous = currentDraft().id; button(t('duplicate')).click();
+    const dialog = nodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+    dialog.querySelectorAll('button').find(node => node.title === t('apply'))!.click();
+    await vi.waitFor(() => expect(currentDraft().id).not.toBe(previous)); await settled();
+  };
   const seekControl = () => nodes.find(node => node.className === 'practice-seek')!;
   const handles = () => nodes.find(node => node.className === 'cue-handles')!;
   const marker = (id = 'move') => handles().children.find(node => node.dataset.cueId === id)!;
@@ -1679,7 +2313,7 @@ describe('UI persistence and transport wiring', () => {
     source.tracks.push({ ...structuredClone(source.tracks[0]!), id: 'track-b', title: 'Track B' });
     records.set(source.id, structuredClone(source));
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     if (!locked) button(t('editCueTimes')).click();
   };
@@ -1698,6 +2332,30 @@ describe('UI persistence and transport wiring', () => {
     records = new Map([[source.id, structuredClone(source)]]);
     mocks.getRoutine.mockImplementation(async (id?: string) => structuredClone(records.get(id ?? source.id) ?? null));
     mocks.listRoutines.mockImplementation(async () => structuredClone([...records.values()]));
+    mocks.listRoutineWorkingCopies.mockResolvedValue([]);
+    mocks.getRoutineWorkingCopy.mockResolvedValue(null);
+    mocks.listRoutinePublications.mockResolvedValue([]);
+    mocks.listCloudRoutines.mockResolvedValue([]);
+    const copies = new Map<string, RoutineWorkingCopy>();
+    mocks.getRoutineWorkingCopy.mockImplementation(async id => structuredClone(copies.get(id) ?? null));
+    mocks.listRoutineWorkingCopies.mockImplementation(async () => structuredClone([...copies.values()]));
+    mocks.saveRoutineWorkingCopy.mockImplementation(async (envelope: CloudRoutine, options) => {
+      const previous = copies.get(envelope.routine.id);
+      if (options.expectedLocalVersion !== (previous?.localVersion ?? null)) throw new Error('routine_conflict');
+      const savedAt = Date.now();
+      const copy = { envelope: structuredClone(envelope), localVersion: (previous?.localVersion ?? 0) + 1,
+        cloudBaseRevision: options.cloudBaseRevision, pendingCloud: options.cloud, savedAt };
+      copy.envelope.routine.savedAt = savedAt; copies.set(envelope.routine.id, copy); return structuredClone(copy);
+    });
+    mocks.deleteRoutineWorkingCopy.mockImplementation(async (id, localVersion) => {
+      if (copies.get(id)?.localVersion !== localVersion) throw new Error('routine_conflict'); copies.delete(id);
+    });
+    mocks.listClassSetups.mockResolvedValue([]);
+    mocks.listMusicPlaylists.mockResolvedValue([]);
+    mocks.getTrackBlob.mockResolvedValue(new Blob([new Uint8Array(128)], { type: 'audio/wav' }));
+    const stored = new Map<string, string>();
+    const storage = { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); }, removeItem: (key: string) => { stored.delete(key); } };
+    vi.stubGlobal('localStorage', storage); vi.stubGlobal('sessionStorage', storage);
     mocks.listFillerRecordings.mockResolvedValue([]);
     mocks.removeFillerRecording.mockResolvedValue(undefined);
     mocks.getFillerRecordingBlob.mockResolvedValue(undefined);
@@ -1735,6 +2393,244 @@ describe('UI persistence and transport wiring', () => {
   });
   afterEach(() => { vi.unstubAllGlobals(); });
 
+  it('unified app: automatically prepares the active routine silently on startup', async () => {
+    await open();
+    await vi.waitFor(() => expect(mocks.player.load).toHaveBeenCalledTimes(1));
+    expect(mocks.player.play).not.toHaveBeenCalled();
+    expect(button(t('newRoutine')).hidden).toBe(true);
+    expect(button(t('retryPreparation')).hidden).toBe(true);
+  });
+
+  it('unified app: keeps explicit Retry after preparation fails and silently retries current content', async () => {
+    mocks.player.load.mockRejectedValueOnce(new Error('missing_audio'));
+    await open(); await settled();
+    const retry = button(t('retryPreparation')); expect(retry.hidden).toBe(false);
+    expect(mocks.player.play).not.toHaveBeenCalled();
+    retry.click(); await vi.waitFor(() => expect(mocks.player.load).toHaveBeenCalledTimes(2)); await settled();
+    expect(retry.hidden).toBe(true);
+    expect(mocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('unified app: uses checkbox menus in one toolbar and recovery immediately after metadata', async () => {
+    await open(); await settled();
+    const panel = nodes.find(node => node.className === 'edit-panel')!;
+    const identity = panel.children.find(node => node.className === 'draft-identity')!;
+    expect(panel.children[panel.children.indexOf(identity) + 1]!.className).toBe('recovery-library');
+    const library = nodes.find(node => node.className === 'routine-library')!;
+    expect(library.hidden).toBe(true); button(t('openDifferent')).click(); expect(library.hidden).toBe(false);
+    const toolbar = library.children[0]!; expect(toolbar.className).toBe('library-toolbar');
+    const menus = toolbar.children.filter(node => node.tag === 'details'); expect(menus).toHaveLength(2);
+    for (const menu of menus) {
+      expect(menu.children[0]!.tag).toBe('summary'); expect(menu.children[1]!.attributes.get('role')).toBe('group');
+      expect(menu.querySelectorAll('input').every(input => input.type === 'checkbox')).toBe(true);
+      menu.open = true; key(menu, 'Escape'); expect(menu.open).toBe(false);
+    }
+    expect(panel.children.some(node => node.className === 'cloud-panel')).toBe(false);
+    expect(library.querySelectorAll('h2')).toHaveLength(0);
+  });
+
+  it('unified app: restores adopted phase gain through the one routine Undo and Redo pair', async () => {
+    source.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [{ ...source.tracks[0]!, id: 'arrival', gain: 1.4 }] } };
+    records.set(source.id, structuredClone(source)); await open(); await settled();
+    const slider = () => nodes.filter(node => node.className === 'before-routine-phases').at(-1)!.querySelector('.gain-control')!.querySelector('input')!;
+    slider().value = '115'; slider().dispatchEvent(new Event('input'));
+    expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(1.15);
+    button(t('undoEdit')).click(); expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(1.4);
+    button(t('redoEdit')).click(); expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(1.15);
+    expect(source.sequence.walkIn!.tracks[0]!.gain).toBe(1.4);
+  });
+
+  it('unified app: saves the whole working routine once locally and keeps Undo functional', async () => {
+    mocks.saveRoutineWorkingCopy.mockImplementation(async (envelope, options) => {
+      const value = { envelope: structuredClone(envelope), localVersion: 1, cloudBaseRevision: options.cloudBaseRevision, pendingCloud: options.cloud, savedAt: 1234 };
+      value.envelope.routine.savedAt = 1234; return value;
+    });
+    await open();
+    await vi.waitFor(() => expect(button(t('save')).disabled).toBe(false));
+    editName('Unified edited');
+    button(t('save')).click();
+    await vi.waitFor(() => expect(mocks.saveRoutineWorkingCopy).toHaveBeenCalledTimes(1));
+    await settled();
+    expect(mocks.saveRoutineWorkingCopy.mock.calls[0]![1]).toEqual({ expectedLocalVersion: null, cloud: false, cloudBaseRevision: null });
+    expect(mocks.saveRoutine).not.toHaveBeenCalled(); expect(mocks.saveClassSetup).not.toHaveBeenCalled();
+    button(t('undoEdit')).click(); expect(currentDraft().name).toBe('Routine A'); expect(currentDraft().savedAt).toBe(1234);
+    button(t('redoEdit')).click(); expect(currentDraft().name).toBe('Unified edited');
+  });
+
+  it('unified app: close Cancel retains the editor and Discard unloads without deleting data', async () => {
+    await open(); await vi.waitFor(() => expect(button(t('closeRoutine')).disabled).toBe(false));
+    editName('Unsaved close'); button(t('closeRoutine')).click();
+    const dialog = nodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+    dialog.querySelectorAll('button').find(node => node.title === t('cancel'))!.click();
+    expect(currentDraft().name).toBe('Unsaved close'); expect(mocks.player.unload).not.toHaveBeenCalled();
+    button(t('closeRoutine')).click();
+    const closing = nodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+    closing.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
+    await vi.waitFor(() => expect(mocks.player.unload).toHaveBeenCalledTimes(1));
+    expect(mocks.clearActiveRoutine).toHaveBeenCalledTimes(1); expect(mocks.deleteRoutine).not.toHaveBeenCalled();
+    expect(button(t('newRoutine')).hidden).toBe(false);
+  });
+
+  it('unified app: phase toggles are distinct steps in the single header history', async () => {
+    await open(); await vi.waitFor(() => expect(button(t('save')).disabled).toBe(false));
+    for (const phase of ['enableBefore', 'enableAfter'] as const) {
+      const checkbox = nodes.find(node => node.tag === 'label' && node.textContent === t(phase))!.children[0]!;
+      checkbox.checked = true; checkbox.dispatchEvent(new Event('change'));
+    }
+    expect(currentDraft().sequence?.before).toBeDefined(); expect(currentDraft().sequence?.after).toBeDefined();
+    button(t('undoEdit')).click(); expect(currentDraft().sequence?.before).toBeDefined(); expect(currentDraft().sequence?.after).toBeUndefined();
+    button(t('redoEdit')).click(); expect(currentDraft().sequence?.after).toBeDefined();
+    const heading = nodes.find(node => node.className === 'routine-title')!.parentNode!.parentNode!;
+    expect(heading.querySelectorAll('.draft-protection')).toHaveLength(1);
+    expect(mocks.saveClassSetup).not.toHaveBeenCalled();
+  });
+
+  it('unified app: real editor name, cue and phase interactions share one history after Save', async () => {
+    const { renderEditor } = await vi.importActual<typeof import('../frontend/src/editor')>('../frontend/src/editor');
+    mocks.renderEditor.mockImplementation(renderEditor);
+    const previewState: PreviewState = { kind: 'track', trackId: 'track-a', elapsed: 3, duration: 30, playing: false, loading: false, error: null };
+    mocks.createAudioPreview.mockReturnValue({ ...mocks.preview, playTrack: vi.fn(async () => {}), pause: vi.fn(), seek: vi.fn(),
+      getState: () => previewState, subscribe: (listener: (state: PreviewState) => void) => { listener(previewState); return () => {}; } });
+    await open(); button(t('edit')).click(); await settled();
+    const host = () => mocks.renderEditor.mock.lastCall![0] as unknown as TestElement;
+    const input = (label: string) => host().querySelectorAll('label').find(node => node.textContent === label)!.children[0]!;
+    const nameLabel = host().querySelectorAll('label').find(node => node.textContent === t('routineName'))!;
+    expect(nameLabel.querySelectorAll('button')).toHaveLength(0);
+    expect(nameLabel.parentNode!.querySelectorAll('button')).toHaveLength(1);
+    input(t('routineName')).value = 'Real editor history'; input(t('routineName')).dispatchEvent(new Event('input'));
+    const addCue = host().querySelectorAll('button').find(node => node.title === t('addCue'))!;
+    expect(addCue.disabled).toBe(false); addCue.click();
+    expect(currentDraft().tracks[0]!.cues).toHaveLength(1);
+    const checkbox = nodes.find(node => node.tag === 'label' && node.textContent === t('enableBefore'))!.children[0]!;
+    checkbox.checked = true; checkbox.dispatchEvent(new Event('change'));
+    button(t('save')).click(); await vi.waitFor(() => expect(mocks.saveRoutineWorkingCopy).toHaveBeenCalledOnce()); await settled();
+    const savedAt = currentDraft().savedAt; const revision = currentDraft().revision;
+    button(t('undoEdit')).click(); expect(currentDraft().sequence?.before).toBeUndefined();
+    expect(currentDraft().tracks[0]!.cues).toHaveLength(1);
+    button(t('undoEdit')).click(); expect(currentDraft().tracks[0]!.cues).toHaveLength(0);
+    button(t('undoEdit')).click(); expect(currentDraft().name).toBe('Routine A');
+    expect(currentDraft().revision).toBe(revision); expect(currentDraft().savedAt).toBe(savedAt);
+    for (let step = 0; step < 3; step++) button(t('redoEdit')).click();
+    expect(currentDraft().name).toBe('Real editor history'); expect(currentDraft().tracks[0]!.cues).toHaveLength(1);
+    expect(currentDraft().sequence?.before).toBeDefined(); expect(mocks.saveClassSetup).not.toHaveBeenCalled();
+    const heading = nodes.find(node => node.className === 'routine-title')!.parentNode!.parentNode!;
+    expect(heading.querySelectorAll('.draft-protection')).toHaveLength(1);
+  });
+
+  it('unified app: local row Open awaits active identity before replacing the editor', async () => {
+    const other = { ...structuredClone(source), id: 'other-local', name: 'Other local' };
+    const copy: RoutineWorkingCopy = { envelope: { routine: other, media: {} }, localVersion: 7, cloudBaseRevision: null, pendingCloud: false, savedAt: 1 };
+    mocks.listRoutineWorkingCopies.mockResolvedValue([copy]); mocks.getRoutineWorkingCopy.mockResolvedValue(copy);
+    await open(); button(t('openDifferent')).click();
+    const gate = deferred(); mocks.setActiveRoutine.mockReturnValueOnce(gate.promise);
+    nodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: other.name }))!.click();
+    await vi.waitFor(() => expect(mocks.setActiveRoutine).toHaveBeenCalledWith(other.id));
+    expect(currentDraft().id).toBe(source.id);
+    gate.resolve(); await settled(); expect(currentDraft().id).toBe(other.id);
+  });
+
+  it('unified app: explicit working-copy Delete uses local CAS without requiring a legacy saved head or deleting media', async () => {
+    records.clear();
+    const copy: RoutineWorkingCopy = { envelope: { routine: structuredClone(source), media: {} }, localVersion: 11, cloudBaseRevision: null, pendingCloud: false, savedAt: 1 };
+    mocks.getRoutine.mockResolvedValue(source); mocks.listRoutineWorkingCopies.mockResolvedValue([copy]);
+    mocks.getRoutineWorkingCopy.mockResolvedValue(copy); mocks.deleteRoutineWorkingCopy.mockResolvedValue(undefined);
+    await open(); expect(button(t('localDelete')).disabled).toBe(false); button(t('localDelete')).click();
+    await vi.waitFor(() => expect(mocks.deleteRoutineWorkingCopy).toHaveBeenCalledExactlyOnceWith(source.id, 11));
+    expect(mocks.deleteRoutine).not.toHaveBeenCalled(); expect(mocks.cacheCloudTrack).not.toHaveBeenCalled();
+    expect(mocks.player.unload).not.toHaveBeenCalled(); await vi.waitFor(() => expect(button(t('newRoutine')).hidden).toBe(false));
+  });
+
+  it('unified app: cold local chooser enumerates a publication older than its current draft head', async () => {
+    const publication = { ...structuredClone(source), name: 'Old publication', revision: 2, published: true };
+    mocks.listRoutinePublications.mockResolvedValue([publication]);
+    mocks.getRoutine.mockImplementation(async (_id, revision, published) => structuredClone(published && revision === 2 ? publication : source));
+    await open(); button(t('openDifferent')).click();
+    const gate = deferred(); mocks.setActiveRoutineSelection.mockReturnValueOnce(gate.promise);
+    nodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: publication.name }))!.click();
+    await vi.waitFor(() => expect(mocks.setActiveRoutineSelection).toHaveBeenCalledExactlyOnceWith({ id: source.id, revision: 2, published: true }));
+    expect(currentDraft()).toEqual(source); gate.resolve(); await settled();
+    expect(currentDraft()).toEqual(publication); expect(button(t('save')).disabled).toBe(true);
+    expect(mocks.getRoutine).toHaveBeenCalledWith(source.id, 2, true);
+    expect(mocks.setActiveRoutine).not.toHaveBeenCalled();
+    button(t('openDifferent')).click();
+    expect(nodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('button')
+      .some(node => node.title === t('openRoutine', { name: source.name }))).toBe(true);
+    nodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('button')
+      .find(node => node.title === t('openRoutine', { name: source.name }))!.click();
+    await vi.waitFor(() => expect(mocks.setActiveRoutine).toHaveBeenCalledExactlyOnceWith(source.id)); await settled();
+    expect(currentDraft()).toEqual(source);
+  });
+
+  it('unified app: failed publication selection keeps the current draft and prepared audio', async () => {
+    const publication = { ...structuredClone(source), name: 'Old publication', revision: 2, published: true };
+    mocks.listRoutinePublications.mockResolvedValue([publication]);
+    mocks.getRoutine.mockImplementation(async (_id, _revision, published) => structuredClone(published ? publication : source));
+    mocks.setActiveRoutineSelection.mockRejectedValue(new Error('routine_conflict'));
+    await open(); await vi.waitFor(() => expect(mocks.player.load).toHaveBeenCalledOnce());
+    button(t('openDifferent')).click();
+    nodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('button')
+      .find(node => node.title === t('openRoutine', { name: publication.name }))!.click();
+    await vi.waitFor(() => expect(mocks.setActiveRoutineSelection).toHaveBeenCalledOnce()); await settled();
+    expect(currentDraft()).toEqual(source); expect(mocks.player.load).toHaveBeenCalledOnce();
+    expect(mocks.clearActiveRoutine).not.toHaveBeenCalled();
+  });
+
+  it('unified app: startup restores the exact publication ahead of a newer pending working draft and Save cannot replace it', async () => {
+    const publication = { ...structuredClone(source), name: 'Exact publication', revision: 2, published: true };
+    const copy: RoutineWorkingCopy = { envelope: { routine: { ...structuredClone(source), name: 'Newer work' }, media: {} },
+      localVersion: 11, cloudBaseRevision: null, pendingCloud: true, savedAt: 1234 };
+    mocks.getActiveRoutineSelection.mockResolvedValue({ id: source.id, revision: 2, published: true });
+    mocks.getRoutine.mockImplementation(async (_id, revision, published) => structuredClone(revision === 2 && published ? publication : source));
+    mocks.listRoutineWorkingCopies.mockResolvedValue([copy]); mocks.getRoutineWorkingCopy.mockResolvedValue(copy);
+    await open(); await vi.waitFor(() => expect(mocks.player.load).toHaveBeenCalledExactlyOnceWith(publication));
+    expect(currentDraft()).toEqual(publication); expect(mocks.getRoutine).toHaveBeenCalledWith(source.id, 2, true);
+    button(t('save')).dispatchEvent(new Event('click')); await settled();
+    expect(mocks.saveRoutineWorkingCopy).not.toHaveBeenCalled(); expect(mocks.setActiveRoutine).not.toHaveBeenCalled();
+    expect(mocks.setActiveRoutineSelection).not.toHaveBeenCalled(); expect(currentDraft()).toEqual(publication);
+  });
+
+  it('unified app: held Save freezes history until acknowledgment then Undo retains the saved revision and timestamp', async () => {
+    const gate = deferred();
+    const original = mocks.saveRoutineWorkingCopy.getMockImplementation()!;
+    mocks.saveRoutineWorkingCopy.mockImplementation(async (...args) => { await gate.promise; return original(...args); });
+    await open(); await vi.waitFor(() => expect(button(t('save')).disabled).toBe(false));
+    editName('Held history'); button(t('save')).click();
+    await vi.waitFor(() => expect(mocks.saveRoutineWorkingCopy).toHaveBeenCalledOnce());
+    expect(button(t('undoEdit')).disabled).toBe(true);
+    button(t('undoEdit')).dispatchEvent(new Event('click')); expect(currentDraft().name).toBe('Held history');
+    gate.resolve(); await settled();
+    const { revision, savedAt } = currentDraft(); expect(savedAt).toBeTypeOf('number');
+    button(t('undoEdit')).click(); expect(currentDraft().name).toBe(source.name);
+    expect(currentDraft()).toMatchObject({ revision, savedAt });
+    button(t('redoEdit')).click(); expect(currentDraft().name).toBe('Held history');
+    expect(mocks.saveClassSetup).not.toHaveBeenCalled(); expect(mocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it.each(['clean', 'changed', 'pending'])('unified app: Delete removes the %s working copy and legacy head in one atomic call', async state => {
+    const routine = structuredClone(source); routine.savedAt = 1234;
+    if (state !== 'clean') routine.name = 'Changed working copy';
+    const copy: RoutineWorkingCopy = { envelope: { routine, media: {} }, localVersion: 11,
+      cloudBaseRevision: null, pendingCloud: state === 'pending', savedAt: 1234 };
+    mocks.listRoutineWorkingCopies.mockResolvedValue([copy]); mocks.getRoutineWorkingCopy.mockResolvedValue(copy);
+    await open(); button(t('localDelete')).click();
+    await vi.waitFor(() => expect(button(t('newRoutine')).hidden).toBe(false));
+    expect(mocks.deleteRoutineAndWorkingCopy).toHaveBeenCalledExactlyOnceWith(source.id, source.revision, 11);
+    expect(mocks.deleteRoutine).not.toHaveBeenCalled(); expect(mocks.deleteRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(mocks.cacheCloudTrack).not.toHaveBeenCalled(); expect(mocks.player.unload).not.toHaveBeenCalled();
+  });
+
+  it('unified app: atomic Delete conflict retains the working copy and active selection', async () => {
+    const copy: RoutineWorkingCopy = { envelope: { routine: structuredClone(source), media: {} }, localVersion: 11,
+      cloudBaseRevision: null, pendingCloud: true, savedAt: 1234 };
+    mocks.listRoutineWorkingCopies.mockResolvedValue([copy]); mocks.getRoutineWorkingCopy.mockResolvedValue(copy);
+    mocks.deleteRoutineAndWorkingCopy.mockRejectedValue(new Error('routine_conflict'));
+    await open(); button(t('localDelete')).click();
+    await vi.waitFor(() => expect(mocks.deleteRoutineAndWorkingCopy).toHaveBeenCalledOnce()); await settled();
+    expect(currentDraft().id).toBe(source.id); expect(button(t('newRoutine')).hidden).toBe(true);
+    expect(mocks.clearActiveRoutine).not.toHaveBeenCalled(); expect(mocks.deleteRoutine).not.toHaveBeenCalled();
+    expect(mocks.deleteRoutineWorkingCopy).not.toHaveBeenCalled();
+  });
+
   const selectSavedOptionalClass = async (unready?: 'routine' | 'walkIn' | 'walkOut') => {
     const playlists: Record<'walkIn' | 'walkOut', MusicPlaylist> = {
       walkIn: { schemaVersion: 1, id: 'empty-walk-in', name: 'Optional walk-in', revision: 2, locked: false, published: false, tracks: [] },
@@ -1755,31 +2651,27 @@ describe('UI persistence and transport wiring', () => {
       const missing = routine.tracks.filter(track => track.id.startsWith('missing-')).map(track => track.id);
       return { ready: routine.tracks.length > 0 && missing.length === 0, missing };
     });
-    const module = await import('../frontend/src/class-library');
-    const createLibrary = module.createClassLibrary;
-    const prepare = vi.fn().mockResolvedValue(structuredClone(resolved));
-    const factory = vi.spyOn(module, 'createClassLibrary').mockImplementation((...args) => ({ ...createLibrary(...args), prepare }));
-    try { await open(); } finally { factory.mockRestore(); }
-    button(t('edit')).click();
-    const panel = nodes.find(node => node.className === 'class-library')!;
-    const panelButton = (title: string) => panel.querySelectorAll('button').find(node => node.title === title);
-    panel.open = true; panel.dispatchEvent(new Event('toggle'));
-    await vi.waitFor(() => expect(panelButton(t('openRoutine', { name: setup.name }))?.disabled).toBe(false));
-    panelButton(t('openRoutine', { name: setup.name }))!.click();
-    await vi.waitFor(() => expect(panelButton(t('useClass'))?.disabled).toBe(false));
-    panelButton(t('useClass'))!.click();
-    mocks.getReadiness.mockClear();
-    return { resolved, prepare };
+    mocks.getPreparedClass.mockResolvedValue(structuredClone(resolved));
+    await open();
+    expect(mocks.player.load).toHaveBeenCalledWith(source);
+    mocks.player.load.mockClear(); mocks.getReadiness.mockClear();
+    button(t('openDifferent')).click();
+    const rows = nodes.find(node => node.className === 'routine-library-rows')!;
+    rows.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: setup.name }))!.click();
+    await settled();
+    return { resolved };
   };
 
   it('prepares saved empty optional playlists with a nonempty routine ReadySilent until explicit Play', async () => {
-    const { resolved, prepare } = await selectSavedOptionalClass();
+    const { resolved } = await selectSavedOptionalClass();
     const draftBefore = structuredClone(currentDraft());
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
-    expect(prepare).toHaveBeenCalledExactlyOnceWith({ setup: resolved.setup, source: 'local' }, { signal: expect.any(AbortSignal) });
-    expect(mocks.getReadiness).toHaveBeenCalledExactlyOnceWith(resolved.routine);
-    expect(mocks.player.load).toHaveBeenCalledExactlyOnceWith(resolved.routine, resolved.audio);
+    expect(mocks.getPreparedClass).toHaveBeenCalledExactlyOnceWith(resolved.setup.id, resolved.setup.revision, 'local', false);
+    expect(mocks.getReadiness).toHaveBeenCalledWith(resolved.routine);
+    expect(currentDraft().id).not.toBe(resolved.routine.id);
+    expect(currentDraft().sequence).toEqual({ crossfade: 0 });
+    expect(mocks.player.load).toHaveBeenCalledExactlyOnceWith(currentDraft(), { crossfade: 0 });
     expect(mocks.player.play).not.toHaveBeenCalled();
     expect(playback.elapsed).toBe(0); expect(playback.classElapsed).toBe(0);
     button(t('startClass')).click();
@@ -1795,15 +2687,14 @@ describe('UI persistence and transport wiring', () => {
   it.each(['routine', 'walkIn', 'walkOut'] as const)('rejects saved optional class preparation when %s is empty or missing required audio', async unready => {
     const { resolved } = await selectSavedOptionalClass(unready);
     const draftBefore = structuredClone(currentDraft());
-    button(t('prepare')).click();
+    button(t('teach')).click();
     const notice = nodes.find(node => node.classList.contains('notice'))!;
-    const missing = unready === 'routine' ? '' : `missing-${unready}`;
-    await vi.waitFor(() => expect(notice.children[0]!.textContent).toBe(t('missingMedia', { tracks: missing })));
+    await vi.waitFor(() => expect(notice.children[0]!.textContent).toBe(t('classCacheUnavailable')));
     expect(notice.children[0]!.attributes.get('role')).toBe('alert');
     expect(mocks.getReadiness).toHaveBeenCalledWith(unready === 'routine' ? resolved.routine
       : expect.objectContaining({ tracks: resolved.audio[unready]!.tracks }));
     expect(mocks.player.load).not.toHaveBeenCalled(); expect(mocks.player.play).not.toHaveBeenCalled();
-    expect(button(t('startClass')).disabled).toBe(true);
+    expect(currentDraft()).toEqual(source);
     expect(currentDraft()).toEqual(draftBefore);
   });
 
@@ -1825,7 +2716,73 @@ describe('UI persistence and transport wiring', () => {
     await vi.waitFor(() => expect(mocks.editorSession.refreshFillers).toHaveBeenCalled());
     expect(mocks.listFillerRecordings).toHaveBeenCalledOnce();
     expect(currentDraft()).toEqual(snapshot);
-    expect(mocks.player.load).not.toHaveBeenCalled();
+    expect(mocks.player.load).toHaveBeenCalledExactlyOnceWith(source);
+  });
+
+  it('expires a short-file filler error on tab return without importing or clearing the chosen file', async () => {
+    await open(); button(t('settings')).click();
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    try {
+      const library = nodes.find(node => node.classList.contains('filler-library'))!;
+      const input = library.querySelectorAll('input').find(node => node.type === 'file')!;
+      input.files = [new File([], 'empty.wav', { type: 'audio/wav' })]; input.dispatchEvent(new Event('change'));
+      button(t('addFiller')).click(); const feedback = library.querySelector('.filler-library-feedback')!;
+      expect(feedback.textContent).toBe(t('audioByteLimit')); expect(mocks.addFillerRecording).not.toHaveBeenCalled();
+      vi.setSystemTime(31001); document.dispatchEvent(new Event('visibilitychange'));
+      expect(feedback.hidden).toBe(true); expect(input.files).toHaveLength(1);
+      button(t('addFiller')).click(); expect(feedback.hidden).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('lists every built-in filler BPM in Settings before selecting a recording', async () => {
+    await open(); button(t('settings')).click();
+    const library = nodes.find(node => node.classList.contains('filler-library'))!;
+    const items = library.querySelectorAll('.filler-builtins')[0]!.children;
+    expect(items).toHaveLength(4);
+    for (const [index, sound] of (['lofi', 'soft', 'bright', 'drums'] as const).entries()) {
+      expect(items[index]!.textContent).toBe(`${t(sound)}: ${sound === 'lofi' ? 120 : 100} BPM`);
+    }
+  });
+
+  it('persists custom filler confidence only on Apply and manual BPM by immutable hash', async () => {
+    const recording: FillerRecording = { id: 'local-filler', name: 'Device loop', duration: 8,
+      asset: { id: 'local-asset', bytes: 128, sha256: 'a'.repeat(64), contentType: 'audio/wav' } };
+    mocks.listFillerRecordings.mockResolvedValue([recording]);
+    mocks.getFillerRecordingBlob.mockResolvedValue(new Blob([new Uint8Array(128)]));
+    mocks.detectBpm.mockResolvedValue({ bpm: 120, firstBeat: 0, confidence: 0.6 });
+    await open(); const before = structuredClone(currentDraft()); button(t('settings')).click();
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    const library = nodes.find(node => node.classList.contains('filler-library'))!;
+    const select = library.querySelectorAll('select')[0]!;
+    select.value = recording.id; select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    button(t('fillerAnalyzeBpm')).click();
+    await vi.waitFor(() => expect(button(t('fillerApplyBpm')).disabled).toBe(false));
+    const key = `fitness-filler-analysis:${recording.asset.sha256}`;
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(library.querySelectorAll('p').some(node => node.textContent.includes('Confidence: 60%'))).toBe(true);
+    button(t('fillerApplyBpm')).click();
+    await vi.waitFor(() => expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ bpm: 120, confidence: 0.6,
+      analyzer: 'detectTrackBpm', sha256: recording.asset.sha256 }));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    const input = library.querySelectorAll('label').find(node => node.textContent === t('fillerBpmMetadata'))!.children[0]!;
+    input.value = '60'; input.dispatchEvent(new Event('input'));
+    expect(JSON.parse(localStorage.getItem(key)!).bpm).toBe(120);
+    button(t('fillerApplyBpm')).click();
+    await vi.waitFor(() => expect(JSON.parse(localStorage.getItem(key)!)).toEqual({ bpm: 60, analyzer: 'manual', sha256: recording.asset.sha256 }));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    input.value = '221'; input.dispatchEvent(new Event('input')); expect(button(t('fillerApplyBpm')).disabled).toBe(true);
+    select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(input.value).toBe('60'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    mocks.detectBpm.mockRejectedValueOnce(new Error('invalid_estimate'));
+    button(t('fillerAnalyzeBpm')).click();
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    expect(library.querySelectorAll('p').some(node => node.textContent === t('detectingBpm'))).toBe(false);
+    expect(button(t('fillerApplyBpm')).disabled).toBe(true);
+    expect(JSON.parse(localStorage.getItem(key)!).bpm).toBe(60);
+    expect(currentDraft()).toEqual(before); expect(mocks.saveRoutine).not.toHaveBeenCalled();
   });
 
   it('analyzes a selected filler with the existing reserved asset key and displays read-only dB and LUFS', async () => {
@@ -1833,18 +2790,21 @@ describe('UI persistence and transport wiring', () => {
       asset: { id: 'local-asset', bytes: 128, sha256: 'a'.repeat(64), contentType: 'audio/wav' } };
     mocks.listFillerRecordings.mockResolvedValue([recording]);
     mocks.getFillerRecordingBlob.mockResolvedValue(new Blob([new Uint8Array(128)]));
-    mocks.analyzeLoudness.mockResolvedValue({ integratedLufs: -12, peakDbfs: -2, targetLufs: -18, recommendedGain: 0.5, limited: false });
+    mocks.analyzeLoudness.mockResolvedValue({ integratedLufs: -8, peakDbfs: 2, targetLufs: -8, recommendedGain: 1, limited: false, clippingRisk: true });
     await open(); const before = structuredClone(currentDraft());
     button(t('settings')).click();
     await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
     const library = nodes.find(node => node.classList.contains('filler-library'))!;
     const selected = library.querySelectorAll('select')[0]!; selected.value = recording.id; selected.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
     button(t('analyzeFillerLevel')).click();
-    await vi.waitFor(() => expect(library.querySelector('.filler-level-result')!.textContent).toContain('target: -18 LUFS'));
+    await vi.waitFor(() => expect(library.querySelector('.filler-level-result')!.textContent).toContain('target: -8 LUFS'));
+    expect(library.querySelector('.clipping-warning')!.hidden).toBe(false);
+    expect(library.querySelector('.clipping-warning')!.textContent).toBe(t('clippingWarning'));
     expect(library.querySelector('.filler-level-result')!.textContent).toMatch(/^Recommended: .* dB/);
     expect(mocks.analyzeLoudness).toHaveBeenCalledExactlyOnceWith('filler-local-asset');
     expect(currentDraft()).toEqual(before); expect(mocks.saveRoutine).not.toHaveBeenCalled();
-    expect(mocks.addFillerRecording).not.toHaveBeenCalled(); expect(mocks.player.load).not.toHaveBeenCalled();
+    expect(mocks.addFillerRecording).not.toHaveBeenCalled(); expect(mocks.player.load).toHaveBeenCalledExactlyOnceWith(source);
   });
 
   it('adds device-global fillers in Settings and archives metadata without changing the draft or prepared player', async () => {
@@ -1881,14 +2841,14 @@ describe('UI persistence and transport wiring', () => {
     await vi.waitFor(() => expect(mocks.removeFillerRecording).toHaveBeenCalledWith(recording.id));
     expect(mocks.preview.stop).toHaveBeenCalledTimes(stops);
     expect(currentDraft()).toEqual(snapshot);
-    expect(mocks.player.load).not.toHaveBeenCalled();
+    expect(mocks.player.load).toHaveBeenCalledExactlyOnceWith(source);
     expect(mocks.player.stop).not.toHaveBeenCalled();
     expect(mocks.player.dispose).not.toHaveBeenCalled();
   });
 
   it('reports missing standalone recording bytes without fetching or replacing a playing class', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     button(t('play')).click();
     await vi.waitFor(() => expect(mocks.player.play).toHaveBeenCalledOnce());
@@ -1897,14 +2857,14 @@ describe('UI persistence and transport wiring', () => {
       asset: { id: 'missing-asset', bytes: 128, sha256: 'a'.repeat(64), contentType: 'audio/wav' },
     } };
     const fetcher = vi.fn<typeof fetch>(); vi.stubGlobal('fetch', fetcher);
-    button(t('prepare')).click();
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+    button(t('teach')).click();
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
     expect(mocks.getFillerRecordingBlob).toHaveBeenCalledWith(currentDraft().filler.recording);
     expect(fetcher).not.toHaveBeenCalled();
     expect(mocks.player.load).toHaveBeenCalledOnce();
     expect(mocks.player.stop).not.toHaveBeenCalled();
     expect(mocks.player.pause).not.toHaveBeenCalled();
-    expect(nodes.some(node => node.className.includes('notice-error') && !node.hidden)).toBe(true);
+    await vi.waitFor(() => expect(nodes.some(node => node.className.includes('notice-error') && !node.hidden)).toBe(true));
   });
 
   it('does not replace stored or demo synthetic filler selections', async () => {
@@ -1922,7 +2882,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('exports the displayed editor draft without pausing preview or changing a playing prepared snapshot', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
     button(t('play')).click();
     await vi.waitFor(() => expect(playback.status).toBe('playing'));
@@ -1969,12 +2929,14 @@ describe('UI persistence and transport wiring', () => {
   });
 
   it('blocks seeking when not prepared, pending, in filler or Class mode, checking current state on each event', async () => {
+    mocks.getReadiness.mockResolvedValue({ ready: false, missing: ['track-a'] });
     await open();
     const slider = seekControl();
     pointer(slider, 'click', 250);
     key(slider, 'ArrowRight');
     expect(mocks.player.seek).not.toHaveBeenCalled();
-    button(t('prepare')).click();
+    mocks.getReadiness.mockResolvedValue({ ready: true, missing: [] });
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     const seeking = deferred();
     mocks.player.seek.mockImplementationOnce(() => seeking.promise);
@@ -2154,13 +3116,15 @@ describe('UI persistence and transport wiring', () => {
       preview: mocks.preview, detectBpm: mocks.detectBpm,
     }));
     const readiness = deferred();
+    editName('Needs fresh preparation'); button(t('edit')).click();
     mocks.getReadiness.mockImplementation(async () => { await readiness.promise; return { ready: true, missing: [] }; });
-    button(t('prepare')).click();
+    button(t('teach')).click();
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(true));
     (mocks.createAudioPreview.mock.calls[0]![0] as () => void)();
     expect(mocks.player.pause).toHaveBeenCalledOnce();
     readiness.resolve();
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
-    expect(mocks.player.load).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
+    expect(mocks.player.load).toHaveBeenCalledOnce();
   });
 
   it('keeps preview containers enabled for locked content and invalidates old editor sessions', async () => {
@@ -2170,8 +3134,8 @@ describe('UI persistence and transport wiring', () => {
     const host = mocks.renderEditor.mock.lastCall![0] as TestElement;
     expect(host.children.find(node => 'editorContent' in node.dataset)!.disabled).toBe(true);
     expect(host.children.find(node => 'previewControls' in node.dataset)!.disabled).toBe(false);
-    const isCurrent = mocks.renderEditor.mock.lastCall![3].isCurrent as () => boolean;
     button(t('edit')).click();
+    const isCurrent = mocks.renderEditor.mock.lastCall![3].isCurrent as () => boolean;
     expect(isCurrent()).toBe(true);
     mocks.preview.stop.mockClear();
     mocks.editorSession.cancelJobs.mockClear();
@@ -2181,7 +3145,7 @@ describe('UI persistence and transport wiring', () => {
     expect(mocks.editorSession.cancelJobs).toHaveBeenCalledOnce();
     button(t('edit')).click();
     mocks.editorSession.dispose.mockClear();
-    button(t('duplicate')).click();
+    await duplicateRoutine();
     expect(isCurrent()).toBe(false);
     expect(mocks.editorSession.dispose).toHaveBeenCalledOnce();
     expect(mocks.createAudioPreview).toHaveBeenCalledOnce();
@@ -2211,26 +3175,31 @@ describe('UI persistence and transport wiring', () => {
     await open();
     const original = structuredClone(currentDraft());
     editName('Unsaved original');
-    vi.mocked(confirm).mockReturnValueOnce(false);
+    expect(button(t('newRoutine')).hidden).toBe(true);
     button(t('newRoutine')).click();
     expect(currentDraft().id).toBe(original.id);
     expect(currentDraft().name).toBe('Unsaved original');
-    vi.mocked(confirm).mockReturnValueOnce(true);
+    button(t('closeRoutine')).click();
+    nodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!.querySelectorAll('button').find(node => node.title === t('cancel'))!.click();
+    expect(currentDraft().name).toBe('Unsaved original');
+    button(t('closeRoutine')).click();
+    nodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
+    await vi.waitFor(() => expect(button(t('newRoutine')).hidden).toBe(false));
     button(t('newRoutine')).click();
     expect(currentDraft().id).not.toBe(original.id);
     expect(currentDraft().tracks).toEqual([]);
     expect(currentDraft().locked).toBe(false);
     expect(currentDraft().published).toBe(false);
     expect(mocks.saveRoutine).not.toHaveBeenCalled();
-    expect(mocks.player.load).not.toHaveBeenCalled();
+    expect(mocks.player.load).toHaveBeenCalledOnce(); expect(mocks.player.unload).toHaveBeenCalledOnce();
   });
 
   it('reuses a matching ready revision without loading or starting it again', async () => {
-    await open(); button(t('prepare')).click();
+    await open(); button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     const checks = mocks.getReadiness.mock.calls.length;
-    button(t('prepare')).click();
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+    button(t('teach')).click();
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
     expect(mocks.player.load).toHaveBeenCalledOnce();
     expect(mocks.player.play).not.toHaveBeenCalled();
     expect(mocks.getReadiness).toHaveBeenCalledTimes(checks);
@@ -2238,8 +3207,9 @@ describe('UI persistence and transport wiring', () => {
 
   it('stops preview for teaching Prepare, Play, and Next', async () => {
     await open();
+    button(t('edit')).click();
     mocks.preview.stop.mockClear();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
     expect(mocks.preview.stop).toHaveBeenCalled();
     mocks.preview.stop.mockClear();
@@ -2254,8 +3224,8 @@ describe('UI persistence and transport wiring', () => {
   it('enters class silently and starts playback only with an explicit Play', async () => {
     await open();
     const start = button(t('startClass'));
-    expect(start.hidden).toBe(true);
-    button(t('prepare')).click();
+    expect(mocks.player.play).not.toHaveBeenCalled();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(start.disabled).toBe(false));
     const shell = nodes.find(node => node.className === 'app-shell')!;
     const request = vi.fn().mockRejectedValue(new Error('Fullscreen unavailable'));
@@ -2302,7 +3272,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('leaves ordinary Play as rehearsal and does not replay an already running class on entry', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     const shell = nodes.find(node => node.className === 'app-shell')!;
     const request = vi.fn().mockResolvedValue(undefined);
@@ -2317,7 +3287,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('blocks repeated Start while playback is pending but leaves Pause and Stop available', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     const pending = deferred();
     mocks.player.play.mockImplementationOnce(() => pending.promise);
@@ -2351,7 +3321,7 @@ describe('UI persistence and transport wiring', () => {
   });
 
   it('does not resume on repeated Class Mode entry after pausing', async () => {
-    await open(); button(t('prepare')).click();
+    await open(); button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     button(t('play')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
@@ -2362,7 +3332,7 @@ describe('UI persistence and transport wiring', () => {
   });
 
   it('shows runtime phases and refuses paused announcement advance even on forced events', async () => {
-    await open(); button(t('prepare')).click();
+    await open(); button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     emit({ ...playback, status: 'paused', phase: 'before', nextPhase: 'routine', canAdvance: true, phaseTrackTitle: 'Voice bed' });
     expect(nodes.find(node => node.className === 'playlist-items')!.querySelectorAll('li').some(row => row.attributes.has('aria-current'))).toBe(false);
@@ -2380,7 +3350,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('renders cross-song and filler cue attribution as text, hiding missing or same-song attribution', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     const attribution = nodes.find(node => node.className === 'next-cue-track')!;
     const countdown = nodes.find(node => node.className === 'next-cue-time mono')!;
@@ -2414,7 +3384,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('marks a prepared snapshot stale when only its single warning changes', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     currentDraft().beepOnceRemaining = 45;
     (mocks.renderEditor.mock.lastCall![2] as () => void)();
@@ -2425,7 +3395,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('leaves class mode and pauses on a cached pagehide without disposing the player', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
     button(t('startClass')).click();
     const listeners = vi.mocked(window.addEventListener).mock.calls.filter(call => call[0] === 'pagehide').map(call => call[1] as (event: PageTransitionEvent) => void);
@@ -2458,7 +3428,7 @@ describe('UI persistence and transport wiring', () => {
       const head = { ...structuredClone(records.get(id)!), revision: expected + 1, published: false };
       records.set(id, head); return { ...head, published: true };
     });
-    await open(); button(t('prepare')).click();
+    await open(); button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
     const prepared = structuredClone(mocks.player.load.mock.calls[0]![0]);
     button(t('localPublish')).click(); await settled();
@@ -2469,7 +3439,7 @@ describe('UI persistence and transport wiring', () => {
   });
 
   it('deletes locally with confirmation and CAS without deleting prepared audio', async () => {
-    await open(); button(t('prepare')).click();
+    await open(); button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
     vi.mocked(confirm).mockReturnValueOnce(false);
     button(t('localDelete')).click(); await settled();
@@ -2493,22 +3463,24 @@ describe('UI persistence and transport wiring', () => {
     await open();
     editName('Routine A edited');
     button(t('save')).click(); await settled();
-    expect(mocks.saveRoutine).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 4 }), 4, 'save');
-    expect(currentDraft().revision).toBe(5);
-    button(t('duplicate')).click();
+    expect(mocks.saveRoutineWorkingCopy).toHaveBeenLastCalledWith(expect.objectContaining({ routine: expect.objectContaining({ revision: 4 }) }),
+      { expectedLocalVersion: null, cloud: false, cloudBaseRevision: null });
+    expect(currentDraft().revision).toBe(4);
+    await duplicateRoutine();
     const duplicateId = currentDraft().id;
     button(t('save')).click(); await settled();
-    expect(mocks.saveRoutine).toHaveBeenLastCalledWith(expect.objectContaining({ id: duplicateId, revision: 1 }), null, 'save');
-    expect(selection().children.map(option => option.value)).toEqual([source.id, duplicateId]);
+    expect(mocks.saveRoutineWorkingCopy).toHaveBeenLastCalledWith(expect.objectContaining({ routine: expect.objectContaining({ id: duplicateId, revision: 1 }) }),
+      { expectedLocalVersion: null, cloud: false, cloudBaseRevision: null });
+    expect((await mocks.listRoutineWorkingCopies()).map(copy => copy.envelope.routine.id)).toEqual([source.id, duplicateId]);
     choose(source.id); await settled();
     expect(currentDraft().name).toBe('Routine A edited');
     expect(mocks.setActiveRoutine).toHaveBeenLastCalledWith(source.id);
-    expect(records.size).toBe(2);
+    expect(records.size).toBe(1); expect(mocks.saveRoutine).not.toHaveBeenCalled();
   });
 
   it('confirms switching a dirty duplicate without discarding it on Cancel', async () => {
     await open();
-    button(t('duplicate')).click();
+    await duplicateRoutine();
     const draftId = currentDraft().id;
     vi.mocked(confirm).mockReturnValueOnce(false);
     choose(source.id); await settled();
@@ -2535,9 +3507,9 @@ describe('UI persistence and transport wiring', () => {
 
   it('keeps stale content and its expected revision after a conflict without retrying', async () => {
     await open(); editName('Keep this stale draft');
-    mocks.saveRoutine.mockRejectedValue(new Error('routine_conflict'));
+    mocks.saveRoutineWorkingCopy.mockRejectedValue(new Error('routine_conflict'));
     button(t('save')).click(); await settled();
-    expect(mocks.saveRoutine).toHaveBeenCalledOnce();
+    expect(mocks.saveRoutineWorkingCopy).toHaveBeenCalledOnce();
     expect(currentDraft().name).toBe('Keep this stale draft');
     expect(currentDraft().revision).toBe(4);
     expect(nodes.some(node => node.textContent === t('routineConflict'))).toBe(true);
@@ -2547,19 +3519,20 @@ describe('UI persistence and transport wiring', () => {
     expect(confirm).toHaveBeenCalledWith(t('confirmSwitch', { name: 'Keep this stale draft' }));
     expect(currentDraft().name).toBe('Saved elsewhere');
     expect(currentDraft().revision).toBe(7);
-    expect(mocks.saveRoutine).toHaveBeenCalledOnce();
+    expect(mocks.saveRoutineWorkingCopy).toHaveBeenCalledOnce(); expect(mocks.saveRoutine).not.toHaveBeenCalled();
   });
 
   it('keeps Pause and Stop available during storage work without changing the playback snapshot', async () => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
     button(t('play')).click();
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
     const loaded = mocks.player.load.mock.calls[0]![0] as Routine;
     editName('Draft changed while playing');
     const saving = deferred();
-    mocks.saveRoutine.mockImplementation(async () => { await saving.promise; return { ...currentDraft(), revision: 5 }; });
+    const store = mocks.saveRoutineWorkingCopy.getMockImplementation()!;
+    mocks.saveRoutineWorkingCopy.mockImplementation(async (...args) => { await saving.promise; return store(...args); });
     button(t('save')).click();
     expect(button(t('save')).disabled).toBe(true);
     expect(button(t('pause')).disabled).toBe(false);
@@ -2574,24 +3547,24 @@ describe('UI persistence and transport wiring', () => {
   });
 
   it.each(['pause', 'stop'] as const)('lets %s cancel preparation before any load begins', async command => {
-    await open();
     const readiness = deferred();
     mocks.getReadiness.mockImplementation(async () => { await readiness.promise; return { ready: true, missing: [] }; });
-    button(t('prepare')).click();
+    await import('../frontend/src/main');
+    await vi.waitFor(() => expect(mocks.getReadiness).toHaveBeenCalled());
     expect(button(t(command)).disabled).toBe(false);
     button(t(command)).click();
     expect(mocks.player[command]).toHaveBeenCalledOnce();
     readiness.resolve();
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
     expect(mocks.player.load).not.toHaveBeenCalled();
   });
 
   it.each(['wav', 'opus'])('shows pending %s preparation until storage completes and keeps Stop separate from import', async extension => {
     await open();
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
     button(t('play')).click();
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
     const importing = deferred();
     const filename = `<Synthetic & audio>.${extension}`;
     mocks.storeTrack.mockImplementation(async () => { await importing.promise; return { ...source.tracks[0], id: 'track-b', title: filename }; });
@@ -2649,7 +3622,7 @@ describe('UI persistence and transport wiring', () => {
     it.each(['pause', 'stop'] as const)(`lets %s cancel a pending player.${method} call`, async command => {
       await open();
       if (method !== 'load') {
-        button(t('prepare')).click();
+        button(t('teach')).click();
         await vi.waitFor(() => expect(button(t('play')).disabled).toBe(false));
       }
       if (method === 'next') {
@@ -2658,15 +3631,17 @@ describe('UI persistence and transport wiring', () => {
       }
       const pending = deferred();
       mocks.player[method].mockImplementationOnce(() => pending.promise);
-      button(t(method === 'load' ? 'prepare' : method)).click();
-      await vi.waitFor(() => expect(mocks.player[method]).toHaveBeenCalled());
+      const before = mocks.player[method].mock.calls.length;
+      if (method === 'load') { editName('New preparation'); button(t('edit')).click(); }
+      button(t(method === 'load' ? 'teach' : method)).click();
+      await vi.waitFor(() => expect(mocks.player[method]).toHaveBeenCalledTimes(before + 1));
       expect(button(t('pause')).disabled).toBe(false);
       expect(button(t('stop')).disabled).toBe(false);
       expect(button(t('next')).disabled).toBe(true);
       button(t(command)).click();
       expect(mocks.player[command]).toHaveBeenCalledOnce();
       pending.resolve();
-      await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+      await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
       expect(mocks.player.play).toHaveBeenCalledTimes(method === 'load' ? 0 : 1);
       if (method === 'load') expect(button(t('play')).disabled).toBe(true);
     });

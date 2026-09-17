@@ -604,10 +604,36 @@ interface SignInDependencies {
 }
 const signinModulePath = '../frontend/public/signin.js';
 const signin = await import(signinModulePath) as {
+  createAccessFeedback: (status: { textContent: string }, owner: EventTarget, platform: EventTarget) => {
+    active: boolean; show(text: string, error?: boolean): void; dispose(): void;
+  };
   accessKeys: typeof signout.signoutKeys;
   signIn: (dependencies: SignInDependencies) => Promise<void>;
   startSignInPage: (owner: Pick<Document, 'getElementById'>, platform: object) => void;
 };
+
+describe('access page feedback deadlines', () => {
+  afterEach(() => vi.useRealTimers());
+  it('expires on background return, preserves replacement deadlines and disposes on page hide', () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const owner = new EventTarget(); const platform = new EventTarget(); const status = { textContent: '' };
+    const feedback = signin.createAccessFeedback(status, owner, platform);
+    feedback.show('First', true); vi.setSystemTime(20000); feedback.show('Second', true);
+    vi.setSystemTime(32000); owner.dispatchEvent(new Event('visibilitychange')); expect(status.textContent).toBe('Second');
+    vi.setSystemTime(51000); owner.dispatchEvent(new Event('visibilitychange')); expect(status.textContent).toBe('');
+    feedback.show('Third', true); platform.dispatchEvent(new Event('pagehide'));
+    expect(vi.getTimerCount()).toBe(0); expect(feedback.active).toBe(false);
+    feedback.show('Late rejection', true); expect(status.textContent).toBe('Third'); expect(vi.getTimerCount()).toBe(0);
+  });
+  it('clears an expired error when a back-forward cached page resumes', () => {
+    vi.useFakeTimers(); vi.setSystemTime(1000);
+    const owner = new EventTarget(); const platform = new EventTarget(); const status = { textContent: '' };
+    const feedback = signin.createAccessFeedback(status, owner, platform); feedback.show('Error', true);
+    platform.dispatchEvent(Object.assign(new Event('pagehide'), { persisted: true }));
+    expect(vi.getTimerCount()).toBe(0); vi.setSystemTime(32000); platform.dispatchEvent(new Event('pageshow'));
+    expect(status.textContent).toBe(''); expect(feedback.active).toBe(true); feedback.dispose();
+  });
+});
 
 function signinHarness(previous: string | null = marker()) {
   return {

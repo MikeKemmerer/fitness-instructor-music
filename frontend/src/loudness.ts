@@ -5,7 +5,7 @@ import type { LoudnessMessage, LoudnessReply } from './loudness.worker';
 
 const DEADLINE_MS = 60000;
 const CHUNK_FRAMES = 32768;
-const cache = new Map<string, LoudnessEstimate>();
+const cache = new Map<string, { sha256: string; integratedLufs: number; peakDbfs: number }>();
 let queue = Promise.resolve();
 let invalidated = false;
 let listening = false;
@@ -80,14 +80,16 @@ function probe(blob: Blob, signal: AbortSignal): Promise<void> {
   });
 }
 
-function suggestion(integratedLufs: number, peakDbfs: number): LoudnessEstimate {
+export function recommendLoudness(integratedLufs: number, peakDbfs: number): LoudnessEstimate {
   if (!Number.isFinite(integratedLufs) || !Number.isFinite(peakDbfs)) throw new Error('loudness_no_signal');
-  const targetLufs = -18;
+  const targetLufs = Math.max(-11, Math.min(-5, integratedLufs));
   const desired = 10 ** ((targetLufs - integratedLufs) / 20);
   const headroom = 10 ** ((-1 - peakDbfs) / 20);
   if (!Number.isFinite(desired) || !Number.isFinite(headroom)) throw new Error('invalid_loudness');
-  const recommendedGain = Math.max(0, Math.min(1.5, desired, headroom));
-  return { integratedLufs, peakDbfs, targetLufs, recommendedGain, limited: recommendedGain < desired };
+  const recommendedGain = desired > 1 ? Math.max(1, Math.min(1.25, desired, headroom))
+    : desired < 1 ? Math.min(desired, headroom) : 1;
+  return { integratedLufs, peakDbfs, targetLufs, recommendedGain, limited: recommendedGain < desired,
+    clippingRisk: peakDbfs + 20 * Math.log10(recommendedGain) > -1 + 1e-9 };
 }
 
 async function estimate(trackId: string, assertIdentity: () => void): Promise<LoudnessEstimate> {
@@ -103,12 +105,14 @@ async function estimate(trackId: string, assertIdentity: () => void): Promise<Lo
     check();
     if (!blob) { cache.delete(trackId); throw new Error('missing_audio'); }
     if (!blob.size || blob.size > MAX_DECODED_BYTES) throw new Error('audio_byte_limit');
+    const bytes = await bounded(blob.arrayBuffer(), signal);
+    const digest = await bounded(crypto.subtle.digest('SHA-256', bytes), signal);
+    check();
+    const sha256 = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
     const saved = cache.get(trackId);
-    if (saved) return { ...saved };
+    if (saved?.sha256 === sha256) return recommendLoudness(saved.integratedLufs, saved.peakDbfs);
     if (decoding) throw new Error('loudness_decoder_busy');
     await probe(blob, signal);
-    check();
-    const bytes = await bounded(blob.arrayBuffer(), signal);
     check();
     const decoder = new OfflineAudioContext(2, 1, 44100);
     decoding = true;
@@ -160,9 +164,9 @@ async function estimate(trackId: string, assertIdentity: () => void): Promise<Lo
     }
     const result = await request({ kind: 'finish' });
     if (result?.kind !== 'result') throw new Error('invalid_loudness');
-    const value = suggestion(result.integratedLufs, result.peakDbfs);
+    const value = recommendLoudness(result.integratedLufs, result.peakDbfs);
     if (cache.size >= 128) cache.delete(cache.keys().next().value!);
-    cache.set(trackId, value);
+    cache.set(trackId, { sha256, integratedLufs: result.integratedLufs, peakDbfs: result.peakDbfs });
     return { ...value };
   } finally {
     clearTimeout(timeout);

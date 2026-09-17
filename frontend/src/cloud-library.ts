@@ -1,5 +1,5 @@
-import type { CloudAsset, CloudRoutine, CloudRoutineSummary } from '../../shared/cloud-contract';
-import { validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import type { CloudAsset, CloudRoutine, CloudRoutineSummary, FillerAnalysis } from '../../shared/cloud-contract';
+import { allRoutineFillers, allRoutineTracks, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import { cloudClient, CLOUD_CHUNK_BYTES, CloudRequestError, type CloudClient } from './cloud-client';
 import { cacheCloudRoutine, cacheCloudTrack, cacheFillerRecording, getFillerRecordingBlob, getTrackBlob } from './offline';
 
@@ -37,7 +37,7 @@ export interface CloudTransfer {
 export type MediaAuthority = string | { routineId: string; revision: number } | { classId: string; revision: number } | { playlistId: string; revision: number };
 
 export function routineFillers(routine: Routine): Filler[] {
-  return [routine.filler, ...routine.tracks.flatMap(track => track.after?.mode === 'custom' ? [track.after.filler] : [])];
+  return allRoutineFillers(routine);
 }
 
 export function routineRecordings(routine: Routine): FillerRecording[] {
@@ -117,9 +117,9 @@ export function parseCloudRoutine(value: unknown): CloudRoutine {
     const envelope = value as CloudRoutine;
     if (!envelope || !safeId(envelope.routine.id) || validateRoutine(envelope.routine).length
       || !envelope.media || Array.isArray(envelope.media)
-      || Object.keys(envelope.media).length !== envelope.routine.tracks.length) throw new Error();
+      || Object.keys(envelope.media).length !== allRoutineTracks(envelope.routine).length) throw new Error();
     const media: Record<string, CloudAsset> = {};
-    for (const track of envelope.routine.tracks) {
+    for (const track of allRoutineTracks(envelope.routine)) {
       if (!safeId(track.id) || !Object.hasOwn(envelope.media, track.id)) throw new Error();
       media[track.id] = assetDescriptor(envelope.media[track.id]);
     }
@@ -151,6 +151,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
   const readFiller = dependencies.getFillerBlob ?? ((recording: FillerRecording) => getFillerRecordingBlob(recording));
   const cacheFiller = dependencies.cacheFiller ?? ((recording: FillerRecording, blob: Blob) => cacheFillerRecording(recording, blob));
   const uploaded = new Map<string, CloudAsset>();
+  const knownRemoteAssets = new Set<string>();
   const knownRecordings = new Map<string, FillerRecording>();
   const addedRecordings = new Map<string, FillerRecording>();
   const attempts = new Map<string, UploadAttempt>();
@@ -162,7 +163,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     const user = client.getUser()!;
     const owner = JSON.stringify([user.id, user.authVersion, user.role]);
     if (owner !== uploadOwner) {
-      uploaded.clear(); attempts.clear(); knownRecordings.clear(); addedRecordings.clear(); uploadOwner = owner;
+      uploaded.clear(); attempts.clear(); knownRemoteAssets.clear(); knownRecordings.clear(); addedRecordings.clear(); uploadOwner = owner;
     }
     const assert = () => {
       assertIdentity();
@@ -172,6 +173,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     return assert;
   };
   const rememberRecording = (envelope: CloudRoutine) => {
+    for (const asset of Object.values(envelope.media)) knownRemoteAssets.add(asset.id);
     for (const recording of routineRecordings(envelope.routine)) knownRecordings.set(recording.id, structuredClone(recording));
   };
   const listFillers = async (transfer: CloudTransfer = {}): Promise<FillerRecording[]> => {
@@ -298,11 +300,11 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     const mediaAuthority = authority === null ? undefined : authority ?? (published
       ? { routineId: snapshot.routine.id, revision: snapshot.routine.revision } : undefined);
     const recordings = routineRecordings(snapshot.routine);
-    const total = snapshot.routine.tracks.reduce((sum, track) => sum + snapshot.media[track.id]!.bytes,
+    const total = allRoutineTracks(snapshot.routine).reduce((sum, track) => sum + snapshot.media[track.id]!.bytes,
       recordings.reduce((sum, recording) => sum + recording.asset.bytes, 0));
     let completed = 0;
     const progress = (bytes: number) => { completed += bytes; transfer.progress?.(completed, total); };
-    for (const track of snapshot.routine.tracks) {
+    for (const track of allRoutineTracks(snapshot.routine)) {
       assert();
       const asset = snapshot.media[track.id]!;
       const cached = await readBlob(track.id);
@@ -590,47 +592,69 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       assert();
     }
   };
-  const save = async (routine: Routine, previous: CloudRoutine | null, action: 'save' | 'lock' = 'save', transfer: CloudTransfer = {}) => {
+  const stage = async (routine: Routine, reusableMedia: Record<string, CloudAsset> = {}, transfer: CloudTransfer = {}): Promise<CloudRoutine> => {
     const assert = operation(transfer, true);
     const snapshot = structuredClone(routine);
     if (validateRoutine(snapshot).length) throw new Error('invalid_routine');
-    if (snapshot.published || previous?.routine.published) throw new Error('cloud_head_required');
-    if (snapshot.locked || previous?.routine.locked) throw new CloudRequestError('cloud_http_error', 423, 'routine_locked');
-    if (previous && (snapshot.id !== previous.routine.id || snapshot.revision !== previous.routine.revision
-      || snapshot.published !== previous.routine.published)) throw new Error('cloud_head_required');
-    if (!previous && action === 'lock') throw new Error('cloud_save_first');
-    if (previous) rememberRecording(previous);
+    if (snapshot.published) throw new Error('cloud_head_required');
+    if (snapshot.locked) throw new CloudRequestError('cloud_http_error', 423, 'routine_locked');
     const media: Record<string, CloudAsset> = {};
     let completed = 0;
     const fillers = routineFillers(snapshot).filter(filler => filler.recording);
-    const total = snapshot.tracks.length + fillers.length;
+    const total = allRoutineTracks(snapshot).length + fillers.length;
     for (const filler of fillers) {
       Object.assign(filler, await prepareFiller(filler, { signal: transfer.signal }));
       assert();
       transfer.progress?.(++completed, total);
     }
-    for (const track of snapshot.tracks) {
+    for (const track of allRoutineTracks(snapshot)) {
       assert();
-      const known = previous && Object.hasOwn(previous.media, track.id) ? previous.media[track.id] : undefined;
+      const known = reusableMedia[track.id];
       const blob = await readBlob(track.id);
       assert();
       if (!blob) throw new Error('missing_audio');
-      const reusable = known && blob.size === known.bytes && canonicalAudioType(blob.type) === known.contentType
+      let reusable = known && blob.size === known.bytes && canonicalAudioType(blob.type) === known.contentType
         && await cloudHash(blob) === known.sha256;
+      const replacedBytes = !!known && !reusable;
       assert();
-      if (reusable) media[track.id] = assetDescriptor(known);
+      if (reusable) {
+        try {
+          const manifest = await client.request<{ asset: CloudAsset }>(`/api/media/${encodeURIComponent(known.id)}`, { signal: transfer.signal });
+          assert(); reusable = sameAsset(assetDescriptor(manifest.asset), known);
+          if (!reusable) throw new Error('track_integrity_failed');
+        } catch (error) {
+          assert();
+          if (!(error instanceof CloudRequestError && error.status === 404)) throw error;
+          if (known.id !== track.id || knownRemoteAssets.has(known.id)) throw error;
+          reusable = false;
+        }
+      }
+      if (reusable) { media[track.id] = assetDescriptor(known); knownRemoteAssets.add(known.id); }
       else {
         let bytes = 0;
-        if (known) track.id = crypto.randomUUID();
-        media[track.id] = await upload(blob, transfer, assert, increment => {
+        const asset = await upload(blob, transfer, assert, increment => {
           bytes += increment;
           transfer.progress?.(completed + bytes / blob.size, total);
         });
+        if (replacedBytes) {
+          track.id = crypto.randomUUID();
+          await cacheTrack(track.id, blob, asset.sha256); assert();
+        }
+        media[track.id] = asset;
       }
       completed++;
       transfer.progress?.(completed, total);
     }
     assert();
+    return { routine: snapshot, media };
+  };
+  const commit = async (envelope: CloudRoutine, baseRevision: number | null, action: 'save' | 'lock' = 'save', transfer: CloudTransfer = {}): Promise<CloudRoutine> => {
+    const assert = operation(transfer, true);
+    const { routine: snapshot, media } = parseCloudRoutine(envelope);
+    if (baseRevision === null) snapshot.revision = 1;
+    const previous = baseRevision === null ? null : { routine: { revision: baseRevision } };
+    if (snapshot.locked || snapshot.published || (baseRevision !== null && snapshot.revision !== baseRevision)) throw new Error('cloud_head_required');
+    if (!previous && action === 'lock') throw new Error('cloud_save_first');
     const result = parseCloudRoutine(await client.request(previous ? route(snapshot.id) + (action === 'lock' ? '/lock' : '') : '/api/routines', {
       method: previous ? action === 'lock' ? 'POST' : 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json', ...(previous ? { 'If-Match': `"${previous.routine.revision}"` } : {}) },
@@ -640,6 +664,13 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     if (result.routine.id !== snapshot.id || result.routine.revision !== (previous ? previous.routine.revision + 1 : 1)) throw new Error('cloud_invalid_response');
     rememberRecording(result);
     return result;
+  };
+  const save = async (routine: Routine, previous: CloudRoutine | null, action: 'save' | 'lock' = 'save', transfer: CloudTransfer = {}, reusableMedia: Record<string, CloudAsset> = {}) => {
+    operation(transfer, true)();
+    if (previous && (routine.id !== previous.routine.id || routine.revision !== previous.routine.revision || previous.routine.published)) throw new Error('cloud_head_required');
+    if (previous?.routine.locked) throw new CloudRequestError('cloud_http_error', 423, 'routine_locked');
+    if (previous) rememberRecording(previous);
+    return commit(await stage(routine, { ...previous?.media, ...reusableMedia }, transfer), previous?.routine.revision ?? null, action, transfer);
   };
   const replace = async (routine: Routine, targetId: string, confirm: (head: CloudRoutine, source: Routine) => boolean,
     transfer: CloudTransfer = {}): Promise<CloudRoutine | null> => {
@@ -671,5 +702,30 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     rememberRecording(result);
     return result;
   };
-  return { list, open, readHead, download, downloadTracks, save, replace, command, uploadAsset, listFillers, addFiller, removeFiller, ensureFiller, prepareFiller };
+  const audioPage = async (cursor?: string, transfer: CloudTransfer = {}) => {
+    const assert = operation(transfer, true);
+    const page = await client.request<{ items: Array<{ asset: CloudAsset; title: string; duration?: number; bpm?: number }>; cursor?: string }>(
+      `/api/media/library${cursor ? `?${new URLSearchParams({ cursor })}` : ''}`, { signal: transfer.signal });
+    assert();
+    if (!Array.isArray(page.items) || page.items.length > 512 || (page.cursor !== undefined && (typeof page.cursor !== 'string' || page.cursor.length > 4096))) throw new Error('cloud_invalid_response');
+    for (const item of page.items) {
+      item.asset = assetDescriptor(item.asset);
+      if (typeof item.title !== 'string' || item.title.length > 300 || (item.duration !== undefined && (!Number.isFinite(item.duration) || item.duration <= 0 || item.duration > 1200))
+        || (item.bpm !== undefined && (!Number.isFinite(item.bpm) || item.bpm < 40 || item.bpm > 220))) throw new Error('cloud_invalid_response');
+    }
+      for (const item of page.items) knownRemoteAssets.add(item.asset.id);
+    return structuredClone(page);
+  };
+  const fillerAnalysis = async (recording: FillerRecording, value?: FillerAnalysis, transfer: CloudTransfer = {}): Promise<FillerAnalysis | null> => {
+    const assert = operation(transfer, true);
+    const response = await client.request<{ analysis: FillerAnalysis | null }>(`/api/fillers/${encodeURIComponent(recording.id)}/analysis`, {
+      ...(value ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) } : {}), signal: transfer.signal,
+    });
+    assert();
+    const analysis = response.analysis;
+    if (analysis !== null && (!analysis || analysis.sha256 !== recording.asset.sha256 || !Number.isFinite(analysis.bpm) || analysis.bpm < 40 || analysis.bpm > 220
+      || typeof analysis.analyzer !== 'string' || !analysis.analyzer || (analysis.confidence !== undefined && (!Number.isFinite(analysis.confidence) || analysis.confidence < 0 || analysis.confidence > 1)))) throw new Error('cloud_invalid_response');
+    return structuredClone(analysis);
+  };
+  return { list, open, readHead, download, downloadTracks, stage, commit, save, replace, command, uploadAsset, audioPage, fillerAnalysis, listFillers, addFiller, removeFiller, ensureFiller, prepareFiller };
 }

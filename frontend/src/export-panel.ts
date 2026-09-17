@@ -3,7 +3,7 @@ import type { Routine } from '../../shared/routine';
 import { createExcelBlob, createExportSnapshot, createPdfBlob, defaultExportColumns, defaultPdfColumns, downloadExport,
   exportColumns, exportFilename, type ExportSnapshot } from './exports';
 import { errorMessage, t } from './i18n';
-import { element, field, iconButton } from './ui';
+import { element, field, iconButton, transientText } from './ui';
 
 interface ExportPanelState { routine: Routine; unsaved: boolean; busy: boolean }
 interface ExportActions {
@@ -17,7 +17,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
 }) {
   const root = element('details', 'export-section');
   root.open = false;
-  root.append(element('summary', '', t('exportRoutine')));
+  root.append(element('summary', '', t('share')));
   const snapshotLabel = element('p', 'muted export-snapshot');
   const downloads = element('div', 'action-row');
   const refreshers: (() => void)[] = [];
@@ -36,7 +36,9 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     filename.type = 'text'; filename.maxLength = 200;
     const feedback = element('p', 'export-feedback');
     feedback.setAttribute('role', 'status');
+    const errors = transientText(feedback);
     const noColumns = element('p', 'export-error', t('exportNoColumns'));
+    const columnErrors = transientText(noColumns);
     noColumns.setAttribute('role', 'status');
     const count = element('output', 'muted export-column-count');
     const groups = element('div', 'export-column-groups');
@@ -44,6 +46,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     let generation = 0;
     const close = (restoreFocus = true) => {
       generation += 1; pending = false;
+      errors.dismiss(); columnErrors.dismiss();
       if (dialog.open) dialog.close();
       syncAvailability();
       if (restoreFocus && !disposed && command.isConnected) command.focus({ preventScroll: true });
@@ -79,7 +82,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
       const state = readState();
       if (disposed || pending || state.busy || !selected.size || !dialog.open) return;
       const operation = ++generation;
-      pending = true; feedback.textContent = t('exportWorking'); feedback.setAttribute('role', 'status'); sync();
+      pending = true; errors.show(t('exportWorking'), false); feedback.setAttribute('role', 'status'); sync();
       cancel.focus({ preventScroll: true });
       try {
         const snapshot = createExportSnapshot(state.routine, state.unsaved);
@@ -89,7 +92,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
         if (disposed || generation !== operation || !dialog.open) return;
         actions.download(blob, name); close();
       } catch (error) {
-        if (generation === operation) { feedback.setAttribute('role', 'alert'); feedback.textContent = errorMessage(error); }
+        if (generation === operation) { feedback.setAttribute('role', 'alert'); errors.show(errorMessage(error)); }
       } finally { if (generation === operation) { pending = false; sync(); } }
     };
     const cancel = iconButton(t('cancel'), X, () => close(), true);
@@ -99,7 +102,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     const command = iconButton(label, format === 'xlsx' ? Sheet : FileText, () => {
       if (disposed || readState().busy) return;
       filename.value = exportFilename(readState().routine.name, format);
-      feedback.textContent = ''; sync(); dialog.showModal(); filename.focus();
+      errors.dismiss(); sync(); dialog.showModal(); filename.focus();
     }, true);
     command.setAttribute('aria-haspopup', 'dialog');
     const sync = () => {
@@ -107,7 +110,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
       download.disabled = disposed || readState().busy || pending || selected.size === 0;
       download.setAttribute('aria-busy', String(pending));
       for (const control of [filename, all, none, reset, ...choices.values()]) control.disabled = pending;
-      noColumns.hidden = selected.size !== 0;
+      columnErrors.refresh(selected.size === 0 ? t('exportNoColumns') : '');
       count.textContent = t('exportSelection', { selected: selected.size, total: exportColumns.length });
     };
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
@@ -122,9 +125,9 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     });
     dialog.append(heading, field(t('exportFilename'), filename), selectionActions, groups, count, noColumns, feedback, commands);
     downloads.append(command); root.append(dialog); refreshers.push(sync);
-    cancelers.push(() => close(false));
+    cancelers.push(() => { close(false); errors.dispose(); columnErrors.dispose(); });
   }
-  root.append(snapshotLabel, downloads);
+  root.append(downloads);
   const syncAvailability = () => {
     const state = readState();
     snapshotLabel.textContent = t('exportSnapshot', { name: state.routine.name, revision: state.routine.revision,

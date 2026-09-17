@@ -130,9 +130,11 @@ describe('actual Chromium full-track EBU R128 WASM', () => {
       const reference = nativeLoudness(stored);
       const delta = result.measurement.integratedLufs - reference.integratedLufs;
       expect(Math.abs(delta)).toBeLessThan(0.2);
-      const desired = 10 ** ((-18 - result.measurement.integratedLufs) / 20);
+      const target = Math.max(-11, Math.min(-5, result.measurement.integratedLufs));
+      const desired = 10 ** ((target - result.measurement.integratedLufs) / 20);
       const headroom = 10 ** ((-1 - result.measurement.peakDbfs) / 20);
-      expect(result.measurement.recommendedGain).toBeCloseTo(Math.min(1.5, desired, headroom), 10);
+      const expected = desired > 1 ? Math.max(1, Math.min(1.25, desired, headroom)) : desired < 1 ? Math.min(desired, headroom) : 1;
+      expect(result.measurement.recommendedGain).toBeCloseTo(expected, 10);
       return { app: result.measurement, reference, delta, type: result.type,
         bytePreserved: input.equals(stored), storedBytes: stored.length, sameBlobHash: true };
     } finally { await context.close(); }
@@ -208,10 +210,9 @@ describe('actual Chromium full-track EBU R128 WASM', () => {
     console.info('Actual WASM tone levels', values);
     expect(Math.abs(values[0].integratedLufs - (-23.003))).toBeLessThan(0.2);
     expect(values[1].integratedLufs - values[0].integratedLufs).toBeCloseTo(20 * Math.log10(2), 3);
-    expect(values[0]).toMatchObject({ recommendedGain: 1.5, limited: true, targetLufs: -18 });
+    expect(values[0]).toMatchObject({ recommendedGain: 1.25, limited: true, targetLufs: -11 });
     expect(values[0].peakDbfs).toBeCloseTo(-20, 2);
-    expect(values[1].integratedLufs + 20 * Math.log10(values[1].recommendedGain)).toBeCloseTo(-18, 6);
-    expect(values[1].limited).toBe(false);
+    expect(values[1]).toMatchObject({ recommendedGain: 1.25, limited: true, targetLufs: -11 });
   }, 30000);
 
   it('sums stereo channel energy without downmixing', async () => {
@@ -246,7 +247,7 @@ describe('actual Chromium full-track EBU R128 WASM', () => {
     expect(Math.abs(result.integratedLufs - (-16.983))).toBeLessThan(0.2);
   }, 60000);
 
-  it('limits a measured transient-heavy track to -1 dBFS sample-peak headroom', async () => {
+  it('leaves a transient-heavy quiet track neutral and warns when there is no boost headroom', async () => {
     const result = await page.evaluate(async () => {
       const api = (globalThis as unknown as { audioTest: TestApi }).audioTest;
       const bytes = api.toneWav(0.12);
@@ -255,8 +256,9 @@ describe('actual Chromium full-track EBU R128 WASM', () => {
       return api.analyzeTrackLoudness(track.id);
     });
     expect(result.peakDbfs).toBeCloseTo(0, 6);
-    expect(result.recommendedGain).toBeCloseTo(10 ** (-1 / 20), 6);
+    expect(result.recommendedGain).toBe(1);
     expect(result.limited).toBe(true);
+    expect(result.clippingRisk).toBe(true);
     expect(result.integratedLufs + 20 * Math.log10(result.recommendedGain)).toBeLessThan(-18);
   }, 30000);
 
@@ -409,8 +411,12 @@ describe('bounded serial loudness suggestions', () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.stubEnv('VITE_HOSTED_PILOT', 'false');
+    vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (_algorithm, data) => {
+      const bytes = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+      return Uint8Array.from(createHash('sha256').update(bytes).digest()).buffer;
+    });
     workers = [];
-    measurement = { integratedLufs: -18, peakDbfs: -6 };
+    measurement = { integratedLufs: -8, peakDbfs: -6 };
     metadataDuration = 1;
     holdWorker = false;
     markers = new Map();
@@ -433,18 +439,28 @@ describe('bounded serial loudness suggestions', () => {
     vi.stubGlobal('Worker', FakeWorker);
     ({ analyzeTrackLoudness: analyze } = await import('../frontend/src/loudness'));
   });
-  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
   it.each([
-    [-18, -6, 1, false], [-24, -6, 1.5, true], [-12, -6, 10 ** (-6 / 20), false],
-    [-20, -0.1, 10 ** (-0.9 / 20), true], [-20, -10, 10 ** (2 / 20), false],
+    [-8, -6, 1, false], [-24, -6, 1.25, true], [-12, -6, 10 ** (1 / 20), false],
+    [-20, -0.1, 1, true], [-11, -10, 1, false], [-5, 2, 1, false],
+    [-3, -6, 10 ** (-2 / 20), false],
   ])('suggests target/capped gain for LUFS=%s peak=%s', async (integratedLufs, peakDbfs, gain, limited) => {
     measurement = { integratedLufs: Number(integratedLufs), peakDbfs: Number(peakDbfs) };
     const result = await analyze('track');
     expect(result.recommendedGain).toBeCloseTo(Number(gain), 12);
     expect(result.limited).toBe(limited);
-    expect(result.targetLufs).toBe(-18);
+    expect(result.targetLufs).toBe(Math.max(-11, Math.min(-5, Number(integratedLufs))));
+    expect(result.clippingRisk).toBe(Number(peakDbfs) + 20 * Math.log10(Number(gain)) > -1 + 1e-9);
     expect(workers[0].terminate).toHaveBeenCalledOnce();
+  });
+
+  it('does not reuse measured loudness when audio bytes change under an entry ID', async () => {
+    expect((await analyze('same')).recommendedGain).toBe(1);
+    mocks.get.mockResolvedValue(new Blob(['different stored audio']));
+    measurement = { integratedLufs: -16, peakDbfs: -8 };
+    expect((await analyze('same')).recommendedGain).toBe(1.25);
+    expect(mocks.decode).toHaveBeenCalledTimes(2);
   });
 
   it('copies exact full channel data in bounded transfers without detaching or changing decoded PCM', async () => {

@@ -26,6 +26,26 @@ export interface CloudRoutineSummary {
   revision: number;
   locked: boolean;
   published: boolean;
+  savedAt?: number;
+}
+
+export interface CloudAudioItem {
+  asset: CloudAsset;
+  title: string;
+  duration?: number;
+  bpm?: number;
+}
+
+export interface CloudAudioPage {
+  items: CloudAudioItem[];
+  cursor?: string;
+}
+
+export interface FillerAnalysis {
+  bpm: number;
+  confidence?: number;
+  analyzer: string;
+  sha256: string;
 }
 
 export type CloudAccess = 'online' | 'offline' | 'signin-required' | 'forbidden';

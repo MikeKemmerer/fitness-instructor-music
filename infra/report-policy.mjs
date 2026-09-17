@@ -46,3 +46,23 @@ export function requiredHostedTests(report) {
   assert(browser.assertionResults.every(test => test.status === 'passed'), 'Hosted browser case did not pass.');
   return { passed: executed, skipped: optional.length, optionalPrivateTests: optional, hostedBrowser: browser.assertionResults.length };
 }
+
+export function requiredLocalTests(report) {
+  const browser = report.testResults.find(file => file.name.replaceAll('\\', '/').endsWith('/tests/hosted-browser.test.ts'));
+  assert(browser, 'Local hosted-build discriminator missing.');
+  const sentinel = 'Requires frontend/dist built with VITE_HOSTED_PILOT=true';
+  const names = browser.assertionResults.map(test => test.title);
+  assert.equal(names.filter(name => name === sentinel).length, 1, 'Local build sentinel missing or duplicated.');
+  assert.equal(new Set(names).size, names.length, 'Duplicate local hosted case.');
+  assert(requiredHostedCaseNames.every(name => names.includes(name)), 'Required hosted declarations missing.');
+  assert(browser.assertionResults.every(test => ['pending', 'skipped'].includes(test.status)), 'Local build unexpectedly ran hosted cases.');
+  const hosted = structuredClone(report);
+  const replaced = hosted.testResults.find(file => file.name === browser.name);
+  replaced.assertionResults = replaced.assertionResults.filter(test => test.title !== sentinel)
+    .map(test => ({ ...test, status: 'passed' }));
+  hosted.numPendingTests -= names.length;
+  hosted.numPassedTests += names.length - 1;
+  const result = requiredHostedTests(hosted);
+  return { passed: report.numPassedTests, skipped: report.numPendingTests,
+    optionalPrivateTests: result.optionalPrivateTests, hostedCasesDeferred: names.length - 1 };
+}

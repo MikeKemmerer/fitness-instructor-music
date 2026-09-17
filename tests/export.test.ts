@@ -31,6 +31,21 @@ function pdfText(bytes: Buffer): string {
 }
 
 describe('export registry and snapshots', () => {
+  it('exports unified phases in order with unknown BPM blank and no excluded cue leakage', () => {
+    const routine = fixture();
+    routine.tracks[0]!.cues.push({ id: 'private-note', note: 'Excluded private move', anchor: { kind: 'timestamp', seconds: 1 } });
+    routine.sequence = { crossfade: 2,
+      walkIn: { name: 'Arrival', tracks: [{ ...routine.tracks[0]!, id: 'walk-in', title: 'Arrival audio', bpm: undefined, cues: [] }] },
+      walkOut: { name: 'Exit', tracks: [{ ...routine.tracks[0]!, id: 'walk-out', title: 'Exit audio', cues: [] }] } };
+    const snapshot = createExportSnapshot(routine, false);
+    expect(snapshot.rows.map(row => row.track.id)).toEqual(['walk-in', 'first-entry', 'second-entry', 'walk-out']);
+    expect(snapshot.issues).toEqual([]);
+    expect(columnValue(exportColumns.find(column => column.id === 'track.bpm')!, snapshot.rows[0]!)).toBeNull();
+    const columns = ['track.phase', 'track.title', 'track.bpm', 'routine.sequence'];
+    const packet = buildPdfPacket(snapshot, columns); expect(packet.tracks.map(track => track.heading)).toEqual(['Arrival audio', 'Opening song', 'Closing song', 'Exit audio']);
+    expect(JSON.stringify(packet)).not.toContain('Excluded private move');
+    expect(JSON.stringify(buildWorkbookSheets(snapshot, columns))).not.toContain('Excluded private move');
+  });
   it('retains only selected routine settings for a draft without tracks', () => {
     const routine = fixture();
     routine.tracks = [];
@@ -63,6 +78,7 @@ describe('export registry and snapshots', () => {
   }, 30000);
   it('covers every current scalar schema field and stable derived order without invented song metadata', () => {
     expect(allIds()).toEqual([
+      'track.phase', 'routine.sequence',
       'routine.id', 'routine.name', 'routine.revision', 'routine.schemaVersion', 'routine.locked', 'routine.published',
       'track.index', 'track.id', 'track.title', 'track.duration', 'track.durationTime', 'track.bpm', 'track.firstBeat', 'track.bodyArea', 'track.gain',
       'track.after.mode', 'track.after.crossfade', 'track.after.filler',
@@ -111,7 +127,7 @@ describe('export registry and snapshots', () => {
     routine.tracks[0]!.after = { mode: 'none' };
     routine.tracks[1]!.after = { mode: 'custom', crossfade: 1.25, filler: { ...routine.filler, mode: 'hold', sound: 'recording',
       recording: { id: 'gap-private', name: 'Private gap', duration: 8, asset: { id: 'gap-asset', sha256: 'f'.repeat(64), bytes: 128, contentType: 'audio/wav' } } } };
-    const snapshot = createExportSnapshot(routine, false);
+    const snapshot = createExportSnapshot(routine, false, new Date('2026-09-13T12:34:01.250Z'));
     for (const output of [buildWorkbookSheets(snapshot, allIds()), buildPdfPacket(snapshot, allIds())]) {
       expect(JSON.stringify(output)).toContain('gap-private');
       expect(JSON.stringify(output)).not.toContain(t('exportOpenEnded'));
@@ -119,8 +135,14 @@ describe('export registry and snapshots', () => {
     for (const output of [buildWorkbookSheets(snapshot, ['cue.note']), buildPdfPacket(snapshot, ['cue.note'])]) {
       expect(JSON.stringify(output)).not.toContain('gap-private');
       expect(JSON.stringify(output)).not.toContain('Private gap');
-      expect(JSON.stringify(output)).not.toContain('1.25');
     }
+    const workbook = buildWorkbookSheets(snapshot, ['cue.note']);
+    expect(workbook.flatMap(sheet => sheet.data.flatMap(row => row.map(cell =>
+      cell && typeof cell === 'object' && 'value' in cell ? cell.value : cell)))).not.toContain(1.25);
+    const packet = buildPdfPacket(snapshot, ['cue.note']);
+    expect(packet.settings).toEqual([]);
+    expect(packet.tracks.every(track => track.details === '' && track.columns.every(column => column.id === 'cue.note'))).toBe(true);
+    expect(packet.metadata).toContain(snapshot.exportedAt);
   });
 
   it('makes one row per cue-less track, with genuinely blank cue cells and selectable stable IDs', () => {

@@ -6,26 +6,34 @@ import { canEditCloudDraft, cloudErrorMessage, confirmCloudNavigation, recalledC
 import { hostedCloudSelectionKey, hostedIdentityMarker, hostedUserKey } from '../frontend/src/hosted-session';
 import { t } from '../frontend/src/i18n';
 import { newRoutine, reorderTrack, type FillerRecording, type Routine } from '../shared/routine';
-import type { CloudAsset, CloudRoutine, CloudSession } from '../shared/cloud-contract';
+import type { CloudAsset, CloudRoutine, CloudSession, FillerAnalysis } from '../shared/cloud-contract';
 import type { PlayerState } from '../shared/player-contract';
 import { createClassLibrary, parseCloudPlaylist } from '../frontend/src/class-library';
 import type { ClassSetup, CloudMusicPlaylist } from '../shared/class-plan';
+import type { RoutineWorkingCopy } from '../frontend/src/offline';
+import { sameSavedContent } from '../frontend/src/routine-save';
 
 const appMocks = vi.hoisted(() => ({
+  getRoutineWorkingCopy: vi.fn(), listRoutineWorkingCopies: vi.fn(async (): Promise<RoutineWorkingCopy[]> => []), saveRoutineWorkingCopy: vi.fn(), acknowledgeRoutineWorkingCopy: vi.fn(), clearActiveRoutine: vi.fn(),
+  recordRoutineSyncAttempt: vi.fn(), reconcileRoutineWorkingCopy: vi.fn<(envelope: CloudRoutine) => Promise<RoutineWorkingCopy | null>>(async () => null), deleteRoutineWorkingCopy: vi.fn(),
+  listCloudRoutines: vi.fn(async (): Promise<Routine[]> => []), listRoutinePublications: vi.fn(async (): Promise<Routine[]> => []),
   saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), getCloudRoutine: vi.fn(), getTrackBlob: vi.fn(),
   cacheCloudRoutine: vi.fn(), cacheCloudTrack: vi.fn(), saveRoutine: vi.fn(), setActiveRoutine: vi.fn(),
+  getActiveRoutineSelection: vi.fn(async () => null), setActiveRoutineSelection: vi.fn(), listCachedClassSetups: vi.fn(async (): Promise<ClassSetup[]> => []),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), filler: vi.fn(),
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
   cacheFillerRecording: vi.fn(), getFillerRecordingBlob: vi.fn(),
   listMusicPlaylists: vi.fn(), getMusicPlaylist: vi.fn(), saveMusicPlaylist: vi.fn(), cacheMusicPlaylist: vi.fn(),
   listClassSetups: vi.fn(), getClassSetup: vi.fn(), saveClassSetup: vi.fn(), cacheClassSetup: vi.fn(),
   getCachedClassSetup: vi.fn(), getCachedMusicPlaylist: vi.fn(), getPreparedClass: vi.fn(),
-  deleteRoutine: vi.fn(), publishRoutine: vi.fn(), deleteMusicPlaylist: vi.fn(), deleteClassSetup: vi.fn(),
+  deleteRoutine: vi.fn(), deleteRoutineAndWorkingCopy: vi.fn(), publishRoutine: vi.fn(), deleteMusicPlaylist: vi.fn(), deleteClassSetup: vi.fn(),
   editor: { routine: null as Routine | null, changed: null as ((structural?: boolean) => void) | null, canEdit: null as (() => boolean) | null },
-  preview: { stop: vi.fn(), dispose: vi.fn(), playFiller: vi.fn() },
+  preview: { stop: vi.fn(), dispose: vi.fn(), playFiller: vi.fn(), playTrack: vi.fn(), pause: vi.fn(),
+    getState: vi.fn(() => ({ kind: 'idle', trackId: null, playing: false, loading: false, elapsed: 0, duration: 0, error: null })),
+    subscribe: vi.fn(() => () => {}) },
   exportDispose: vi.fn(),
-  player: { load: vi.fn(), play: vi.fn(), pause: vi.fn(), stop: vi.fn(), next: vi.fn(), seek: vi.fn(), updateCues: vi.fn(), advance: vi.fn(),
+  player: { unload: vi.fn(), load: vi.fn(), play: vi.fn(), pause: vi.fn(), stop: vi.fn(), next: vi.fn(), seek: vi.fn(), updateCues: vi.fn(), advance: vi.fn(),
     hold: vi.fn(), continue: vi.fn(), setVolume: vi.fn(), setBeepVolume: vi.fn(), setDucked: vi.fn(),
     setBeepsMuted: vi.fn(), subscribe: vi.fn(), dispose: vi.fn() },
 }));
@@ -35,7 +43,7 @@ vi.mock('../frontend/src/player', () => ({ createPlayer: () => appMocks.player }
 vi.mock('../frontend/src/audio-preview', () => ({ createAudioPreview: () => appMocks.preview }));
 vi.mock('../frontend/src/bpm', () => ({ detectTrackBpm: vi.fn() }));
 vi.mock('../frontend/src/loudness', () => ({ analyzeTrackLoudness: vi.fn() }));
-vi.mock('../frontend/src/filler-audio', () => ({ getFillerBuffer: appMocks.filler }));
+vi.mock('../frontend/src/filler-audio', async original => ({ ...await original<typeof import('../frontend/src/filler-audio')>(), getFillerBuffer: appMocks.filler }));
 vi.mock('../frontend/src/editor', async original => ({
   ...await original<typeof import('../frontend/src/editor')>(),
   renderEditor: (_host: unknown, routine: Routine, changed: (structural?: boolean) => void, context: { canEdit: () => boolean }) => {
@@ -145,6 +153,73 @@ afterEach(() => {
   vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
 });
 
+describe('unified catalog client', () => {
+  it('fetches one metadata page with unknown values intact and no audio access', async () => {
+    const { asset } = await fixture(); const harness = libraryHarness();
+    harness.fetcher.mockImplementation(async () => json({ items: [{ asset, title: 'Unknown tempo' }], cursor: 'next-page' }));
+    const page = await harness.library.audioPage();
+    expect(page.items[0]).toEqual({ asset, title: 'Unknown tempo' });
+    expect(harness.fetcher).toHaveBeenCalledTimes(1);
+    expect(String(harness.fetcher.mock.calls[0]![0])).toBe('/api/media/library');
+    expect(harness.getTrackBlob).not.toHaveBeenCalled(); expect(harness.cacheTrack).not.toHaveBeenCalled();
+    await harness.library.audioPage(page.cursor);
+    expect(String(harness.fetcher.mock.calls[1]![0])).toBe('/api/media/library?cursor=next-page');
+  });
+  it('blocks player catalog browsing before issuing a request', async () => {
+    const harness = libraryHarness('player');
+    await expect(harness.library.audioPage()).rejects.toThrow(); expect(harness.fetcher).not.toHaveBeenCalled();
+  });
+  it('validates the entire phase media union instead of just the main set', async () => {
+    const { envelope, asset } = await fixture();
+    envelope.routine.sequence = { crossfade: 1, walkIn: { name: 'Arrival', tracks: [{ ...envelope.routine.tracks[0]!, id: 'arrival', cues: [], bpm: undefined }] } };
+    expect(() => parseCloudRoutine(envelope)).toThrow('cloud_invalid_response');
+    envelope.media.arrival = asset;
+    expect(parseCloudRoutine(envelope).routine.sequence?.walkIn?.tracks[0]?.bpm).toBeUndefined();
+  });
+  it('saves reused main and arrival bytes without initiating an upload', async () => {
+    const { envelope, asset, blob } = await fixture(); const harness = libraryHarness();
+    envelope.routine.sequence = { crossfade: 1, walkIn: { name: 'Arrival', tracks: [{ ...envelope.routine.tracks[0]!, id: 'arrival', cues: [] }] } };
+    envelope.media.arrival = asset; harness.getTrackBlob.mockResolvedValue(blob);
+    harness.fetcher.mockImplementation(async (input, options) => {
+      if (String(input) === '/api/media/asset-a') return json({ asset });
+      expect(String(input)).toBe('/api/routines/routine-a'); expect(options?.method).toBe('PUT');
+      const body = JSON.parse(String(options!.body));
+      return json({ ...body, routine: { ...body.routine, revision: 2 } });
+    });
+    const saved = await harness.library.save(envelope.routine, envelope);
+    expect(Object.keys(saved.media)).toEqual(['arrival', 'entry-a']);
+    expect(harness.fetcher.mock.calls.some(([input]) => String(input).includes('/uploads'))).toBe(false);
+  });
+
+  it.each(['different-entry', 'catalog-same-entry', 'head-same-entry'] as const)('fails missing remote %s assets without resurrecting them', async provenance => {
+    const { envelope, asset, blob } = await fixture(); const harness = libraryHarness();
+    if (provenance !== 'different-entry') {
+      envelope.routine.tracks[0]!.id = asset.id; envelope.media = { [asset.id]: asset };
+    }
+    harness.getTrackBlob.mockResolvedValue(blob);
+    harness.fetcher.mockImplementation(async input => {
+      if (String(input) === '/api/media/library') return json({ items: [{ asset, title: 'Known remote' }] });
+      if (String(input) === '/api/routines/routine-a') return json(envelope);
+      return json({ error: 'asset_not_found' }, 404);
+    });
+    if (provenance === 'catalog-same-entry') await harness.library.audioPage();
+    if (provenance === 'head-same-entry') await harness.library.readHead(envelope.routine.id);
+    await expect(harness.library.stage(envelope.routine, envelope.media)).rejects.toMatchObject({ status: 404 });
+    expect(harness.fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    expect(harness.cacheTrack).not.toHaveBeenCalled(); expect(harness.cacheRoutine).not.toHaveBeenCalled();
+  });
+
+  it('uploads a fresh local own-ID placeholder once when it has no remote provenance', async () => {
+    const harness = await uploadHarness();
+    const local = { ...harness.asset, id: 'entry-a' };
+    const handler = harness.fetcher.getMockImplementation()!;
+    harness.fetcher.mockImplementation((input, init) => String(input) === '/api/media/entry-a'
+      ? Promise.resolve(json({ error: 'asset_not_found' }, 404)) : handler(input, init));
+    const saved = await harness.library.save(harness.envelope.routine, null, 'save', {}, { 'entry-a': local });
+    expect(saved.media['entry-a']).toEqual(harness.asset); expect(harness.start).toHaveBeenCalledOnce();
+  });
+});
+
 describe('independent class and playlist client', () => {
   it.each(['offline', 'signin-required', 'browser-offline'] as const)('prepares an exact cached class with no API calls while %s', async access => {
     const { envelope } = await fixture(128, true);
@@ -156,7 +231,7 @@ describe('independent class and playlist client', () => {
     appMocks.getPreparedClass.mockResolvedValue({ setup, routine: envelope.routine, audio: { crossfade: 1 } });
     appMocks.getReadiness.mockResolvedValue({ ready: true, missing: [] });
     const library = createClassLibrary(harness.client, harness.library);
-    expect((await library.prepare({ setup, source: 'household' })).routine).toEqual(envelope.routine);
+    expect((await library.legacy({ setup, source: 'household' })).routine).toEqual(envelope.routine);
     expect(appMocks.getPreparedClass).toHaveBeenLastCalledWith('class-a', 3, 'cloud', true);
     appMocks.getReadiness.mockResolvedValueOnce({ ready: false, missing: ['entry-a'] });
     await expect(library.prepare({ setup, source: 'household' })).rejects.toThrow('class_cache_unavailable');
@@ -197,7 +272,7 @@ describe('independent class and playlist client', () => {
       expect(path).not.toContain('?');
       return path.includes('/chunks/') ? binary(blob) : json({ asset, chunkBytes: CLOUD_CHUNK_BYTES, chunkCount: 1 });
     });
-    const resolved = await createClassLibrary(harness.client, harness.library).prepare({ setup, source: 'household' });
+    const resolved = await createClassLibrary(harness.client, harness.library).legacy({ setup, source: 'household' });
     expect(resolved.audio.walkIn).toEqual(playlist.playlist);
     expect(harness.cacheTrack).toHaveBeenCalledTimes(2);
     expect(harness.cacheFiller).toHaveBeenCalledOnce();
@@ -270,6 +345,20 @@ describe('independent class and playlist client', () => {
     const harness = libraryHarness('player'); harness.fetcher.mockResolvedValue(json({ setup, routine: envelope, walkIn: playlist }));
     await expect(createClassLibrary(harness.client, harness.library).prepare({ setup, source: 'household' })).rejects.toThrow('cloud_invalid_response');
     expect(harness.fetcher).toHaveBeenCalledOnce(); expect(harness.cacheTrack).not.toHaveBeenCalled();
+  });
+
+  it('omits an empty legacy optional playlist while preserving its exact class reference', async () => {
+    const { envelope } = await fixture(128, true);
+    const setup: ClassSetup = { schemaVersion: 1, id: 'class-a', name: 'Empty arrival', revision: 3, locked: false, published: true,
+      routine: { id: 'routine-a', revision: 1, published: true }, walkIn: { id: 'empty', revision: 2, published: true }, crossfade: 1 };
+    const harness = libraryHarness('player'); harness.client.admitLocal(session('player').user, 'offline', () => {});
+    appMocks.getPreparedClass.mockResolvedValue({ setup, routine: envelope.routine, audio: { crossfade: 1,
+      walkIn: { schemaVersion: 1, id: 'empty', name: 'Empty', revision: 2, locked: false, published: true, tracks: [] } } });
+    appMocks.getReadiness.mockResolvedValue({ ready: true, missing: [] });
+    const resolved = await createClassLibrary(harness.client, harness.library).legacy({ setup, source: 'household' });
+    expect(resolved.audio.walkIn).toBeUndefined(); expect(resolved.setup.walkIn).toEqual(setup.walkIn);
+    expect((await createClassLibrary(harness.client, harness.library).prepare({ setup, source: 'household' })).audio.walkIn).toBeUndefined();
+    expect(harness.fetcher).not.toHaveBeenCalled();
   });
 
   it('saves a playlist with the exact quoted revision and reuses verified immutable media', async () => {
@@ -443,10 +532,11 @@ describe('shared filler cloud client', () => {
     const harness = libraryHarness();
     harness.getFillerBlob.mockResolvedValue(blob);
     harness.getTrackBlob.mockResolvedValue(blob);
-    harness.fetcher.mockResolvedValue(json({ ...envelope, routine: { ...envelope.routine, revision: 2 } }));
+    harness.fetcher.mockImplementation(async path => path === `/api/media/${asset.id}` ? json({ asset })
+      : json({ ...envelope, routine: { ...envelope.routine, revision: 2 } }));
     const result = await harness.library.save(envelope.routine, envelope);
     expect(result.routine.filler.recording).toEqual(envelope.routine.filler.recording);
-    expect(harness.fetcher.mock.calls.map(([path]) => path)).toEqual(['/api/routines/routine-a']);
+    expect(harness.fetcher.mock.calls.map(([path]) => path)).toEqual([`/api/media/${asset.id}`, '/api/routines/routine-a']);
   });
 });
 
@@ -1055,13 +1145,13 @@ describe('cloud transfers and revision commands', () => {
     harness.getTrackBlob.mockResolvedValue(blob);
     const next = structuredClone(envelope);
     next.routine.revision++;
-    harness.fetcher.mockResolvedValue(json(next));
+    harness.fetcher.mockImplementation(async path => path === '/api/media/asset-a' ? json({ asset: envelope.media['entry-a'] }) : json(next));
     const edited = structuredClone(envelope.routine);
     edited.name = 'Edited';
     await harness.library.save(edited, envelope);
     expect(harness.getTrackBlob.mock.calls).toEqual([['entry-a'], ['entry-b']]);
-    expect(harness.fetcher).toHaveBeenCalledOnce();
-    const options = harness.fetcher.mock.calls[0]![1]!;
+    expect(harness.fetcher.mock.calls.map(([path]) => path)).toEqual(['/api/media/asset-a', '/api/media/asset-a', '/api/routines/routine-a']);
+    const options = harness.fetcher.mock.calls[2]![1]!;
     expect(options.method).toBe('PUT');
     expect(new Headers(options.headers).get('If-Match')).toBe('"1"');
     expect(JSON.parse(String(options.body)).media).toEqual(envelope.media);
@@ -1082,6 +1172,7 @@ describe('cloud transfers and revision commands', () => {
     const harness = libraryHarness();
     harness.getTrackBlob.mockResolvedValue(blob);
     harness.fetcher.mockImplementation(async (input, options) => {
+      if (input === '/api/media/asset-a') return json({ asset: envelope.media['entry-a'] });
       if (String(input) === '/api/routines/routine-a?published=true') return json(publication);
       expect(input).toBe('/api/routines/routine-a');
       expect(options?.method).toBe('PUT');
@@ -1097,7 +1188,7 @@ describe('cloud transfers and revision commands', () => {
     const saved = await harness.library.save(draft, envelope);
     expect(saved.routine.tracks.map(track => track.id)).toEqual(['entry-b', 'entry-a']);
     expect(draft.tracks[1]).toBe(entries[0]); expect(draft.tracks[1]!.cues).toBe(entries[0]!.cues);
-    expect(harness.fetcher).toHaveBeenCalledOnce();
+    expect(harness.fetcher.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(1);
     expect(harness.getTrackBlob.mock.calls).toEqual([['entry-b'], ['entry-a']]);
     expect(envelope).toEqual(previous);
     expect(await harness.library.open('routine-a', true)).toEqual(publication);
@@ -1109,9 +1200,11 @@ describe('cloud transfers and revision commands', () => {
     const original = structuredClone(envelope);
     const harness = libraryHarness();
     harness.getTrackBlob.mockResolvedValue(blob);
-    harness.fetcher.mockResolvedValue(json({ error: status === 412 ? 'revision_conflict' : status === 423 ? 'routine_locked' : 'invalid_routine_state' }, status));
+    harness.fetcher.mockImplementation(async path => path === '/api/media/asset-a' ? json({ asset: envelope.media['entry-a'] })
+      : json({ error: status === 412 ? 'revision_conflict' : status === 423 ? 'routine_locked' : 'invalid_routine_state' }, status));
     await expect(harness.library.save(envelope.routine, envelope)).rejects.toMatchObject({ status });
-    expect(harness.fetcher).toHaveBeenCalledOnce();
+    expect(harness.fetcher.mock.calls.map(([path]) => path)).toEqual(['/api/media/asset-a', '/api/routines/routine-a']);
+    expect(harness.fetcher.mock.calls[1]![1]!.method).toBe('PUT');
     expect(harness.cacheRoutine).not.toHaveBeenCalled();
     expect(envelope).toEqual(original);
     expect(harness.client.getContext().access).toBe('online');
@@ -1122,6 +1215,7 @@ describe('cloud transfers and revision commands', () => {
     const harness = libraryHarness();
     harness.getTrackBlob.mockResolvedValue(blob);
     harness.fetcher.mockImplementation(async (input, options) => {
+      if (input === '/api/media/asset-a') return json({ asset: envelope.media['entry-a'] });
       expect(new Headers(options!.headers).get('If-Match')).toBe('"1"');
       const result = structuredClone(envelope);
       result.routine.revision = 2;
@@ -1131,10 +1225,10 @@ describe('cloud transfers and revision commands', () => {
     await harness.library.save(envelope.routine, envelope, 'lock');
     for (const action of ['unlock', 'publish', 'delete'] as const) await harness.library.command(envelope, action);
     expect(harness.fetcher.mock.calls.map(([input]) => String(input))).toEqual([
-      '/api/routines/routine-a/lock', '/api/routines/routine-a/unlock', '/api/routines/routine-a/publish', '/api/routines/routine-a',
+      '/api/media/asset-a', '/api/routines/routine-a/lock', '/api/routines/routine-a/unlock', '/api/routines/routine-a/publish', '/api/routines/routine-a',
     ]);
-    expect(harness.fetcher.mock.calls[0]![1]!.body).toBeDefined();
-    expect(harness.fetcher.mock.calls.slice(1).every(([, options]) => options!.body === undefined)).toBe(true);
+    expect(harness.fetcher.mock.calls[1]![1]!.body).toBeDefined();
+    expect(harness.fetcher.mock.calls.slice(2).every(([, options]) => options!.body === undefined)).toBe(true);
   });
 
   it('blocks locked content mutations and uses the cloud duplicate endpoint without uploading', async () => {
@@ -1654,6 +1748,7 @@ describe('explicit household replacement', () => {
     const before = structuredClone(source);
     const harness = libraryHarness(); harness.getTrackBlob.mockResolvedValue(blob);
     harness.fetcher.mockImplementation(async (path, options) => {
+      if (path === '/api/media/asset-a') return json({ asset: envelope.media['entry-a'] });
       expect(path).toBe('/api/routines/routine-a');
       if (options?.method !== 'PUT') return json(envelope);
       expect(new Headers(options.headers).get('If-Match')).toBe('"7"');
@@ -1668,7 +1763,7 @@ describe('explicit household replacement', () => {
     const result = await harness.library.replace(source, envelope.routine.id, confirm);
     expect(result?.routine).toEqual({ ...before, id: envelope.routine.id, revision: 8 });
     expect(source).toEqual(before); expect(envelope.routine.revision).toBe(7);
-    expect(confirm).toHaveBeenCalledOnce(); expect(harness.fetcher).toHaveBeenCalledTimes(2);
+    expect(confirm).toHaveBeenCalledOnce(); expect(harness.fetcher).toHaveBeenCalledTimes(3);
     expect(harness.cacheRoutine).not.toHaveBeenCalled(); expect(harness.cacheTrack).not.toHaveBeenCalled();
   });
 
@@ -1678,8 +1773,9 @@ describe('explicit household replacement', () => {
     const before = structuredClone(source);
     const harness = libraryHarness(); harness.getTrackBlob.mockResolvedValue(blob);
     if (reason === 'locked') envelope.routine.locked = true;
-    harness.fetcher.mockImplementation(async (_path, options) => {
+    harness.fetcher.mockImplementation(async (path, options) => {
       if (reason === 'unavailable') return json({ error: 'storage_unavailable' }, 503);
+      if (path === '/api/media/asset-a') return json({ asset: envelope.media['entry-a'] });
       if (options?.method === 'PUT') return json({ error: 'routine_conflict' }, 412);
       return json(envelope);
     });
@@ -1688,7 +1784,7 @@ describe('explicit household replacement', () => {
     if (reason === 'cancel') await expect(operation).resolves.toBeNull();
     else await expect(operation).rejects.toMatchObject({ status: reason === 'locked' ? 423 : reason === 'conflict' ? 412 : 503 });
     expect(source).toEqual(before); expect(harness.cacheRoutine).not.toHaveBeenCalled();
-    expect(harness.fetcher).toHaveBeenCalledTimes(reason === 'conflict' ? 2 : 1);
+    expect(harness.fetcher).toHaveBeenCalledTimes(reason === 'conflict' ? 3 : 1);
     expect(confirm).toHaveBeenCalledTimes(['cancel', 'conflict'].includes(reason) ? 1 : 0);
   });
 
@@ -1789,6 +1885,8 @@ class AppNode extends EventTarget {
   title = '';
   value = '';
   files: File[] = [];
+  open = false;
+  type = '';
   tabIndex = 0;
   dataset: Record<string, string> = {};
   attributes = new Map<string, string>();
@@ -1807,6 +1905,7 @@ class AppNode extends EventTarget {
   constructor(tag: string, className = '', textContent = '') {
     super(); this.tag = tag; this.className = className; this.textContent = textContent; appNodes.push(this);
   }
+  get ownerDocument() { return document; }
   append(...children: AppNode[]) { this.children.push(...children); }
   after(...children: AppNode[]) {
     const parent = appNodes.find(node => node.children.includes(this));
@@ -1827,10 +1926,16 @@ class AppNode extends EventTarget {
   querySelector(selector: string) { return this.querySelectorAll(selector)[0] ?? null; }
   click() { if (!this.disabled) this.dispatchEvent(new Event('click', { cancelable: true })); }
   focus() {}
+  select() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  remove() { for (const node of appNodes) node.children = node.children.filter(child => child !== this); }
 }
 
 async function bootCloudApp(options: { role?: CloudSession['user']['role']; local?: boolean; cached?: boolean;
-  access?: 'offline' | 'signin-required'; earlyEdit?: boolean } = {}) {
+  access?: 'offline' | 'signin-required'; earlyEdit?: boolean; unready?: boolean; cachedClasses?: ClassSetup[]; cachedRoutines?: Routine[];
+  pendingWorkingCopy?: boolean; readinessDeferred?: ReturnType<typeof pending<{ ready: boolean; missing: string[] }>>;
+  syncDeferred?: ReturnType<typeof pending<void>> } = {}) {
   vi.resetModules();
   vi.clearAllMocks();
   appNodes.length = 0;
@@ -1843,19 +1948,65 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   store.setItem(hostedUserKey, hostedIdentityMarker(account.user));
   if (options.cached) rememberCloudSelection(store, account.user, { id: data.envelope.routine.id, revision: 1, published: data.envelope.routine.published });
   const root = new AppNode('div');
-  const owner = Object.assign(new EventTarget(), { documentElement: new AppNode('html'),
+  const owner = Object.assign(new EventTarget(), { documentElement: new AppNode('html'), body: root,
     createElement: (tag: string) => new AppNode(tag), querySelector: () => root });
   const navigate = vi.fn();
   const platform = Object.assign(new EventTarget(), { localStorage: store, location: { assign: navigate } });
   vi.stubGlobal('document', owner);
   vi.stubGlobal('window', platform);
   vi.stubGlobal('localStorage', store);
+  vi.stubGlobal('sessionStorage', storage());
   vi.stubGlobal('HTMLElement', AppNode);
   vi.stubGlobal('navigator', {});
   vi.stubGlobal('confirm', vi.fn(() => true));
   vi.stubGlobal('OfflineAudioContext', class {});
   const blobs = new Map<string, Blob>([['entry-a', data.blob]]);
   const cached = new Map<string, Routine>();
+  const working = new Map<string, RoutineWorkingCopy>();
+  if (options.pendingWorkingCopy) working.set(data.envelope.routine.id, {
+    envelope: structuredClone(data.envelope), localVersion: 1, cloudBaseRevision: data.envelope.routine.revision,
+    pendingCloud: true, savedAt: Date.now(),
+  });
+  appMocks.listClassSetups.mockResolvedValue([]); appMocks.listMusicPlaylists.mockResolvedValue([]);
+  appMocks.listCachedClassSetups.mockResolvedValue(options.cachedClasses ?? []); appMocks.getActiveRoutineSelection.mockResolvedValue(null);
+  appMocks.listRoutinePublications.mockResolvedValue([]);
+  appMocks.listCloudRoutines.mockImplementation(async () => structuredClone(options.cachedRoutines ?? [...cached.values()]));
+  appMocks.getRoutineWorkingCopy.mockImplementation(async id => structuredClone(working.get(id) ?? null));
+  appMocks.listRoutineWorkingCopies.mockImplementation(async () => structuredClone([...working.values()]));
+  appMocks.saveRoutineWorkingCopy.mockImplementation(async (envelope: CloudRoutine, options) => {
+    const previous = working.get(envelope.routine.id);
+    if (options.expectedLocalVersion !== (previous?.localVersion ?? null)) throw new Error('routine_conflict');
+    const copy = { envelope: structuredClone(envelope), localVersion: (previous?.localVersion ?? 0) + 1,
+      cloudBaseRevision: options.cloudBaseRevision, pendingCloud: options.cloud, savedAt: Date.now(),
+      ...(previous?.cloudAttempt ? { cloudAttempt: previous.cloudAttempt } : {}) };
+    working.set(envelope.routine.id, copy); return structuredClone(copy);
+  });
+  appMocks.recordRoutineSyncAttempt.mockImplementation(async (id, localVersion, envelope, baseRevision) => {
+    const current = working.get(id);
+    if (!current || current.localVersion !== localVersion || current.cloudBaseRevision !== baseRevision) throw new Error('routine_conflict');
+    current.cloudAttempt = { envelope: structuredClone(envelope), localVersion, baseRevision };
+  });
+  appMocks.acknowledgeRoutineWorkingCopy.mockImplementation(async (id, localVersion, envelope) => {
+    const current = working.get(id);
+    if (!current?.cloudAttempt || current.cloudAttempt.localVersion !== localVersion || !sameSavedContent(envelope, current.cloudAttempt.envelope)) throw new Error('routine_conflict');
+    current.cloudBaseRevision = envelope.routine.revision;
+    if (current.localVersion === localVersion) { current.envelope = structuredClone(envelope); current.pendingCloud = false; }
+    else current.envelope.routine.revision = envelope.routine.revision;
+    delete current.cloudAttempt;
+    cached.set(id, structuredClone(envelope.routine));
+  });
+  appMocks.reconcileRoutineWorkingCopy.mockImplementation(async envelope => {
+    const current = working.get(envelope.routine.id);
+    if (!current) return null;
+    if (current.pendingCloud || current.cloudAttempt) throw new Error('routine_conflict');
+    if (envelope.routine.revision < current.envelope.routine.revision) throw new Error('routine_conflict');
+    current.envelope = structuredClone(envelope); current.cloudBaseRevision = envelope.routine.revision;
+    return structuredClone(current);
+  });
+  appMocks.deleteRoutineWorkingCopy.mockImplementation(async (id, localVersion) => {
+    if (working.get(id)?.localVersion !== localVersion) throw new Error('routine_conflict');
+    working.delete(id);
+  });
   if (options.cached) cached.set(data.envelope.routine.id, structuredClone(data.envelope.routine));
   appMocks.getRoutine.mockResolvedValue(options.local ? structuredClone(data.envelope.routine) : null);
   const localStartup = pending<Routine | null>();
@@ -1866,11 +2017,13 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   appMocks.cacheFillerRecording.mockResolvedValue(undefined);
   appMocks.removeFillerRecording.mockResolvedValue(undefined);
   appMocks.preview.playFiller.mockResolvedValue(undefined);
-  appMocks.getCloudRoutine.mockImplementation(async (id: string) => cached.get(id) ?? null);
+  appMocks.getCloudRoutine.mockImplementation(async (id: string, revision?: number, published?: boolean) =>
+    options.cachedRoutines?.find(value => value.id === id && value.revision === revision && value.published === published) ?? cached.get(id) ?? null);
   appMocks.getTrackBlob.mockImplementation(async (id: string) => blobs.get(id));
   appMocks.cacheCloudTrack.mockImplementation(async (id: string, blob: Blob) => { blobs.set(id, blob); });
   appMocks.cacheCloudRoutine.mockImplementation(async (routine: Routine) => { cached.set(routine.id, structuredClone(routine)); });
-  appMocks.getReadiness.mockResolvedValue({ ready: true, missing: [] });
+  appMocks.getReadiness.mockResolvedValue(options.unready ? { ready: false, missing: ['entry-a'] } : { ready: true, missing: [] });
+  if (options.readinessDeferred) appMocks.getReadiness.mockReturnValueOnce(options.readinessDeferred.promise);
   appMocks.filler.mockResolvedValue({});
   let state: PlayerState = { status: 'idle', trackIndex: 0, elapsed: 0, duration: 30, classElapsed: 0, currentCue: '', nextCue: '',
     nextCueIn: null, fillerRemaining: null, holding: false, ducked: false, beepsMuted: false, error: null };
@@ -1878,7 +2031,9 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   appMocks.player.subscribe.mockImplementation((listener: (value: PlayerState) => void) => { emit = listener; listener(state); return () => {}; });
   appMocks.player.load.mockImplementation(async () => { state = { ...state, status: 'idle' }; emit(state); });
   appMocks.player.play.mockImplementation(async () => { state = { ...state, status: 'playing' }; emit(state); });
-  const server = { envelope: data.envelope, authStatus: 200, writeStatus: 200, fillers: [] as FillerRecording[] };
+  appMocks.player.pause.mockImplementation(() => { state = { ...state, status: 'paused' }; emit(state); });
+  const server = { envelope: data.envelope, authStatus: 200, writeStatus: 200, fillers: [] as FillerRecording[], classes: [] as ClassSetup[],
+    analyses: new Map<string, FillerAnalysis>() };
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
     const path = String(input);
     if (path === '/api/auth/session') return server.authStatus === 200 ? json(account) : json({ error: 'signin_required' }, server.authStatus);
@@ -1889,6 +2044,15 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
       return json(recording, 201);
     }
     if (path === '/api/fillers') return json({ fillers: server.fillers });
+    if (/^\/api\/fillers\/[^/]+\/analysis$/.test(path)) {
+      const id = path.split('/')[3]!;
+      if (init?.method === 'PUT') {
+        const analysis = JSON.parse(String(init.body)) as FillerAnalysis;
+        if (server.fillers.find(recording => recording.id === id)?.asset.sha256 !== analysis.sha256) return json({ error: 'invalid_analysis' }, 400);
+        server.analyses.set(id, analysis);
+      }
+      return json({ analysis: server.analyses.get(id) ?? null });
+    }
     if (path.startsWith('/api/fillers/') && init?.method === 'DELETE') {
       server.fillers = server.fillers.filter(recording => recording.id !== path.split('/').at(-1));
       return json({ archived: true });
@@ -1899,6 +2063,8 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
     if (path.endsWith('/complete')) return json(data.asset);
     if (path === '/api/routines' && init?.method === 'POST') return json({ error: 'routine_exists' }, 409);
     if (path === '/api/routines' || path === '/api/routines?published=true') return json({ routines: [{ ...server.envelope.routine, published: path.includes('?') }] });
+    if (path === '/api/classes' || path === '/api/classes?published=true') return json({ classes: server.classes.filter(value => value.published === path.includes('?')) });
+    if (path === '/api/playlists' || path === '/api/playlists?published=true') return json({ playlists: [] });
     if (init?.method && init.method !== 'GET') {
       if (server.writeStatus !== 200) return json({ error: 'revision_conflict' }, server.writeStatus);
       const next = init.body ? JSON.parse(String(init.body)) as CloudRoutine : structuredClone(server.envelope);
@@ -1907,6 +2073,7 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
       next.routine.published = path.endsWith('/publish');
       server.envelope = structuredClone(next);
       server.envelope.routine.published = false;
+      if (path === '/api/routines/routine-a' && init.method === 'PUT') await options.syncDeferred?.promise;
       return json(next);
     }
     if (path.startsWith('/api/routines/')) return json(server.envelope);
@@ -1919,8 +2086,9 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   else cloudClient.admitSession(account);
   await import('../frontend/src/main');
   if (options.earlyEdit) { button(t('edit')).click(); localStartup.resolve(null); }
-  await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
-  return { server, fetcher, data, store, navigate, cached, platform };
+  await new Promise<void>(resolve => setImmediate(resolve));
+  if (!options.readinessDeferred && !options.syncDeferred) await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+  return { server, fetcher, data, store, navigate, cached, platform, working };
 }
 
 function button(title: string): AppNode {
@@ -1937,6 +2105,12 @@ async function cloudClick(title: string): Promise<void> {
   await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
 }
 
+async function enterTeach(): Promise<void> {
+  button(t('teach')).click();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+}
+
 async function openCloudRoutine(): Promise<void> {
   button(t('edit')).click();
   await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
@@ -1948,6 +2122,281 @@ async function openCloudRoutine(): Promise<void> {
 }
 
 describe('main hosted orchestration with synthetic DOM and player', () => {
+  const pickExistingAudio = async (app: Awaited<ReturnType<typeof bootCloudApp>>) => {
+    const asset = { ...app.data.asset, id: 'catalog-track' };
+    const availability = { status: 200 };
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation((input, init) => {
+      if (String(input) === '/api/media/library') return Promise.resolve(json({ items: [{ asset, title: 'Catalog song', duration: 30 }] }));
+      if (String(input) === '/api/media/catalog-track') return Promise.resolve(availability.status === 404
+        ? json({ error: 'asset_not_found' }, 404) : json({ asset, chunkBytes: CLOUD_CHUNK_BYTES, chunkCount: 1 }));
+      return handler(input, init);
+    });
+    vi.spyOn(document, 'createElement').mockImplementation(tag => {
+      const node = new AppNode(tag);
+      if (tag === 'audio') {
+        const audio = Object.assign(node, { duration: 30, load: vi.fn(), onloadedmetadata: null as (() => void) | null });
+        Object.defineProperty(audio, 'src', { set: () => queueMicrotask(() => audio.onloadedmetadata?.()) });
+      }
+      return node as unknown as HTMLElement;
+    });
+    button(t('existingAudio')).click();
+    await vi.waitFor(() => expect(appNodes.find(node => node.className === 'audio-library-rows')?.querySelectorAll('input')).toHaveLength(1));
+    const checkbox = appNodes.find(node => node.className === 'audio-library-rows')!.querySelectorAll('input')[0]!;
+    checkbox.checked = true; checkbox.dispatchEvent(new Event('change'));
+    button(t('addSelectedAudio')).click();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.tracks).toHaveLength(2));
+    expect(appMocks.editor.routine!.tracks[1]!.id).not.toBe(asset.id);
+    return { asset, availability };
+  };
+
+  it.each(['save', 'lock'] as const)('review picker %s reuses the remote asset with zero upload POSTs and no hidden class', async action => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    const { asset } = await pickExistingAudio(app);
+    await cloudClick(t(action === 'lock' ? 'lock' : 'cloudSave'));
+    const entry = appMocks.editor.routine!.tracks[1]!;
+    expect(app.server.envelope.media[entry.id]).toEqual(asset);
+    expect(app.server.envelope.routine.locked).toBe(action === 'lock');
+    expect(app.working.get('routine-a')!.pendingCloud).toBe(false);
+    expect(appMocks.saveRoutineWorkingCopy).toHaveBeenCalledOnce();
+    expect(app.fetcher.mock.calls.some(([input]) => String(input).includes('/uploads'))).toBe(false);
+    expect(app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT').map(([input]) => String(input))).toEqual(['/api/routines/routine-a']);
+    expect(app.fetcher.mock.calls.filter(([, init]) => init?.method === 'POST').map(([input]) => String(input)))
+      .toEqual(action === 'lock' ? ['/api/routines/routine-a/lock'] : []);
+    expect(appMocks.saveClassSetup).not.toHaveBeenCalled(); expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it.each(['save', 'lock'] as const)('review picker %s fails on a missing remote asset without upload or locking', async action => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    const { availability } = await pickExistingAudio(app); availability.status = 404;
+    await cloudClick(t(action === 'lock' ? 'lock' : 'cloudSave'));
+    expect(app.working.get('routine-a')).toMatchObject({ pendingCloud: true, envelope: { routine: { locked: false } } });
+    expect(appMocks.editor.routine!.tracks).toHaveLength(2); expect(appMocks.editor.routine!.locked).toBe(false);
+    expect(app.fetcher.mock.calls.map(([, init]) => init?.method ?? 'GET')).not.toEqual([]);
+    expect(app.fetcher.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    expect(appMocks.saveClassSetup).not.toHaveBeenCalled(); expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it.each(['read', 'write'] as const)('review Save and lock leaves a failed synchronization %s locally saved and unlocked', async failure => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    await pickExistingAudio(app);
+    if (failure === 'write') app.server.writeStatus = 503;
+    else {
+      const handler = app.fetcher.getMockImplementation()!;
+      app.fetcher.mockImplementation((input, init) => String(input) === '/api/routines/routine-a' && init?.method === 'GET'
+        ? Promise.resolve(json({ error: 'storage_unavailable' }, 503)) : handler(input, init));
+    }
+    await cloudClick(t('lock'));
+    expect(app.working.get('routine-a')).toMatchObject({ pendingCloud: true, envelope: { routine: { locked: false } } });
+    expect(appMocks.editor.routine!.locked).toBe(false); expect(app.server.envelope.routine.locked).toBe(false);
+    expect(app.fetcher.mock.calls.some(([input]) => String(input).endsWith('/lock') || String(input).includes('/uploads'))).toBe(false);
+    expect(appMocks.saveClassSetup).not.toHaveBeenCalled();
+  });
+
+  it('review Save and lock preserves matching prepared playback without loading or playing again', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await enterTeach();
+    button(t('play')).click(); await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
+    await cloudClick(t('lock'));
+    expect(appMocks.editor.routine!.locked).toBe(true); expect(app.server.envelope.routine.locked).toBe(true);
+    expect(appMocks.player.load).toHaveBeenCalledOnce(); expect(appMocks.player.play).toHaveBeenCalledOnce();
+    expect(appMocks.player.stop).not.toHaveBeenCalled(); expect(appMocks.player.pause).not.toHaveBeenCalled();
+  });
+
+  it.each(['owner', 'editor', 'player'] as const)('review cold offline %s chooser enumerates unremembered cached classes with published role scope', async role => {
+    const setup: ClassSetup = { schemaVersion: 1, id: 'unremembered-class', name: 'Cached publication', revision: 3, locked: false, published: true,
+      routine: { id: 'routine-a', revision: 1, published: true }, crossfade: 1,
+      before: { mode: 'hold', seconds: 17, bpm: 100, sound: 'soft' } };
+    const cachedDraft = { ...structuredClone(setup), id: 'cached-draft', name: 'Cached draft', published: false };
+    const app = await bootCloudApp({ role, access: 'offline', cachedClasses: [setup, cachedDraft] });
+    const rows = appNodes.find(node => node.className === 'routine-library-rows')!;
+    const titles = rows.querySelectorAll('button').map(node => node.title);
+    expect(titles).toContain(t('openRoutine', { name: setup.name }));
+    expect(titles.includes(t('openRoutine', { name: cachedDraft.name }))).toBe(role !== 'player');
+    expect(app.store.getItem(classSelectionStorageKey)).toBeNull();
+    const routine = { ...structuredClone(app.data.envelope.routine), published: true };
+    appMocks.getPreparedClass.mockResolvedValue({ setup, routine, audio: { crossfade: 1, before: setup.before } });
+    rows.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: setup.name }))!.click();
+    await vi.waitFor(() => expect(appMocks.player.load).toHaveBeenCalledOnce()); await enterTeach();
+    expect(appMocks.getPreparedClass).toHaveBeenCalledWith(setup.id, 3, 'cloud', true);
+    expect(app.fetcher).not.toHaveBeenCalled(); expect(appMocks.player.play).not.toHaveBeenCalled();
+    if (role === 'player') {
+      expect(appMocks.editor.routine).toEqual(routine); expect(appMocks.editor.canEdit!()).toBe(false);
+      expect(appMocks.player.load).toHaveBeenCalledWith(routine, { crossfade: 1, before: setup.before });
+    } else {
+      expect(appMocks.editor.routine!.id).not.toBe(routine.id);
+      expect(appMocks.editor.routine!.sequence?.before).toEqual(setup.before);
+    }
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled(); expect(appMocks.saveClassSetup).not.toHaveBeenCalled();
+  });
+
+  it('applies detected confidence and manual filler BPM through the hash-bound Cloud API without saving the routine', async () => {
+    const app = await bootCloudApp({ local: true });
+    const recording: FillerRecording = { id: 'analysis-filler', name: 'Synthetic loop', duration: 8, asset: app.data.asset };
+    app.server.fillers = [recording]; appMocks.getFillerRecordingBlob.mockResolvedValue(app.data.blob);
+    const { detectTrackBpm } = await import('../frontend/src/bpm');
+    vi.mocked(detectTrackBpm).mockResolvedValue({ bpm: 120, firstBeat: 0, confidence: 0.6 });
+    const original = structuredClone(appMocks.editor.routine);
+    button(t('settings')).click();
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    const panel = appNodes.find(node => node.classList.contains('filler-library'))!;
+    const select = panel.querySelectorAll('select')[0]!; select.value = recording.id; select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    button(t('fillerAnalyzeBpm')).click();
+    await vi.waitFor(() => expect(button(t('fillerApplyBpm')).disabled).toBe(false));
+    expect(panel.querySelectorAll('p').some(node => node.textContent.includes('Confidence: 60%'))).toBe(true);
+    expect(app.server.analyses.size).toBe(0);
+    button(t('fillerApplyBpm')).click();
+    await vi.waitFor(() => expect(app.server.analyses.get(recording.id)).toEqual({ bpm: 120, confidence: 0.6,
+      analyzer: 'detectTrackBpm', sha256: recording.asset.sha256 }));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    const bpm = panel.querySelectorAll('label').find(node => node.textContent === t('fillerBpmMetadata'))!.children[0]!;
+    bpm.value = '60'; bpm.dispatchEvent(new Event('input'));
+    expect(app.server.analyses.get(recording.id)!.bpm).toBe(120);
+    button(t('fillerApplyBpm')).click();
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    expect(app.server.analyses.get(recording.id)).toEqual({ bpm: 60, analyzer: 'manual', sha256: recording.asset.sha256 });
+    select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    expect(bpm.value).toBe('60');
+    const puts = app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(puts.every(([path, init]) => path === `/api/fillers/${recording.id}/analysis`
+      && new Headers(init?.headers).has('X-CSRF-Token') && JSON.parse(String(init?.body)).sha256 === recording.asset.sha256)).toBe(true);
+    expect(app.store.getItem(`fitness-filler-analysis:${recording.asset.sha256}`)).toBeNull();
+    expect(appMocks.editor.routine).toEqual(original); expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    app.server.analyses.set(recording.id, { bpm: 90, analyzer: 'manual', sha256: 'b'.repeat(64) });
+    select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    expect(bpm.value).toBe(''); expect(button(t('fillerApplyBpm')).disabled).toBe(true);
+    expect(panel.querySelector('.filler-library-feedback')!.textContent).not.toBe(t('fillerBpmSaved'));
+  });
+
+  it('review Refresh retries a saved local revision after revalidation and reconciles a lost create without another POST', async () => {
+    const app = await bootCloudApp({ local: true });
+    const envelope = structuredClone(app.data.envelope); envelope.routine.revision = 9;
+    app.working.set(envelope.routine.id, { envelope, localVersion: 3, cloudBaseRevision: null, pendingCloud: true, savedAt: 1 });
+    let created: CloudRoutine | null = null;
+    const lostResponse = pending<void>();
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation(async (input, init) => {
+      if (String(input) === '/api/routines/routine-a' && init?.method === 'GET') {
+        return created ? json(created) : json({ error: 'routine_not_found' }, 404);
+      }
+      if (String(input) === '/api/routines' && init?.method === 'POST') {
+        created = JSON.parse(String(init.body)) as CloudRoutine;
+        expect(created.routine.revision).toBe(1);
+        await lostResponse.promise;
+        throw new TypeError('Lost create response');
+      }
+      return handler(input, init);
+    });
+    button(t('cloudRefresh')).click();
+    await vi.waitFor(() => expect(app.working.get(envelope.routine.id)?.cloudAttempt?.envelope.routine.revision).toBe(1));
+    expect(button(t('cloudRefresh')).disabled).toBe(true);
+    lostResponse.resolve();
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    await vi.waitFor(() => expect(appNodes.find(node => node.classList.contains('notice'))?.classList.contains('notice-error')).toBe(true));
+    expect(app.working.get(envelope.routine.id)).toMatchObject({ pendingCloud: true, cloudBaseRevision: null, localVersion: 3 });
+    const reads = app.fetcher.mock.calls.length;
+    await cloudClick(t('cloudRefresh'));
+    await vi.waitFor(() => expect(app.working.get(envelope.routine.id)?.pendingCloud).toBe(false));
+    expect(app.working.get(envelope.routine.id)).toMatchObject({ localVersion: 3, cloudBaseRevision: 1, envelope: { routine: { id: envelope.routine.id, revision: 1 } } });
+    expect(app.fetcher.mock.calls.filter(([path, init]) => path === '/api/routines' && init?.method === 'POST')).toHaveLength(1);
+    expect(app.fetcher.mock.calls.slice(reads).every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('review Close awaits both source pointers and Refresh never restores a closed working copy', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('cloudSave'));
+    const before = structuredClone(app.working.get('routine-a'));
+    const closing = pending<void>(); appMocks.clearActiveRoutine.mockReturnValueOnce(closing.promise);
+    app.store.setItem(classSelectionStorageKey, 'synthetic-reference');
+    button(t('closeRoutine')).click();
+    const dialog = appNodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+    dialog.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
+    expect(appMocks.clearActiveRoutine).toHaveBeenCalledOnce();
+    expect(dialog.open).toBe(true); expect(app.store.getItem(hostedCloudSelectionKey)).not.toBeNull();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    closing.resolve();
+    await vi.waitFor(() => expect(dialog.open).toBe(false));
+    expect(app.store.getItem(hostedCloudSelectionKey)).toBeNull(); expect(app.store.getItem(classSelectionStorageKey)).toBeNull();
+    expect(button(t('newRoutine')).hidden).toBe(false);
+    expect(appNodes.find(node => node.className === 'routine-library')!.hidden).toBe(false);
+    await cloudClick(t('cloudRefresh'));
+    expect(button(t('newRoutine')).hidden).toBe(false); expect(app.store.getItem(hostedCloudSelectionKey)).toBeNull();
+    expect(app.working.get('routine-a')).toEqual(before); expect(appMocks.deleteRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).toHaveBeenCalledOnce(); expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('review pending Open Draft preserves local content and never rebases an unrelated remote head', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('cloudSave'));
+    app.server.writeStatus = 412; appMocks.editor.routine!.name = 'Pending local choreography'; appMocks.editor.changed!();
+    await cloudClick(t('cloudSave'));
+    const before = structuredClone(app.working.get('routine-a')!);
+    app.server.envelope.routine.revision += 2; app.server.envelope.routine.name = 'Unrelated remote';
+    const writes = app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT').length;
+    button(t('cloudOpenDraft')).dispatchEvent(new Event('click')); await enterTeach();
+    expect(app.working.get('routine-a')).toEqual(before);
+    expect(appMocks.editor.routine!.name).toBe('Pending local choreography');
+    expect(app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(writes);
+  });
+
+  it('cold cached chooser keeps a newer draft and older publication independently selectable without reconciliation', async () => {
+    const { envelope } = await fixture();
+    const publication = { ...structuredClone(envelope.routine), name: 'Older publication', revision: 3, published: true };
+    const newer = { ...structuredClone(envelope.routine), name: 'Newer draft', revision: 8 };
+    const app = await bootCloudApp({ access: 'offline', cachedRoutines: [newer, publication] });
+    vi.stubGlobal('navigator', { onLine: false });
+    const rows = appNodes.find(node => node.className === 'routine-library-rows')!;
+    expect(rows.children).toHaveLength(2);
+    expect(rows.querySelectorAll('.library-row-name').map(node => node.textContent)).toEqual(['Newer draft', 'Older publication']);
+    rows.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: publication.name }))!.click();
+    await vi.waitFor(() => expect(appMocks.editor.routine).toEqual(publication));
+    expect(appMocks.getCloudRoutine).toHaveBeenLastCalledWith(publication.id, 3, true);
+    expect(appMocks.editor.canEdit!()).toBe(false); expect(appMocks.reconcileRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(app.working.size).toBe(0); expect(app.fetcher).not.toHaveBeenCalled();
+    expect(JSON.parse(app.store.getItem(hostedCloudSelectionKey)!)).toMatchObject({ id: publication.id, revision: 3, published: true });
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('review clean Cloud read refreshes local CAS content and does not let a mirror hide the newer Cloud row', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('cloudSave'));
+    const localVersion = app.working.get('routine-a')!.localVersion;
+    app.server.envelope.routine.name = 'Authoritative newer head'; app.server.envelope.routine.revision++;
+    await cloudClick(t('cloudRefresh')); button(t('openDifferent')).click();
+    const rows = appNodes.find(node => node.className === 'routine-library-rows')!;
+    const row = rows.children.find(node => node.querySelector('.library-row-name')?.textContent === 'Authoritative newer head')!;
+    expect(row).toBeDefined(); row.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: 'Authoritative newer head' }))!.click();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.name).toBe('Authoritative newer head'));
+    expect(app.working.get('routine-a')).toMatchObject({ localVersion, cloudBaseRevision: app.server.envelope.routine.revision });
+    await cloudClick(t('cloudSave'));
+    expect(appMocks.saveRoutineWorkingCopy).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ expectedLocalVersion: localVersion }));
+  });
+
+  it('review player legacy row remains a full read-only published class on cold and offline cached opens', async () => {
+    const app = await bootCloudApp({ role: 'player' });
+    const setup: ClassSetup = { schemaVersion: 1, id: 'legacy-published', name: 'Published class', revision: 3, locked: false, published: true,
+      routine: { id: 'routine-a', revision: 1, published: true }, crossfade: 1,
+      before: { mode: 'hold', seconds: 17, bpm: 100, sound: 'soft' }, after: { mode: 'hold', seconds: 19, bpm: 120, sound: 'drums' } };
+    app.server.classes = [setup];
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation((path, init) => path === '/api/classes/legacy-published/prepare?published=true&revision=3'
+      ? Promise.resolve(json({ setup, routine: app.server.envelope })) : handler(path, init));
+    await cloudClick(t('cloudRefresh'));
+    const open = () => appNodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('button')
+      .find(node => node.title === t('openRoutine', { name: setup.name }))!.click();
+    open(); await vi.waitFor(() => expect(appMocks.player.load).toHaveBeenCalled()); await enterTeach();
+    expect(appMocks.player.load).toHaveBeenLastCalledWith(app.server.envelope.routine, { crossfade: 1, before: setup.before, after: setup.after });
+    expect(appMocks.editor.routine!.id).toBe('routine-a'); expect(appMocks.editor.routine!.published).toBe(true);
+    expect(appMocks.editor.canEdit!()).toBe(false); expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    appMocks.getPreparedClass.mockResolvedValue({ setup, routine: app.server.envelope.routine, audio: { crossfade: 1, before: setup.before, after: setup.after } });
+    (await import('../frontend/src/cloud-client')).cloudClient.admitLocal(session('player').user, 'offline', () => {});
+    const requests = app.fetcher.mock.calls.length; button(t('openDifferent')).click(); open(); await enterTeach();
+    expect(app.fetcher).toHaveBeenCalledTimes(requests);
+    expect(appMocks.getPreparedClass).toHaveBeenCalledWith(setup.id, 3, 'cloud', true);
+    expect(appMocks.editor.canEdit!()).toBe(false); expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
   it.each(['owner', 'editor', 'player'] as const)('loads household routines at startup using the admitted %s session without another sign-in', async role => {
     const app = await bootCloudApp({ role });
     const path = role === 'player' ? '/api/routines?published=true' : '/api/routines';
@@ -1963,13 +2412,14 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.cacheCloudTrack).not.toHaveBeenCalled();
     button(t('edit')).click();
     expect(app.fetcher.mock.calls.filter(([url]) => url === path)).toHaveLength(1);
-    expect(button(t('householdFilter')).disabled).toBe(false);
-    expect(button(t(role === 'player' ? 'cloudPublications' : 'cloudDrafts')).disabled).toBe(false);
+    const checkbox = (label: string) => appNodes.find(node => node.tag === 'label' && node.textContent === label)!.children[0]!;
+    expect(checkbox(t('householdFilter')).disabled).toBe(false);
+    expect(checkbox(t(role === 'player' ? 'cloudPublications' : 'draft')).disabled).toBe(false);
   });
 
   it('shows reauthentication only after expiry, not while offline or forbidden, without stopping prepared audio', async () => {
     const app = await bootCloudApp({ local: true });
-    await cloudClick(t('prepare')); button(t('play')).click();
+    await enterTeach(); button(t('play')).click();
     const signin = appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!;
     const { cloudClient } = await import('../frontend/src/cloud-client');
     cloudClient.admitLocal(session().user, 'offline', () => {});
@@ -1993,22 +2443,168 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appNodes.filter(node => node.tag === 'select').some(node => node.children.some(option => option.value === 'routine-a'))).toBe(true);
   });
 
-  it.each(['offline', 'signin-required'] as const)('keeps cached %s startup network-free and does not load or start playback', async access => {
+  it.each(['local', 'cached'] as const)('review hosted startup retains automatic preparation through Cloud refresh for %s selection', async source => {
+    const app = await bootCloudApp({ local: source === 'local', cached: source === 'cached' });
+    await vi.waitFor(() => expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine));
+    for (const tab of ['edit', 'settings'] as const) { button(t(tab)).click(); await enterTeach(); }
+    expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    expect(button(t('startClass')).disabled).toBe(false);
+    expect(app.fetcher.mock.calls.filter(([path]) => path === '/api/routines')).toHaveLength(1);
+  });
+
+  it('prepares startup pending working copy exactly once after sync acknowledgment during held readiness', async () => {
+    const readinessDeferred = pending<{ ready: boolean; missing: string[] }>();
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, readinessDeferred, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.revision).toBe(app.data.envelope.routine.revision + 1));
+    expect(app.working.get('routine-a')!.pendingCloud).toBe(false);
+    readinessDeferred.resolve({ ready: true, missing: [] });
+    await vi.waitFor(() => {
+      expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
+      expect(button(t('startClass')).disabled).toBe(false);
+      expect(button(t('play')).disabled).toBe(false);
+      expect(appNodes.find(node => node.classList.contains('readiness'))!.querySelectorAll('p')
+        .find(node => node.attributes.get('role') === 'status')!.textContent).toBe(t('verifiedLocal'));
+    });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.server.envelope.routine);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('retries in-flight preparation for the newer saved generation returned by sync', async () => {
+    const readinessDeferred = pending<{ ready: boolean; missing: string[] }>();
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, access: 'offline', pendingWorkingCopy: true, readinessDeferred, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.getReadiness).toHaveBeenCalledOnce());
+    const { cloudClient } = await import('../frontend/src/cloud-client');
+    cloudClient.admitSession(session());
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    const newer = app.working.get('routine-a')!;
+    newer.localVersion++;
+    newer.envelope.routine.name = 'Newer saved class';
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.name).toBe('Newer saved class'));
+    readinessDeferred.resolve({ ready: true, missing: [] });
+    await vi.waitFor(() => {
+      expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
+      expect(button(t('startClass')).disabled).toBe(false);
+    });
+    expect(appMocks.getReadiness).toHaveBeenCalledTimes(2);
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.working.get('routine-a')!.envelope.routine);
+    expect(app.working.get('routine-a')).toMatchObject({ localVersion: 2, pendingCloud: false });
+    expect(appMocks.acknowledgeRoutineWorkingCopy).toHaveBeenCalledTimes(2);
+    expect(button(t('retryPreparation')).hidden).toBe(true);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('keeps playing audio and unsaved edits through a sync acknowledgment (dirty=%s)', async dirty => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, access: 'offline', pendingWorkingCopy: true, syncDeferred });
+    await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
+    button(t('play')).click();
+    await vi.waitFor(() => expect(appMocks.player.play.mock.settledResults[0]?.type).toBe('fulfilled'));
+    const { cloudClient } = await import('../frontend/src/cloud-client');
+    cloudClient.admitSession(session());
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    if (dirty) { appMocks.editor.routine!.name = 'Unsaved choreography'; appMocks.editor.changed!(); }
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(appMocks.editor.routine!.name).toBe(dirty ? 'Unsaved choreography' : app.data.envelope.routine.name);
+    expect(appMocks.player.load).toHaveBeenCalledOnce();
+    expect(appMocks.player.play).toHaveBeenCalledOnce();
+    expect(appMocks.player.pause).not.toHaveBeenCalled();
+    expect(appMocks.player.stop).not.toHaveBeenCalled();
+    expect(appMocks.player.unload).not.toHaveBeenCalled();
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each(['close', 'reopen'] as const)('does not apply a late sync result after an explicit %s of the routine', async action => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    const original = structuredClone(appMocks.editor.routine!);
+    if (action === 'close') {
+      button(t('closeRoutine')).click();
+      const dialog = appNodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
+      dialog.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
+      await vi.waitFor(() => expect(dialog.open).toBe(false));
+    } else await cloudClick(t('cloudOpenDraft'));
+    const newer = app.working.get('routine-a')!;
+    newer.localVersion++;
+    newer.envelope.routine.name = 'Separately saved generation';
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (action === 'close') {
+      expect(button(t('newRoutine')).hidden).toBe(false);
+      expect(button(t('startClass')).disabled).toBe(true);
+      expect(appMocks.player.load).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
+      expect(appMocks.editor.routine).toEqual(original);
+      expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(original);
+    }
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+  });
+
+  it('keeps invalid unsaved input after sync without scheduling preparation retries', async () => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred });
+    await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    appMocks.editor.routine!.crossfade = -1;
+    appMocks.editor.changed!();
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(appMocks.editor.routine!.crossfade).toBe(-1);
+    expect(appMocks.getReadiness).not.toHaveBeenCalled();
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    expect(button(t('startClass')).disabled).toBe(true);
+  });
+
+  it('keeps a missing-media preparation failure actionable without automatically retrying', async () => {
+    const syncDeferred = pending<void>();
+    const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred, unready: true });
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
+    await vi.waitFor(() => expect(button(t('retryPreparation')).hidden).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(appMocks.getReadiness).toHaveBeenCalledTimes(3);
+    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(button(t('startClass')).disabled).toBe(true);
+    expect(button(t('retryPreparation')).disabled).toBe(false);
+    expect(appNodes.find(node => node.classList.contains('notice'))?.classList.contains('notice-error')).toBe(true);
+  });
+
+  it.each(['offline', 'signin-required'] as const)('keeps cached %s startup network-free and prepares silently without starting playback', async access => {
     const app = await bootCloudApp({ role: 'player', cached: true, access });
     expect(app.fetcher).not.toHaveBeenCalled();
     expect(appMocks.editor.routine!.id).toBe('routine-a');
-    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
     expect(appMocks.player.play).not.toHaveBeenCalled();
     expect(appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!.hidden).toBe(access !== 'signin-required');
   });
 
   it.each(['owner', 'editor'] as const)('manages the household filler catalog as %s only in Settings, with explicit consent and retained class audio', async role => {
     const app = await bootCloudApp({ role, local: true });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     const local: FillerRecording = { id: 'local-recording', name: 'My loop', duration: 8,
       asset: { ...app.data.asset, id: 'local-recording-asset' } };
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, sound: 'recording', recording: structuredClone(local) };
     appMocks.getFillerRecordingBlob.mockResolvedValue(app.data.blob);
-    await cloudClick(t('prepare'));
+    await enterTeach();
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     const snapshot = structuredClone(appMocks.editor.routine!);
@@ -2091,7 +2687,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each([401, 403])('prepares a cold cached Settings audition on one gesture, plays on the next, and leaves class playback alone on %s', async status => {
     const app = await bootCloudApp({ local: true });
-    await cloudClick(t('prepare'));
+    await enterTeach();
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     const recording = { id: 'filler-a', name: '<Cached loop>', duration: 8, asset: app.data.asset };
@@ -2102,6 +2698,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     const panel = appNodes.find(node => node.classList.contains('filler-library'))!;
     const selector = panel.querySelectorAll('select')[0]!;
     selector.value = recording.id; selector.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
     const play = panel.querySelectorAll('button').find(node => node.title === t('previewFiller'))!;
     const requests = app.fetcher.mock.calls.length;
     play.click();
@@ -2183,7 +2780,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     if (access !== 'online') cloudClient.admitLocal(getCloudContext().user!, access, () => {});
     appMocks.getFillerRecordingBlob.mockResolvedValue(app.data.blob);
     const requests = app.fetcher.mock.calls.length;
-    await cloudClick(t('prepare'));
+    await enterTeach();
     expect(appMocks.player.load).toHaveBeenCalledWith(draft);
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
@@ -2193,24 +2790,26 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it.each(['owner', 'editor', 'player'] as const)('downloads a cold selected recording before all readiness checks and loading for %s', async role => {
     const app = await bootCloudApp({ role, local: role !== 'player', cached: role === 'player' });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     const startupRequests = app.fetcher.mock.calls.length;
     const recording = { id: 'known-filler', name: 'Loop', duration: 8, asset: app.data.asset };
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording', recording };
     let cached = false;
     appMocks.cacheFillerRecording.mockImplementation(async () => { cached = true; });
     appMocks.getReadiness.mockImplementation(async () => ({ ready: cached, missing: cached ? [] : ['filler-asset-a'] }));
-    await cloudClick(t('prepare'));
+    await enterTeach();
     const suffix = role === 'player' ? '?routineId=routine-a&revision=1' : '';
     expect(app.fetcher.mock.calls.slice(startupRequests).map(([path]) => path)).toEqual([`/api/media/asset-a${suffix}`, `/api/media/asset-a/chunks/0${suffix}`]);
     expect(appMocks.cacheFillerRecording).toHaveBeenCalledWith(recording, expect.any(Blob));
     expect(appMocks.cacheFillerRecording.mock.invocationCallOrder[0]).toBeLessThan(appMocks.getReadiness.mock.invocationCallOrder.at(-1)!);
     expect(appMocks.getReadiness.mock.invocationCallOrder.at(-1)).toBeLessThan(appMocks.player.load.mock.invocationCallOrder[0]!);
-    expect(appMocks.player.load).toHaveBeenCalledWith(appMocks.editor.routine);
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(appMocks.editor.routine);
   });
 
   it.each(['401', '403', 'network', 'readiness'] as const)('keeps the previous prepared playing class on a cold filler %s failure', async failure => {
     const app = await bootCloudApp({ local: true });
-    await cloudClick(t('prepare'));
+    await enterTeach();
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording',
@@ -2220,33 +2819,36 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
       if (failure === 'network') throw new TypeError('offline');
       return json({ error: 'denied' }, Number(failure));
     });
-    await cloudClick(t('prepare'));
+    await enterTeach();
     expect(appMocks.player.load).toHaveBeenCalledOnce();
     expect(appMocks.player.pause).not.toHaveBeenCalled();
     expect(appMocks.player.stop).not.toHaveBeenCalled();
     expect(appMocks.player.dispose).not.toHaveBeenCalled();
-    expect(button(t('startClass')).disabled).toBe(false);
+    expect(button(t('startClass')).disabled).toBe(true);
+    expect(button(t('pause')).disabled).toBe(false); expect(button(t('stop')).disabled).toBe(false);
   });
 
   it.each(['stop', 'pause', 'draft', 'identity', 'new-prepare'] as const)('fences a late cold filler response after %s', async interruption => {
     const app = await bootCloudApp({ local: true });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     const startupRequests = app.fetcher.mock.calls.length;
     appMocks.editor.routine!.filler = { ...appMocks.editor.routine!.filler, mode: 'timed', sound: 'recording',
       recording: { id: 'known-filler', name: 'Loop', duration: 8, asset: app.data.asset } };
     const download = pending<Response>();
     const handler = app.fetcher.getMockImplementation()!;
     app.fetcher.mockImplementation((path, init) => String(path).includes('/chunks/') ? download.promise : handler(path, init));
-    button(t('prepare')).click();
+    button(t('teach')).click();
     await vi.waitFor(() => expect(app.fetcher).toHaveBeenCalledTimes(startupRequests + 2));
     if (interruption === 'identity') (await import('../frontend/src/cloud-client')).cloudClient.admitSession(session('editor', 'other'));
     else if (interruption === 'draft') appMocks.editor.routine!.name = 'Changed draft';
     else button(t(interruption === 'pause' ? 'pause' : 'stop')).click();
     if (interruption === 'new-prepare') {
       appMocks.editor.routine!.filler = { mode: 'none', seconds: 8, bpm: 100, sound: 'soft' };
-      await cloudClick(t('prepare'));
+      await enterTeach();
     }
     download.resolve(binary(app.data.blob));
-    await vi.waitFor(() => expect(button(t('prepare')).disabled).toBe(false));
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
     expect(appMocks.cacheFillerRecording).not.toHaveBeenCalled();
     expect(appMocks.player.load).toHaveBeenCalledTimes(interruption === 'new-prepare' ? 1 : 0);
     if (interruption === 'new-prepare') expect(appMocks.player.load.mock.calls[0]![0].filler.mode).toBe('none');
@@ -2256,7 +2858,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
   it('keeps explicit refresh and 401 from disposing, stopping or reloading a prepared playing snapshot', async () => {
     const app = await bootCloudApp();
     await openCloudRoutine();
-    await cloudClick(t('prepare'));
+    await enterTeach();
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     app.server.authStatus = 401;
@@ -2270,6 +2872,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     app.server.envelope.routine.revision++;
     await cloudClick(t('cloudRefresh'));
     expect(appMocks.editor.routine!.name).toBe('<Private class>');
+    vi.mocked(confirm).mockImplementation(message => message !== t('confirmPrepare'));
     await cloudClick(t('cloudOpen'));
     expect(appMocks.editor.routine!.name).toBe('Remote revision');
     expect(appMocks.player.load).toHaveBeenCalledOnce();
@@ -2283,7 +2886,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     app.server.envelope.media['entry-b'] = app.data.asset;
     appMocks.getTrackBlob.mockResolvedValue(app.data.blob);
     await openCloudRoutine();
-    await cloudClick(t('prepare'));
+    await enterTeach();
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     const prepared = appMocks.player.load.mock.calls[0]![0] as Routine;
@@ -2296,7 +2899,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.preview.stop).toHaveBeenCalledTimes(previewStops);
     expect(app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(0);
     await cloudClick(t('cloudSave'));
-    expect(confirm).toHaveBeenCalledWith(t('cloudConfirmSave', { name: draft.name, id: draft.id, revision: 1 }));
+    expect(appMocks.saveRoutineWorkingCopy).toHaveBeenCalledWith(expect.objectContaining({ routine: draft }),
+      { expectedLocalVersion: null, cloud: true, cloudBaseRevision: 1 });
     const writes = app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT');
     expect(writes).toHaveLength(1);
     expect(writes[0]![0]).toBe('/api/routines/routine-a');
@@ -2312,8 +2916,28 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
       appMocks.player.updateCues]) expect(command).not.toHaveBeenCalled();
   });
 
+  it('review paused Practice cue Save uses authoritative preflight and manifests without POST, chunks, reload or replay', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await enterTeach();
+    button(t('play')).click(); await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
+    button(t('pause')).click(); expect(button(t('resume')).disabled).toBe(false);
+    button(t('editCueTimes')).click(); button(t('laterCue')).click();
+    expect(appMocks.editor.routine!.tracks[0]!.cues[0]!.anchor).toEqual({ kind: 'timestamp', seconds: 1.1 });
+    const requests = app.fetcher.mock.calls.length;
+    await cloudClick(t('cloudSave'));
+    expect(app.fetcher.mock.calls.slice(requests).map(([path, init]) => [path, init?.method ?? 'GET'])).toEqual([
+      ['/api/routines/routine-a', 'GET'], ['/api/media/asset-a', 'GET'], ['/api/routines/routine-a', 'PUT'],
+    ]);
+    expect(app.working.get('routine-a')?.pendingCloud).toBe(false);
+    expect(app.server.envelope.routine.tracks[0]!.cues[0]!.anchor).toEqual({ kind: 'timestamp', seconds: 1.1 });
+    await enterTeach();
+    expect(button(t('resume')).disabled).toBe(false);
+    expect(appMocks.player.load).toHaveBeenCalledOnce(); expect(appMocks.player.play).toHaveBeenCalledOnce();
+    expect(appMocks.player.pause).toHaveBeenCalledOnce(); expect(appMocks.player.stop).not.toHaveBeenCalled();
+    expect(appMocks.player.seek).not.toHaveBeenCalled(); expect(appMocks.player.updateCues).toHaveBeenCalledOnce();
+  });
+
   it.each([401, 403, 412, 423])('keeps live cue timing and playback after a rejected household cue Save (%s)', async status => {
-    const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('prepare'));
+    const app = await bootCloudApp(); await openCloudRoutine(); await enterTeach();
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     button(t('editCueTimes')).click();
@@ -2339,13 +2963,17 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     await cloudClick(t('cloudOpen'));
     expect(app.fetcher).toHaveBeenCalledTimes(requests);
     expect(appMocks.editor.routine!.name).toBe('Unsaved edit');
-    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.player.load).toHaveBeenCalledOnce(); expect(appMocks.player.play).not.toHaveBeenCalled();
   });
 
   it('routes lock/unlock/publish through cloud commands and leaves publication read-only', async () => {
     const app = await bootCloudApp();
     await openCloudRoutine();
+    await cloudClick(t('cloudSave'));
+    let localVersion = app.working.get('routine-a')!.localVersion;
     await cloudClick(t('lock'));
+    expect(app.working.get('routine-a')!.localVersion).toBe(localVersion + 1);
+    localVersion++;
     expect(appMocks.editor.routine!.locked).toBe(true);
     expect(appMocks.saveRoutine).not.toHaveBeenCalled();
     expect(button(t('cloudPublish')).disabled).toBe(true);
@@ -2354,7 +2982,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.editor.routine!.published).toBe(true);
     expect(appMocks.editor.canEdit!()).toBe(false);
     expect(appMocks.saveRoutine).not.toHaveBeenCalled();
-    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.player.play).not.toHaveBeenCalled();
+    expect(app.working.get('routine-a')!.localVersion).toBe(localVersion);
     expect(app.fetcher.mock.calls.filter(([, init]) => init?.method === 'POST').map(([input]) => String(input))).toEqual([
       '/api/routines/routine-a/lock', '/api/routines/routine-a/unlock', '/api/routines/routine-a/publish',
     ]);
@@ -2364,9 +2993,68 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     appMocks.editor.routine!.name = 'Next publication'; appMocks.editor.changed!();
     await cloudClick(t('cloudSave'));
     expect(appMocks.editor.routine!.id).toBe(publication.id);
-    expect(confirm).toHaveBeenCalledWith(t('cloudConfirmSave', { name: publication.name, id: publication.id, revision: publication.revision }));
+    expect(appMocks.saveRoutineWorkingCopy).toHaveBeenLastCalledWith(expect.objectContaining({ routine: expect.objectContaining({ name: 'Next publication' }) }),
+      { expectedLocalVersion: localVersion, cloud: true, cloudBaseRevision: publication.revision });
+    expect(app.working.get('routine-a')!.pendingCloud).toBe(false);
     expect(publication.name).toBe('<Private class>');
     await cloudClick(t('cloudPublish')); expect(appMocks.editor.routine!.name).toBe('Next publication');
+  });
+
+  it.each([false, true])('opens an older publication without reconciling the newer draft and returns to local work (pending=%s)', async pendingCloud => {
+    const app = await bootCloudApp(); await openCloudRoutine(); await cloudClick(t('cloudSave'));
+    await cloudClick(t('cloudPublish'));
+    const publication = { routine: structuredClone(appMocks.editor.routine!), media: structuredClone(app.server.envelope.media) };
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation((input, init) => {
+      if (String(input) === '/api/routines/routine-a?published=true') return Promise.resolve(json(publication));
+      if (String(input) === '/api/routines?published=true') return Promise.resolve(json({ routines: [publication.routine] }));
+      return handler(input, init);
+    });
+    await cloudClick(t('cloudOpenDraft'));
+    appMocks.editor.routine!.name = 'Newer saved choreography'; appMocks.editor.changed!();
+    await cloudClick(t('cloudSave'));
+    if (pendingCloud) {
+      app.server.writeStatus = 412;
+      appMocks.editor.routine!.name = 'Pending choreography'; appMocks.editor.changed!();
+      await cloudClick(t('cloudSave'));
+    }
+    const before = structuredClone(app.working.get('routine-a')!);
+    expect(before.pendingCloud).toBe(pendingCloud);
+    expect(before.envelope.routine.revision).toBeGreaterThan(publication.routine.revision);
+    await cloudClick(t('cloudRefresh')); button(t('openDifferent')).click();
+    const rows = appNodes.find(node => node.className === 'routine-library-rows')!;
+    const cloudRows = rows.children.filter(row => row.querySelector('.muted')?.textContent.startsWith(t('householdFilter')));
+    expect(cloudRows).toHaveLength(2);
+    expect(cloudRows.map(row => row.querySelector('.muted')!.textContent)).toEqual(expect.arrayContaining([
+      `${t('householdFilter')} / ${t('draft')}`, `${t('householdFilter')} / ${t('exportPublished')}`,
+    ]));
+    const reconciles = appMocks.reconcileRoutineWorkingCopy.mock.calls.length;
+    const mutations = app.fetcher.mock.calls.filter(([, init]) => init?.method !== 'GET').length;
+    const version = appNodes.find(node => node.tag === 'select' && node.attributes.get('aria-label') === t('cloudVersion'))!;
+    expect(version.value).toBe('draft');
+    const opening = app.fetcher.mock.calls.length;
+    const publishedRow = cloudRows.find(row => row.querySelector('.muted')!.textContent.endsWith(t('exportPublished')))!;
+    publishedRow.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: publication.routine.name }))!.click();
+    await vi.waitFor(() => expect(appMocks.editor.routine!.published).toBe(true));
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    expect(appMocks.editor.routine).toEqual(publication.routine);
+    expect(version.value).toBe('draft');
+    expect(app.fetcher.mock.calls.slice(opening).filter(([path]) => String(path).startsWith('/api/routines/'))
+      .map(([path, init]) => [path, init?.method])).toEqual([['/api/routines/routine-a?published=true', 'GET']]);
+    expect(appMocks.editor.canEdit!()).toBe(false);
+    expect(appMocks.reconcileRoutineWorkingCopy).toHaveBeenCalledTimes(reconciles);
+    expect(app.working.get('routine-a')).toEqual(before);
+    expect(JSON.parse(app.store.getItem(hostedCloudSelectionKey)!)).toMatchObject({
+      id: 'routine-a', revision: publication.routine.revision, published: true,
+    });
+    const reads = app.fetcher.mock.calls.length;
+    await cloudClick(t('cloudOpenDraft'));
+    expect(appMocks.editor.routine).toEqual(before.envelope.routine);
+    expect(appMocks.editor.canEdit!()).toBe(true);
+    expect(app.working.get('routine-a')).toEqual(before);
+    if (pendingCloud) expect(app.fetcher).toHaveBeenCalledTimes(reads);
+    expect(app.fetcher.mock.calls.filter(([, init]) => init?.method !== 'GET')).toHaveLength(mutations);
+    expect(appMocks.player.play).not.toHaveBeenCalled();
   });
 
   it('keeps an actionable CAS rejection without reloading, retrying or falling back to local save', async () => {
@@ -2378,14 +3066,17 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     await cloudClick(t('cloudSave'));
     expect(app.fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT')).toHaveLength(1);
     expect(appMocks.editor.routine!.name).toBe('Stale draft');
-    expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.player.load).toHaveBeenCalledOnce();
     expect(appMocks.saveRoutine).not.toHaveBeenCalled();
-    expect(appNodes.some(node => node.textContent === t('cloudConflict'))).toBe(true);
+    expect(appNodes.some(node => node.textContent.includes(t('cloudConflict')))).toBe(true);
+    expect(app.working.get('routine-a')).toMatchObject({ pendingCloud: true, envelope: { routine: { name: 'Stale draft' } } });
   });
 
   it('never uploads existing local songs on startup, refresh or cancelled explicit upload', async () => {
     const app = await bootCloudApp({ local: true });
-    expect(app.fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([['/api/routines', 'GET']]);
+    expect(app.fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([
+      ['/api/routines', 'GET'], ['/api/routines?published=true', 'GET'], ['/api/classes', 'GET'], ['/api/classes?published=true', 'GET'],
+    ]);
     await cloudClick(t('cloudRefresh'));
     vi.mocked(confirm).mockReturnValue(false);
     await cloudClick(t('shareRoutine'));
@@ -2393,20 +3084,21 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.storeTrack).not.toHaveBeenCalled();
   });
 
-  it('saves a new editor-owned local draft without uploading, claiming a cloud selection or reloading playback', async () => {
-    const app = await bootCloudApp();
+  it('saves a new editor-owned working draft locally while offline without losing pending Cloud intent', async () => {
+    const app = await bootCloudApp({ access: 'offline' });
+    button(t('newRoutine')).click();
     expect(appMocks.editor.canEdit!()).toBe(true);
     appMocks.editor.routine!.name = 'New local class';
     appMocks.editor.changed!();
     const draft = structuredClone(appMocks.editor.routine!);
-    const saved = { ...draft, revision: 1 };
-    appMocks.saveRoutine.mockResolvedValueOnce(saved);
-    await cloudClick(t('save'));
-    expect(appMocks.saveRoutine).toHaveBeenCalledExactlyOnceWith(draft, null, 'save');
-    expect(appMocks.setActiveRoutine).toHaveBeenCalledExactlyOnceWith(saved.id);
-    expect(appMocks.editor.routine).toEqual(saved);
+    await cloudClick(t('cloudSave'));
+    expect(appMocks.saveRoutineWorkingCopy).toHaveBeenCalledExactlyOnceWith({ routine: draft, media: {} },
+      { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null });
+    expect(app.working.get(draft.id)).toMatchObject({ pendingCloud: true, localVersion: 1, envelope: { routine: draft } });
+    expect(appMocks.saveRoutine).not.toHaveBeenCalled();
+    expect(appMocks.editor.routine).toEqual(draft);
     expect(app.store.getItem(hostedCloudSelectionKey)).toBeNull();
-    expect(app.fetcher.mock.calls.map(([path, init]) => [path, init?.method])).toEqual([['/api/routines', 'GET']]);
+    expect(app.fetcher).not.toHaveBeenCalled();
     expect(appMocks.cacheCloudRoutine).not.toHaveBeenCalled();
     expect(appMocks.player.load).not.toHaveBeenCalled();
     expect(appMocks.player.dispose).not.toHaveBeenCalled();
@@ -2420,8 +3112,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     button(t('edit')).click();
     expect(appNodes.find(node => node.classList.contains('edit-panel'))!.hidden).toBe(false);
     expect(appNodes.find(node => node.classList.contains('teach-panel'))!.querySelectorAll('.cloud-panel')).toHaveLength(0);
-    for (const label of ['save', 'demo', 'lock', 'duplicate', 'cloudReplace', 'cloudOpenDraft'] as const) expect(button(t(label)).hidden).toBe(true);
-    button(t('save')).dispatchEvent(new Event('click'));
+    for (const label of ['cloudSave', 'demo', 'lock', 'duplicate', 'cloudReplace', 'cloudOpenDraft'] as const) expect(button(t(label)).hidden).toBe(true);
+    button(t('cloudSave')).dispatchEvent(new Event('click'));
     button(t('demo')).dispatchEvent(new Event('click'));
     const chooser = appNodes.find(node => node.tag === 'input' && node.attributes.get('aria-label') === t('import'))!;
     chooser.files = [new File(['test'], 'fixture.wav', { type: 'audio/wav' })];
@@ -2437,6 +3129,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
 
   it('recovers a same-ID create collision only through explicit target confirmation and keeps local edits on Cancel/412', async () => {
     const app = await bootCloudApp({ local: true });
+    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
+    appMocks.player.load.mockClear();
     button(t('edit')).click();
     await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
     appMocks.editor.routine!.name = 'Unsaved local source'; appMocks.editor.changed!();
@@ -2457,11 +3151,12 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.editor.routine).toEqual({ ...source, revision: 2 });
     expect(JSON.parse(app.store.getItem(hostedCloudSelectionKey)!)).toMatchObject({ id: 'routine-a', revision: 2, published: false });
     expect(app.server.envelope.media).toEqual(app.data.envelope.media);
-    expect(appMocks.saveRoutine).not.toHaveBeenCalled(); expect(appMocks.player.load).not.toHaveBeenCalled();
+    expect(appMocks.saveRoutine).not.toHaveBeenCalled(); expect(appMocks.player.load).toHaveBeenCalledOnce();
+    expect(appMocks.player.play).not.toHaveBeenCalled();
   });
 
   it('restores an exact cached publication without fetching and prepares after expiry only when readiness passes', async () => {
-    const app = await bootCloudApp({ role: 'player', cached: true, access: 'signin-required' });
+    const app = await bootCloudApp({ role: 'player', cached: true, access: 'signin-required', unready: true });
     expect(app.fetcher).not.toHaveBeenCalled();
     expect(appMocks.editor.routine!.id).toBe('routine-a');
     expect(appMocks.editor.canEdit!()).toBe(false);
@@ -2469,9 +3164,10 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     const { cloudClient } = await import('../frontend/src/cloud-client');
     cloudClient.admitLocal(session('player').user, 'signin-required', () => {});
     appMocks.getReadiness.mockResolvedValueOnce({ ready: false, missing: ['entry-a'] });
-    await cloudClick(t('prepare'));
+    await enterTeach();
     expect(appMocks.player.load).not.toHaveBeenCalled();
-    await cloudClick(t('prepare'));
+    appMocks.getReadiness.mockResolvedValue({ ready: true, missing: [] });
+    await enterTeach();
     expect(appMocks.player.load).toHaveBeenCalledOnce();
     expect(appMocks.getReadiness.mock.invocationCallOrder.at(-1)).toBeLessThan(appMocks.player.load.mock.invocationCallOrder[0]!);
     expect(app.navigate).not.toHaveBeenCalled();
@@ -2480,10 +3176,11 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
   it('waits for recorded-filler readiness before touching the prepared player', async () => {
     const app = await bootCloudApp();
     app.server.envelope.routine.filler = { mode: 'timed', seconds: 10, bpm: 100, sound: 'lofi' };
-    await openCloudRoutine();
     const filler = pending<unknown>();
     appMocks.filler.mockReturnValueOnce(filler.promise);
-    button(t('prepare')).click();
+    button(t('edit')).click();
+    const selector = appNodes.find(node => node.tag === 'select' && node.attributes.get('aria-label') === t('cloudRoutines'))!;
+    selector.value = 'routine-a'; selector.dispatchEvent(new Event('change')); button(t('cloudOpen')).click();
     await vi.waitFor(() => expect(appMocks.filler).toHaveBeenCalledOnce());
     expect(appMocks.player.load).not.toHaveBeenCalled();
     filler.resolve({});

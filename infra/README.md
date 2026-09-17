@@ -1,5 +1,156 @@
 # SWA Free Shared API
 
+## September 16 Unified Routine Verification And Release
+
+This procedure supersedes historical preview-restoration runners below. Never
+start or restore a local preview or browser suite on this workstation. The parent
+integrates and authorizes Git operations; these helpers do not modify Git state.
+No new resources, account changes, tier changes or private-media operations are
+part of verification or release.
+
+### Remote CI
+
+[Verify](../.github/workflows/verify.yml) runs on pull requests, pushes and manual
+dispatch, using a GitHub-hosted Ubuntu runner and Node 22.23.2. Root, frontend and
+API use separate `npm ci` lockfiles. No dependency/build/browser cache is uploaded
+or restored. Chromium and its OS libraries, FFmpeg/ffprobe and the runner's
+OpenSSL/tar support synthetic tests. Existing pinned public codec assets and
+corresponding source remain mandatory; no runtime codec download or core upgrade.
+
+[The runner](verify-azure-only.mjs) runs typechecks, a fresh API build and the
+complete API/security suites, local build/privacy/full root tests, full existing
+Playwright suite, an isolated hosted build, full hosted root tests, infra tests
+and fresh API staging, sequentially. Vitest has one thread worker and no file
+parallelism; Playwright has one worker, no retries and forbids focused tests.
+Hosted artifacts use `HOSTED_TEST_DIST`; source fixtures keep
+`VITE_HOSTED_PILOT=false`. Worker markers discriminate both modes. The hosted
+policy requires every existing named case plus all newly registered cases to
+pass, not exactly 15. Only the four named private opt-in comparisons may skip;
+local mode additionally defers hosted cases with their exact build sentinel.
+The historical migration-handler opt-in remains disabled in infra tests.
+
+The complete existing browser suite contains desktop/mobile viewport and touch
+cases; this is Chromium coverage, not a Safari/WebKit or physical iPhone claim.
+The artifact includes only a source-hashed summary and bounded top-level PNG
+screenshots with desktop/mobile evidence. Never upload raw logs, traces,
+`test-results/**`, application bundles, API dependencies, caches or `local-media/`.
+This is a fresh synthetic CI workspace, not a general secret/content scanner.
+Permissions are `contents: read`; no Azure credentials, OIDC permissions or
+deployment action are present. A green check is not deployment approval.
+
+After the parent has integrated and published the approved branch, run:
+
+```sh
+gh workflow run verify.yml --ref feature/unified-routine-editor
+gh run list --workflow verify.yml --branch feature/unified-routine-editor --event workflow_dispatch --limit 5
+RUN_ID='<selected-run-id>'
+gh run watch "$RUN_ID" --exit-status
+gh run view "$RUN_ID" --json headSha,event,conclusion,url
+CI_SHA='<that-successful-runs-headSha>'
+CI_DIR="local-media/deployment/ci-$RUN_ID"
+gh run download "$RUN_ID" --name "synthetic-verification-$CI_SHA" --dir "$CI_DIR"
+export CI_RECEIPT="$PWD/$CI_DIR/summary.json"
+node infra/verify-azure-only.mjs --assert-source "$CI_RECEIPT"
+```
+
+Manual dispatch requires this workflow to exist on the default branch; before
+that, use its push/pull-request run after parent integration. Select the actual
+run explicitly, not an unrelated older green run. For pull requests, the receipt
+and artifact name use `GITHUB_SHA`, which can be the synthetic merge commit.
+Verify GitHub provenance, run identity and reviewed commit independently before
+trusting a downloaded receipt. `--assert-source` compares every recorded input
+with current source but does not authenticate a supplied JSON document, approve a
+commit or approve the newly rebuilt deployment bytes. Changed inputs require a
+new green CI run; there is no skip/reuse flag that overrides this comparison.
+
+### Fresh Local Checks And API Stage
+
+Use the already-installed Node **22.23.2** and reviewed npm CLI, putting that Node
+binary first on `PATH`. No `npx` downloads or installs are needed here. With all
+source owners finished and the source frozen:
+
+```sh
+export NPM_CLI="$(readlink -f "$(command -v npm)")"
+unset PRIVATE_AUDIO_DIR MIGRATION_LIVE_API_DIRECTORY REHEARSAL_HTTPS_CERT REHEARSAL_HTTPS_KEY
+export RELEASE_REPORT_NAME='unified-routine-reviewed-01'
+export RELEASE="$PWD/local-media/deployment/$RELEASE_REPORT_NAME"
+node infra/verify-azure-only.mjs --assert-source "$CI_RECEIPT"
+flock /tmp/fim-unified-check.lock node infra/verify-azure-only.mjs --checks
+flock /tmp/fim-unified-check.lock env VITE_HOSTED_PILOT=true npm --prefix frontend run build
+flock /tmp/fim-unified-check.lock node infra/stage.mjs --offline --replace-stage
+npm run check:privacy
+node infra/verify-azure-only.mjs --assert-source "$CI_RECEIPT"
+node infra/deploy.mjs > "$RELEASE/artifact.json"
+```
+
+`--checks` runs fresh non-browser type/API/security/infra checks, builds both
+frontend modes, validates the isolated hosted distribution and checks privacy.
+It creates a new ignored report directory and records `NON_BROWSER_CHECKS_ONLY`;
+it cannot substitute for the remote full-suite receipt. It never starts servers,
+installs packages, stages production dependencies or restores previews. Local
+children have a 768 MiB V8 heap cap; CI test children use 2048 MiB. These are heap
+limits, not measured total process/browser/native memory limits.
+
+[API staging](stage.mjs) is the existing owner; there is no stage-api.mjs.
+`--offline` validates the old production dependency tree against the current
+manifest/lock and checks the installed esbuild version, then ALWAYS invokes a new
+API build and copies the new functions bundle into a fresh validated stage. It
+does not reuse the old API bundle or old API artifact hash. Only generated stage
+contents are replaced, and failed preparation preserves the previous stage.
+Missing dependencies or a changed lock fail closed: arrange a fresh online stage
+on approved CI rather than installing here or bypassing validation. Regular
+`node infra/stage.mjs` retains fresh locked installs for CI only in this workflow.
+
+Inspect the new frontend/API inventories and combined hash in `artifact.json`.
+The CI build has its own timestamp/hash; do not substitute that hash or a prior
+release hash for this newly built candidate. API bytes cannot be omitted merely
+because an earlier release reused an unchanged API stage. Existing installed
+dependency trees are prerequisites, not independently re-proven npm integrity by
+the offline path; the full fresh CI installs remain required evidence.
+
+### One Approved Upload And Live Verification
+
+After parent security/artifact review and the explicit release gate, set
+`REVIEWED_ARTIFACT_SHA256` to the literal new combined hash, and set the existing
+approved `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `SWA_NAME` and
+`SWA_EXPECTED_HOSTNAME`. The existing pinned SWA CLI 2.0.10/native uploader and
+Azure login must already be available; do not install or provision implicitly.
+
+```sh
+export REVIEWED_ARTIFACT_SHA256='<literal-new-reviewed-combined-sha256>'
+node infra/verify-azure-only.mjs --assert-source "$CI_RECEIPT"
+mkdir "$RELEASE/upload-attempt" && node infra/deploy.mjs --deploy-approved
+node infra/verify-azure-live.mjs
+```
+
+The exclusive directory prevents a blind second upload using this release name.
+Do not remove it or select a new name to bypass a failed/uncertain upload; inspect
+the existing attempt first. The existing deployment entry point uses
+`uploadApprovedArtifact`, revalidates the literal artifact hash and exact existing
+Free target, and keeps the scoped token in the child environment only. None of
+these commands belongs in the automatic verification workflow.
+
+[Live verification](verify-azure-live.mjs) is standalone and read-only: all public
+files/root hashes, seven anonymous/spoofed API denials, provider/private/config
+404s and security headers. It uses the unchanged strict codec MIME/size/hash/
+encoding validator for all six licensed resources, records all failures and
+writes one ignored `live.json`. It never imports browser/server release helpers,
+uploads, starts previews or restores them. API denial probes do not establish
+authenticated production v2 behavior; actual account and physical-device
+acceptance remain parent/user gates.
+
+**Known separate release issue:** Azure has transformed the corresponding-source
+`.tar.gz` response to `application/x-tar` with `Content-Encoding: gzip`. Intact
+decoded source contents do not satisfy the downloadable-gzip contract. Preserve
+`LIVE_WITH_VERIFICATION_FAILURES`, report the archive path separately from other
+passing checks, and do not weaken validation or retry uploads automatically.
+
+Pricing assumptions remain the existing SWA Free/private-storage design and the
+USD 30 total budget including about 40 songs. No new spending or billing
+measurement was made; GitHub-hosted execution/artifact minutes and storage are
+subject to the repository account's allowance. Seven-day, at-most-32-MiB PNG
+evidence is a configured cap, not measured billing.
+
 ## Current Release Status
 
 The approved compact-media migration completed and its independent receipt

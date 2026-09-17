@@ -3,6 +3,7 @@ import type { ReadableStream } from 'node:stream/web';
 import { ServiceError } from '../errors';
 import { CloudAuth, clearCookie } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
+import { CloudLibrary } from './library';
 import { CloudMedia } from './media';
 import { CloudClasses, CloudPlaylists } from './plans';
 import { CloudRoutines } from './routines';
@@ -74,9 +75,10 @@ function readQuery(url: URL, parts: string[], method: string): { published: bool
     || (method === 'POST' && parts.length === 3 && parts[2] === 'duplicate')
     || (method === 'GET' && parts[0] === 'classes' && parts.length === 3 && parts[2] === 'prepare'));
   const listRead = entityRoute && method === 'GET' && parts.length === 1;
-  const mediaRead = parts[0] === 'media' && method === 'GET' && (parts.length === 2 || (parts.length === 4 && parts[2] === 'chunks'));
+  const libraryRead = parts.join('/') === 'media/library' && method === 'GET';
+  const mediaRead = !libraryRead && parts[0] === 'media' && method === 'GET' && (parts.length === 2 || (parts.length === 4 && parts[2] === 'chunks'));
   const allowed = singleRead ? ['published', 'revision'] : listRead ? ['published']
-    : mediaRead ? ['routineId', 'playlistId', 'classId', 'revision'] : [];
+    : libraryRead ? ['cursor'] : mediaRead ? ['routineId', 'playlistId', 'classId', 'revision'] : [];
   if (new Set(keys).size !== keys.length || keys.some(key => !allowed.includes(key))
     || (url.searchParams.has('published') && !['true', 'false'].includes(url.searchParams.get('published')!))) {
     throw new ApiError(400, 'invalid_query');
@@ -105,12 +107,14 @@ export class CloudApi {
   readonly routines: CloudRoutines;
   readonly playlists: CloudPlaylists;
   readonly classes: CloudClasses;
+  readonly library: CloudLibrary;
   constructor(readonly store: BlobStore, env: () => NodeJS.ProcessEnv, now: () => number = Date.now) {
     this.auth = new CloudAuth(store, env, now);
     this.media = new CloudMedia(store, this.auth);
     this.routines = new CloudRoutines(store, this.auth, this.media);
     this.playlists = new CloudPlaylists(store, this.auth, this.media);
     this.classes = new CloudClasses(store, this.auth, this.routines, this.playlists);
+    this.library = new CloudLibrary(store, this.auth, this.media, this.routines, this.playlists);
   }
 
   async traffic(bucket: string, limit: number): Promise<void> {
@@ -160,6 +164,13 @@ export class CloudApi {
         return json({ ok: true }, 200, { 'set-cookie': clearCookie() });
       }
       if (parts[0] === 'fillers') {
+        if (parts.length === 3 && parts[2] === 'analysis') {
+          if (method === 'GET') {
+            await emptyBody(request);
+            return json(await this.routines.fillers.getAnalysis(request.headers, parts[1]!));
+          }
+          if (method === 'PUT') return json(await this.routines.fillers.putAnalysis(request.headers, parts[1]!, await jsonBody(request, 4096)));
+        }
         if (parts.length === 1 && method === 'GET') return json(await this.routines.fillers.list(request.headers));
         if (parts.length === 1 && method === 'POST') return json(await this.routines.fillers.create(request.headers, await jsonBody(request, 4096)), 201);
         if (parts.length === 2 && method === 'GET') return json(await this.routines.fillers.get(request.headers, parts[1]!));
@@ -190,6 +201,10 @@ export class CloudApi {
         }
       }
       if (parts[0] === 'media') {
+        if (parts.join('/') === 'media/library' && method === 'GET') {
+          await emptyBody(request);
+          return json(await this.library.list(request.headers, url.searchParams.get('cursor') ?? undefined));
+        }
         if (parts.join('/') === 'media/uploads' && method === 'POST') return json(await this.media.initiate(request.headers, await jsonBody(request, 4096)), 201);
         if (parts.join('/') === 'media/uploads/cleanup' && method === 'POST') {
           await emptyBody(request);

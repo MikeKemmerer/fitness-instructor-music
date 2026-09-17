@@ -44,6 +44,30 @@ describe('pinned recorded filler', () => {
     expect(Math.abs(header.getInt16(44, true) - header.getInt16(bytes.length - 2, true)) / 32768).toBeLessThan(0.002);
   });
 
+  it.each(['soft', 'bright', 'drums'] as const)('reports %s tempo and exact generated frame duration without fetching audio', async sound => {
+    const { getFillerSoundBpm, getFillerSoundDuration } = await import('../frontend/src/filler-audio');
+    for (const bpm of [40, 100, 137, 220]) {
+      const value = { ...filler, sound, bpm };
+      expect(getFillerSoundBpm(value)).toBe(bpm);
+      expect(getFillerSoundDuration(value)).toBe(generateLoopSamples(sound, bpm).length / 22050);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it.each([40, 60, 100, 120, 137, 220])('reports measured 120 BPM and unchanged 16-second duration with saved BPM %s', async bpm => {
+    const { getFillerSoundBpm, getFillerSoundDuration, LOFI_ASSET } = await import('../frontend/src/filler-audio');
+    const saved = { ...filler, bpm, seconds: 99, gain: 0.5 };
+    const before = structuredClone(saved);
+    expect(LOFI_ASSET.measuredBpm).toBe(120);
+    expect(getFillerSoundBpm(saved)).toBe(120);
+    expect(getFillerSoundDuration(saved)).toBe(16);
+    expect(saved).toEqual(before);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(decode).not.toHaveBeenCalled();
+    expect(audio.createBuffer).not.toHaveBeenCalled();
+  });
+
   it('shares one verified decode across contexts and saved BPM values without synthesizing', async () => {
     const { getFillerBuffer, LOFI_ASSET } = await import('../frontend/src/filler-audio');
     const buffers = await Promise.all([getFillerBuffer(audio, filler), getFillerBuffer(audio, { ...filler, bpm: 180 })]);
@@ -187,6 +211,14 @@ describe('private custom filler', () => {
     vi.stubGlobal('OfflineAudioContext', class { decodeAudioData = decode; });
   });
   afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+  it('reports immutable recording duration separately from filler timing and leaves tempo unknown', async () => {
+    const { getFillerSoundBpm, getFillerSoundDuration } = await import('../frontend/src/filler-audio');
+    expect(getFillerSoundDuration({ ...custom, seconds: 99, bpm: 220 })).toBe(2);
+    expect(getFillerSoundBpm(custom)).toBeUndefined();
+    expect(local.get).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 
   it('shares one native buffer and identical source bytes across audition/rehearsal contexts and saved BPM/gain', async () => {
     const { getFillerBuffer } = await import('../frontend/src/filler-audio');

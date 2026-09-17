@@ -1,42 +1,52 @@
 import { Copy, Redo2, RefreshCw, Trash2, Undo2 } from 'lucide';
 import type { DraftRecovery } from './offline';
 import { listDraftRecoveries, removeDraftRecovery, saveDraftRecovery } from './offline';
-import { element, iconButton } from './ui';
+import { element, iconButton, transientText } from './ui';
 import { t } from './i18n';
 
 type Content = DraftRecovery['value'];
-const content = (value: Content) => JSON.stringify({ ...value, id: '', revision: 0, locked: false, published: false });
-const bytes = (values: Content[]) => new TextEncoder().encode(JSON.stringify(values)).byteLength;
+export interface EditAttachments { media: DraftRecovery['media']; editorState?: unknown }
+interface EditSnapshot { value: Content; attachments: EditAttachments }
+const content = (value: Content) => JSON.stringify({ ...value, id: '', revision: 0, locked: false, published: false, savedAt: undefined });
+const bytes = (values: EditSnapshot[]) => new TextEncoder().encode(JSON.stringify(values)).byteLength;
 
 export function createEditHistory() {
-  let current: Content | null = null;
-  let past: Content[] = [];
-  let future: Content[] = [];
+  let current: EditSnapshot | null = null;
+  let past: EditSnapshot[] = [];
+  let future: EditSnapshot[] = [];
   let lastEdit = 0;
   return {
-    reset(value: Content) { current = structuredClone(value); past = []; future = []; lastEdit = 0; },
-    observe(value: Content, grouped = false, now = Date.now()) {
-      if (!current || current.id !== value.id) { this.reset(value); return; }
-      if (content(value) !== content(current)) {
+    reset(value: Content, attachments: EditAttachments = { media: {} }) { current = structuredClone({ value, attachments }); past = []; future = []; lastEdit = 0; },
+    rebase(value: Content, attachments: EditAttachments) {
+      if (!current || current.value.id !== value.id) { this.reset(value, attachments); return; }
+      current = structuredClone({ value, attachments }); lastEdit = 0;
+    },
+    observe(value: Content, grouped = false, now = Date.now(), attachments: EditAttachments = current?.attachments ?? { media: {} }) {
+      if (!current || current.value.id !== value.id) { this.reset(value, attachments); return; }
+      if (content(value) !== content(current.value) || JSON.stringify(attachments) !== JSON.stringify(current.attachments)) {
         if (!grouped || now - lastEdit > 700 || !past.length) past.push(current);
         while (past.length > 50 || bytes(past) > 1024 * 1024) past.shift();
         future = [];
         lastEdit = grouped ? now : 0;
       }
-      current = structuredClone(value);
+      current = structuredClone({ value, attachments });
     },
     move(value: Content, direction: 'undo' | 'redo'): Content | null {
-      if (!current || current.id !== value.id || value.locked || value.published) return null;
+      if (!current || current.value.id !== value.id || value.locked || value.published) return null;
       const from = direction === 'undo' ? past : future;
       const target = from.pop();
       if (!target) return null;
-      (direction === 'undo' ? future : past).push(structuredClone(value));
+      (direction === 'undo' ? future : past).push(structuredClone({ value, attachments: current.attachments }));
       const retained = direction === 'undo' ? future : past;
       while (retained.length > 50 || bytes(retained) > 1024 * 1024) retained.shift();
-      current = { ...structuredClone(target), id: value.id, revision: value.revision, locked: value.locked, published: value.published };
+      const restored = { ...structuredClone(target.value), id: value.id, revision: value.revision, locked: value.locked, published: value.published };
+      if ('savedAt' in value) Object.assign(restored, { savedAt: value.savedAt });
+      else delete (restored as Content & { savedAt?: number }).savedAt;
+      current = { value: restored, attachments: structuredClone(target.attachments) };
       lastEdit = 0;
-      return structuredClone(current);
+      return structuredClone(current.value);
     },
+    get attachments() { return structuredClone(current?.attachments ?? { media: {} }); },
     get canUndo() { return past.length > 0; },
     get canRedo() { return future.length > 0; },
   };
@@ -44,12 +54,13 @@ export function createEditHistory() {
 
 export function createDraftProtection(options: {
   editable(): boolean;
-  apply(value: Content): void;
+  apply(value: Content, attachments: EditAttachments): void;
 }) {
   const history = createEditHistory();
   const writer = crypto.randomUUID();
   const root = element('div', 'action-row draft-protection');
   const status = element('span', 'muted'); status.setAttribute('role', 'status');
+  const feedback = transientText(status);
   let selected: Omit<DraftRecovery, 'id' | 'updatedAt'> | null = null;
   let key = '';
   let previousState = '';
@@ -60,8 +71,8 @@ export function createDraftProtection(options: {
   let change = 0;
   const enqueue = (work: () => Promise<void>) => {
     const generation = change;
-    queue = queue.then(work).then(() => { if (!disposed && generation === change) status.textContent = t('recoverySaved'); })
-      .catch(() => { if (!disposed && generation === change) status.textContent = t('recoveryFailed'); });
+    queue = queue.then(work).then(() => { if (!disposed && generation === change) feedback.show(t('recoverySaved'), false); })
+      .catch(() => { if (!disposed && generation === change) feedback.show(t('recoveryFailed')); });
   };
   const flush = () => {
     clearTimeout(timer);
@@ -72,7 +83,7 @@ export function createDraftProtection(options: {
   const move = (direction: 'undo' | 'redo') => {
     if (!selected || !options.editable()) return;
     const value = history.move(selected.value, direction);
-    if (value) options.apply(value);
+    if (value) options.apply(value, history.attachments);
     sync();
   };
   const undo = iconButton(t('undoEdit'), Undo2, () => move('undo'));
@@ -87,11 +98,13 @@ export function createDraftProtection(options: {
   window.addEventListener('pagehide', flush);
   return {
     element: root, sync, flush,
-    observe(value: Omit<DraftRecovery, 'id' | 'updatedAt'>, dirty: boolean, grouped = false) {
+    observe(value: Omit<DraftRecovery, 'id' | 'updatedAt'>, dirty: boolean, grouped = false, editorState?: unknown) {
       if (disposed) return;
-      const nextKey = `${writer}:${value.source}:${value.kind}:${value.value.id}`;
-      if (key !== nextKey) { flush(); history.reset(value.value); key = nextKey; previousState = ''; }
-      history.observe(value.value, grouped);
+      const nextKey = `${writer}:${value.kind === 'routine' ? 'routine' : value.source}:${value.kind}:${value.value.id}`;
+      const attachments = { media: value.media, editorState };
+      if (key !== nextKey) { flush(); history.reset(value.value, attachments); key = nextKey; previousState = ''; }
+      if (dirty) history.observe(value.value, grouped, Date.now(), attachments);
+      else history.rebase(value.value, attachments);
       selected = structuredClone(value);
       const state = JSON.stringify([dirty, value]);
       if (state !== previousState) {
@@ -100,7 +113,7 @@ export function createDraftProtection(options: {
         clearTimeout(timer); pending = null;
         if (dirty && !value.value.locked && !value.value.published) {
           pending = { ...structuredClone(value), id: key, updatedAt: Date.now() };
-          status.textContent = t('recoverySaving');
+          feedback.show(t('recoverySaving'), false);
           if (grouped) timer = setTimeout(flush, 400); else flush();
         } else if (!dirty) {
           const savedKey = key;
@@ -109,7 +122,7 @@ export function createDraftProtection(options: {
       }
       sync();
     },
-    dispose() { disposed = true; clearTimeout(timer); pending = null; document.removeEventListener('visibilitychange', hidden); window.removeEventListener('pagehide', flush); },
+    dispose() { disposed = true; feedback.dispose(); clearTimeout(timer); pending = null; document.removeEventListener('visibilitychange', hidden); window.removeEventListener('pagehide', flush); },
   };
 }
 
@@ -123,6 +136,13 @@ export function createRecoveryPanel(options: {
   const rows = element('div');
   let generation = 0;
   let disposed = false;
+  let wasAllowed = options.allowed();
+  function sync() {
+    const allowed = !disposed && options.allowed();
+    const resumed = allowed && !wasAllowed;
+    wasAllowed = allowed;
+    if (resumed && root.open) void refresh();
+  }
   async function refresh() {
     if (!options.allowed() || disposed) return;
     const request = ++generation;
@@ -150,5 +170,5 @@ export function createRecoveryPanel(options: {
   }
   root.append(iconButton(t('refreshRecoveries'), RefreshCw, () => { void refresh(); }), rows);
   root.addEventListener('toggle', () => { if (root.open) void refresh(); });
-  return { element: root, refresh, dispose() { disposed = true; generation++; } };
+  return { element: root, refresh, sync, dispose() { disposed = true; generation++; } };
 }

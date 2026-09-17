@@ -4,6 +4,7 @@ coverage/
 test-results/
 test-results.json
 playwright-report/
+.ci-reports/
 local-media/
 .env
 .env.*

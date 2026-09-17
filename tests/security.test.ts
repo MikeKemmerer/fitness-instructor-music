@@ -467,7 +467,7 @@ describe('nested runtime validation', () => {
     ['null anchor', () => ({ ...content(), tracks: [{ ...content().tracks[0], cues: [{ ...content().tracks[0].cues[0], anchor: null }] }] })],
     ['unexpected anchor fields', () => ({ ...content(), tracks: [{ ...content().tracks[0], cues: [{ ...content().tracks[0].cues[0], anchor: { kind: 'timestamp', seconds: 0, count: 1 } }] }] })],
     ['string name', () => ({ ...content(), name: { trim: () => 'fake' } })],
-    ['unsupported schema', () => ({ ...content(), schemaVersion: 2 })],
+    ['unsupported schema', () => ({ ...content(), schemaVersion: 3 })],
     ['string schema', () => ({ ...content(), schemaVersion: '1' })],
     ['boxed number', () => ({ ...content(), crossfade: new Number(2) })],
     ['bigint timing', () => ({ ...content(), beepEvery: 1n })],

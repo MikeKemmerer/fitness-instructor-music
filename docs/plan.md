@@ -1,9 +1,246 @@
 # Fitness Music Player Plan
 
+## Unified Routine Acceptance R01-R24
+
+**September 16, 2026: implemented in source, awaiting remote verification.** This
+is the current acceptance checklist for the user's complete 24-item revision.
+Unchecked boxes mean acceptance is still open, not that all implementation is
+absent. The UI owner's listed fixes are now confirmed in source; remaining limits
+and unexecuted remote gates below prevent claiming every requirement is accepted.
+The older plans remain historical context, not current commands or release status.
+See the [current user guide](user-guide.md) for source-grounded operating steps.
+
+One Routine is the whole class: name, owned walk-in/out song snapshots, pre/post
+filler, set list, cues, per-gap rules, content levels and both crossfade settings.
+Variants are separate named Routines. One explicit Save commits the complete local
+working value before one Cloud routine-head write; no hidden two-document class
+save. Settings playlists remain independently reusable library objects. Their
+later changes cannot silently alter an adopted Routine snapshot. Legacy routines,
+classes and recoveries remain readable; no bulk private-data rewrite is authorized.
+
+### Acceptance Checklist
+
+- [ ] **R01 - Header-only revision display.** Remove visible revisions from routine/
+	playlist rows, choices, notices and Teach; retain the selected Routine revision
+	in Edit metadata and all internal CAS/pins. Explicit export-field choices and
+	app/build versions remain. Current labels omit the extra revision numbers;
+	remote interaction/export acceptance remains pending.
+- [ ] **R02 - Symmetric phase layout.** Walk-in/pre-routine sections precede the set
+	list, visibly separate from Routine name, with spacing matching post-routine/
+	walk-out sections. Verify long titles and narrow/wide viewport screenshots remotely.
+- [ ] **R03 - Hide the whole chooser after Open.** Hide rows and filter toolbar only
+	after successful selection; Open different routine reveals them. Failed/cancelled
+	Open must retain selection/editor, including during active playback.
+- [ ] **R04 - Location/Status multiselect menus.** Accessible checkbox menus support
+	Local and Cloud, Draft and Published: OR within each dimension, AND between them;
+	empty selection means no matches. Current source uses checkbox menus with Escape
+	closure/focus return; remote accessibility/layout acceptance remains pending.
+- [ ] **R05 - One library toolbar and favorites.** Refresh Cloud Routines belongs
+	beside both multiselects and Favorites only; remove the redundant Cloud panel.
+	Preserve star/unstar, stable identity, role restrictions, local publications and
+	offline cached metadata. Verify combined-location duplicates and mobile wrapping.
+- [ ] **R06 - One prominent identity.** Title with Last saved, revision, Draft/
+	Published and ID directly beneath; distinguish local saved, Pending Cloud and
+	acknowledged Cloud state. Historical unknown timestamps stay Unknown, never read
+	time/recovery time disguised as a save. No duplicate setup identity.
+- [ ] **R07 - Recovery beneath metadata.** Recoverable drafts expando directly below
+	the header metadata, with complete unified content and legacy recovery support.
+	Current source inserts recovery directly after the metadata line.
+- [ ] **R08 - Contextual actions.** Remove Routine Actions expando without losing
+	lock/unlock/publish/delete/duplicate; recognizable icons/tooltips and decision
+	dialogs remain. File Share contains Excel/PDF, not competing Cloud-save commands.
+- [ ] **R09 - One complete history.** One Undo/Redo pair above Edit covers name,
+	every phase toggle/choice, cues, order, fillers, gains, BPM, imported/reused audio
+	and Apply analysis. Include incomplete phase choices. Test first-edit enablement,
+	redo and cross-section restoration. Save rebases without erasing content history;
+	never undo server revisions, locks, publications, account state or media deletion.
+- [ ] **R10 - One routine name.** Remove separate setup name/source/revision area.
+	Pencil Rename stays inside Routine name below sequence controls and updates the
+	prominent title. Independently named variants contain the full class.
+- [ ] **R11 - One local-first Save.** Hosted Save to Cloud commits full content and
+	durable pending intent locally before Cloud; standalone uses the same Save slot
+	locally. No Save Class Setup, Use Current Saved Routine or extra local-save
+	button. Pending survives close/reload; reconnect retries only explicitly saved
+	work after same-user/role validation. Lost acknowledgment is reconciled; stale/
+	locked/failed writes retain local work, never pretend Cloud success. Publish is
+	still a separate explicit immutable-publication action.
+- [ ] **R12 - Retain sequence and fades.** Keep all four existing checkboxes and
+	crossfade controls/values. Disabled phases are omitted from the saved Routine;
+	re-enabling in the working session restores retained choices predictably.
+- [ ] **R13 - Share by title.** Share-icon dropdown replaces Export Routine expando
+	beside the current title; reuse Excel/PDF dialogs, selected fields, validated
+	filename, Unicode/font, formula-safety and offline export behavior. No audio export.
+- [ ] **R14 - Settings-only playlist management.** Remove bottom class setup/library
+	authoring. Routines chooses/adopts saved playlists; Manage music playlists goes
+	to Settings. Settings library edits and history do not silently update the Routine.
+- [ ] **R15 - Close safely.** Footer Close Routine offers Save/Discard/Cancel for
+	dirty work. Save uses the unified path; durable local/Pending Cloud permits close,
+	local-save failure blocks it, Cancel changes nothing. Confirm stopping active
+	audio; completed Close releases playback and clears active Edit/Teach/restoration
+	selection without deleting saved/pending work, recovery records or private audio.
+- [ ] **R16 - Silent automatic preparation.** Open/startup selected restore and
+	return to Teach after edits prepare the current whole Routine, not an older
+	snapshot. Remove normal manual Prepare; show progress/errors and explicit Retry
+	preparation only after failure.
+	Validate all phase media, discard stale loads, confirm before replacing playing
+	audio, never auto-play/resume. Preserve Stop/Previous/phase semantics. Both Edit
+	and Teach now expose Retry on failure; returning to Teach also requests preparation.
+- [ ] **R17 - Hold and source lengths.** Blank read-only duration for Hold, retained
+	numeric Timed value internally. Actual sound duration in parentheses immediately
+	after every sound name across default/per-gap/pre/post selectors. Short sources
+	repeat to timed duration or until Continue/phase advance with audio-clock fades,
+	not playback-speed changes. Current label format is `Sound name (16 s)`.
+- [ ] **R18 - All content gain sliders.** One 0-125% slider per editable song/filler/
+	playlist level, percentage underneath, normal color through 100%, gradual red
+	above it; remove fractional boxes/redundant dB readouts outside measurements.
+	Include adopted walk-in/out entries, Settings and gain-editing previews. Preserve
+	actual legacy >125% values with warning until an explicit undoable adjustment.
+	Master/beep/duck controls are distinct. Adopted-phase sliders and percentages
+	below sliders are implemented; remote interaction/layout acceptance remains pending.
+- [ ] **R19 - Honest unknown BPM.** Imported/reused/Settings song entries may have
+	blank BPM; seconds cues work, count cues require a valid grid. Preserve known
+	values and historical 100 BPM without reliable default provenance. No invented
+	grid, NaN display/export or invalid count timing. Settings now has optional BPM
+	inputs that accept blank or a known 40-220 value.
+- [ ] **R20 - Calibrated loudness.** Read-only calibration of all 14 current reference
+	songs against verified stored audio succeeded for 14 of 14; private per-song
+	evidence remains private. This pass did not rerun calibration.
+	Keep BS.1770/EBU R128 measurement separate from the new outlier recommendation:
+	normals 100%, safe quiet boosts <=125%, warnings separate, explicit Apply. Raw
+	measurements are matched to immutable audio hash; do not cache stale proposals.
+	New browser/native/WASM comparison gates remain pending; no automatic media rewrite.
+- [ ] **R21 - Filler BPM metadata.** Custom filler Analyze BPM shows confidence and
+	supports reviewed/manual Apply separate from immutable audio. Inconclusive stays
+	unknown. Synthetic built-ins display generator BPM; recorded lo-fi is pinned at
+	measured 120 BPM, moderate confidence, plausible half-time 60. No time-stretch or
+	guaranteed downbeat. Check metadata persistence and original-tempo playback remotely.
+- [ ] **R22 - Thirty-second operational errors.** Latest occurrence resets expiry;
+	stale callbacks cannot dismiss replacements; manual dismissal/disposal cancels.
+	Cover global and inline feedback and background-tab return. Hide text only, not
+	invalidity, auth, pending Save or playback safety state. Decision dialogs persist.
+	The reviewed inline error paths now use the shared deadline-aware helper;
+	remote fake-timer/browser acceptance remains open.
+- [ ] **R23 - New only when closed.** No New Routine while a routine is open; offer
+	Duplicate to New Routine to authors. Copy all
+	enabled phases/settings with fresh Routine/entry/cue IDs and the same immutable
+	assets. Require an independent name/Save; no implicit overwrite or publication.
+- [ ] **R24 - Reuse uploaded audio.** Keep Import Audio plus Add From Audio Library
+	(current label: From Audio Library), metadata-first search/multiselect/ordered
+	insertion, optional explicit preview, fresh cue-free entries and verified existing
+	assets without re-upload/transformation. Reuse picker in Settings playlists;
+	enforce role/lock/offline/cancel rules. Routines and Settings now share the picker;
+	offline browsing admits only known size/hash-verified cached assets. Cloud playlist
+	editing still requires online access. Preview remains after insertion, not in-dialog.
+
+### Loudness Calibration And Limits
+
+The completed read-only Cloud calibration supplied for this revision succeeded for
+14 of 14 songs. Its non-identifying summary reports
+median approximately -8 LUFS and median absolute deviation approximately 0.9 LU.
+The resulting recommendation distribution is **12 normal songs at 100%, one quiet song at 100%
+because it has no safe boost headroom, and one quiet song capped at 125%**: 13 at
+unity, not 13 classified as normal. No private routine/song names, IDs, per-song
+tables, paths or asset hashes belong in public docs or synthetic CI artifacts.
+This documentation pass did not remeasure private audio.
+
+The implemented [recommendLoudness](../frontend/src/loudness.ts) uses reference
+-8 LUFS with +/-3 LU deadband: target the nearest boundary of [-11, -5] only for
+outliers. Within that band, the recommendation is exactly unity. Quiet boosts use
+the minimum of the desired gain, 1.25 and available -1 dBFS sample-peak headroom,
+but return unity when headroom is at or below unity. Loud outliers use the smaller
+of desired gain toward -5 and headroom. For measured LUFS `L` and sample peak `P`,
+`headroom = 10 ** ((-1 - P) / 20)`; the implemented branches are:
+
+- `-11 <= L <= -5`: gain `1`.
+- `L < -11`: gain `max(1, min(1.25, 10 ** ((-11 - L) / 20), headroom))`.
+- `L > -5`: gain `min(10 ** ((-5 - L) / 20), headroom)`.
+
+Clipping risk is computed separately from the resulting sample peak against the
+-1 dBFS threshold; keeping a normal song at unity is not a safety certification.
+Raw full-track LUFS/sample-peak measurements are cached with the current audio hash;
+recommendations are recomputed from those measurements. Apply is explicit and
+non-destructive. This is not a limiter, true-peak guarantee, perfect loudness match,
+or proof that crossfades/beeps/manual boosts cannot clip. Listening still matters.
+
+### Source Review And Remaining Limits
+
+Read-only inspection confirms the UI owner's listed fixes. These are implementation
+facts, not remote acceptance or permission for this docs lane to change source:
+
+- **R01:** [en-US.ts](../frontend/src/locales/en-US.ts) removes revision numbers
+	from routine/playlist choices, confirmations and class labels while retaining
+	selected Routine metadata and explicitly selected export fields.
+- **R02/R18:** [styles.css](../frontend/src/styles.css) gives before/after phase
+	groups matching spacing, separates Routine name and puts percentages below
+	sliders. [class-composition.ts](../frontend/src/class-composition.ts) edits owned
+	walk-in/out track gains without mutating the source playlist.
+- **R04/R05/R07/R16:** [main.ts](../frontend/src/main.ts) builds Location/Status
+	checkbox menus and one toolbar with Favorites only and Refresh cloud. The old
+	visible Cloud heading is gone; connection/transfer feedback remains. Recovery
+	is inserted after metadata. Retry preparation is visible only after failure.
+- **R19/R24:** [class-panel.ts](../frontend/src/class-panel.ts) provides blank-capable
+	BPM and the shared [audio-library-picker.ts](../frontend/src/audio-library-picker.ts).
+	Online browsing is metadata-first; offline browsing verifies known cached asset
+	size/hash and rechecks before insertion. It does not enumerate uncached Cloud audio
+	or bypass Cloud-playlist online editing restrictions.
+- **R22:** [ui.ts](../frontend/src/ui.ts) uses a 30-second deadline with replacement,
+	dismissal/disposal and visibility-change handling. Reviewed global/inline owners,
+	including [filler-library.ts](../frontend/src/filler-library.ts) oversized imports
+	and [export-panel.ts](../frontend/src/export-panel.ts) feedback, use that helper.
+	Expiry removes text, not invalidity, pending saves, auth or playback safety state.
+
+Remaining source limits to resolve or explicitly accept at the release gate:
+
+- **R05:** Combined rows still deduplicate by routine/source/status, so the Local
+	working copy and its Cloud mirror can both appear when both locations are checked.
+	Favorites remain identity-scoped browser-session storage, not durable account
+	preferences. The single toolbar fix does not change these behaviors.
+- **R24:** Preview before insertion is implemented using the shared preview
+	engine and verified selected assets. Closing/cancelling stops preview without
+	inserting entries. Remote interaction acceptance remains pending.
+
+### Verification And Release Gate
+
+The latest supplied Fonda result reports **644 passing tests**. It is owner-reported
+evidence, not a new test run by this docs pass, completed remote CI, or new actual
+browser/native/WASM validation. All **24 boxes remain unchecked** awaiting remote CI.
+
+Use synthetic remote CI for current-source UI/API/security/offline/player/export
+and browser checks, with serial workers and desktop/mobile screenshots. New
+browser/native/WASM loudness comparisons await that executor. Check all 24 items,
+not only the save happy path: offline/reload/reconnect, same-user fencing, lost ACK,
+conflict/lock, publication immutability, all-phase media authorization, first-edit
+Undo/Redo, stale preparation, silent entry, Close decisions and legacy levels.
+No private audio, identifying calibration data or credentials may enter CI.
+
+No local preview/dev servers, restored previews or local-server browser suites on
+this resource-limited workstation. Serial memory-bounded non-server checks require
+their own authorized execution; this pass used Markdown editor diagnostics only.
+The [physical pilot](local-testing.md) remains unexecuted, including real iPhone/
+Bluetooth listening, interruptions, storage and offline reliability.
+
+The user approved full commit/push/GitHub merge/deploy of this revision **after green
+gates**. The lead/release owner must resolve or explicitly accept remaining limits,
+complete remote acceptance, review the fresh merged
+source and static/API artifact identities, then use the existing guarded Azure
+release path. No new resources/accounts/SKU/private-media migration. No Git,
+commands, browser, server or Cloud action belongs to this documentation-only pass.
+Do not claim a new deployment without its final receipt/live verification. Keep
+the known source-archive HTTP packaging exception visible and separate; never
+silently waive a new failure or restore a local preview after upload.
+
+## Historical Plans
+
+Everything below records earlier decisions and release attempts, including old
+Save Class Setup/Prepare/Household terminology and local-preview restoration steps.
+Those are retained for history only, superseded by the unified acceptance checklist
+and Azure-only workstation rule above. Do not execute historical server commands
+here or interpret old approval/deployment statements as the current gate.
+
 ## September 16 Review Plan
 
-**Status: first two summarized items approved for implementation on September16.** This is the consolidated current
-backlog and modification plan. It supersedes the planning/status statements in
+**Historical status: first two summarized items approved on September16.** This was the consolidated
+backlog and modification plan at that time. It superseded the planning/status statements in
 the historical sections below, not the implemented [contracts](contracts.md).
 The user authorized fixing test failures, stabilization/readiness and protection
 of authoring work, followed by commit, push and deployment. That covers R1/R2,

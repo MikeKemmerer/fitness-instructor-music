@@ -1,7 +1,7 @@
 import { newRoutine, validateRoutine, type AudioAsset, type Filler, type Routine, type Track } from './routine';
 
 export interface MusicPlaylist {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
   name: string;
   revision: number;
@@ -52,8 +52,18 @@ export interface PreparedClass {
 
 export type ClassPhase = 'walk-in' | 'before' | 'routine' | 'after' | 'walk-out' | 'finished';
 
+export function routineClassAudio(routine: Routine): ClassAudio | undefined {
+  if (!routine.sequence) return undefined;
+  const { walkIn, walkOut, ...settings } = routine.sequence;
+  const playlist = (value: NonNullable<typeof walkIn>): MusicPlaylist => ({ schemaVersion: 2, id: routine.id,
+    name: value.name, revision: routine.revision, locked: routine.locked, published: routine.published,
+    tracks: structuredClone(value.tracks) });
+  return { ...structuredClone(settings), ...(walkIn ? { walkIn: playlist(walkIn) } : {}),
+    ...(walkOut ? { walkOut: playlist(walkOut) } : {}) };
+}
+
 export function newMusicPlaylist(): MusicPlaylist {
-  return { schemaVersion: 1, id: crypto.randomUUID(), name: 'New playlist', revision: 1,
+  return { schemaVersion: 2, id: crypto.randomUUID(), name: 'New playlist', revision: 1,
     locked: false, published: false, tracks: [] };
 }
 

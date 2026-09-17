@@ -395,3 +395,45 @@ test('the locked storage-blob and storage-common dependencies share the publishe
     assert.throws(() => validateApiArtifact(files, files), /Credential-shaped/);
   }
 });
+
+test('offline staging rebuilds changed API bytes without installs or reusing the old bundle', async () => {
+  const projectRoot = mkdtempSync(resolve(tmpdir(), 'fim-stage-offline-'));
+  const files = apiFixture();
+  const manifest = JSON.parse(files.get('package.json'));
+  manifest.devDependencies = { esbuild: '0.25.12' };
+  files.set('package.json', Buffer.from(JSON.stringify(manifest)));
+  const lock = JSON.parse(files.get('package-lock.json'));
+  lock.packages['node_modules/esbuild'] = { version: '0.25.12', dev: true };
+  files.set('package-lock.json', Buffer.from(JSON.stringify(lock)));
+  const destination = resolve(projectRoot, 'local-media/deployment/api');
+  try {
+    for (const prefix of [resolve(projectRoot, 'api'), destination]) {
+      for (const [name, bytes] of files) {
+        mkdirSync(resolve(prefix, name, '..'), { recursive: true });
+        writeFileSync(resolve(prefix, name), bytes);
+      }
+    }
+    mkdirSync(resolve(projectRoot, 'api/node_modules/esbuild'), { recursive: true });
+    writeFileSync(resolve(projectRoot, 'api/node_modules/esbuild/package.json'), '{"version":"0.25.12"}');
+    const calls = [];
+    const fresh = Buffer.from('require("@azure/functions"); exports.schemaVersion = 2;');
+    const options = { projectRoot, npmCli: resolve(projectRoot, 'npm-cli.js'), offline: true, replace: true };
+    const run = async (_command, args) => {
+      calls.push(args);
+      assert(args.includes('build') && !args.includes('ci'));
+      writeFileSync(resolve(projectRoot, 'api/dist/functions.cjs'), fresh);
+      return { stdout: '' };
+    };
+    const oldHash = validateApiArtifact(files, files).artifactSHA256;
+    const report = await stageApi(options, run);
+    assert.equal(calls.length, 1);
+    assert.notEqual(report.artifactSHA256, oldHash);
+    assert.deepEqual(readFileSync(resolve(destination, 'dist/functions.cjs')), fresh);
+    const mismatched = JSON.parse(files.get('package-lock.json'));
+    mismatched.packages['node_modules/@azure/functions'].version = '99.0.0';
+    writeFileSync(resolve(projectRoot, 'api/package-lock.json'), JSON.stringify(mismatched));
+    await assert.rejects(stageApi(options, run), /differs/);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(readFileSync(resolve(destination, 'dist/functions.cjs')), fresh);
+  } finally { rmSync(projectRoot, { recursive: true, force: true }); }
+});

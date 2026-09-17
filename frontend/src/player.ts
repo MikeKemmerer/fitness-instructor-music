@@ -1,6 +1,6 @@
 import { cueSeconds, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
 import type { Player, PlayerState } from '../../shared/player-contract';
-import type { ClassAudio, ClassPhase } from '../../shared/class-plan';
+import { routineClassAudio, type ClassAudio, type ClassPhase } from '../../shared/class-plan';
 import { getReadiness, getReadinessClass, getTrackBlob, MAX_DECODED_BYTES, MAX_TRACK_SECONDS } from './offline';
 import { getFillerBuffer, LOFI_ASSET, releaseFillerCache } from './filler-audio';
 import { assertRuntimeDecoderAvailable, decodeRuntimeAudio, estimateRuntimePcm, MAX_RUNTIME_PCM_BYTES, registerRuntimePcm, runtimePcmBytes } from './native-audio';
@@ -75,7 +75,7 @@ const initialState = (): PlayerState => ({
   holding: false, ducked: false, beepsMuted: false, error: null,
 });
 
-export function createPlayer(): Player & { advance(): Promise<void>; previous(): Promise<void> } {
+export function createPlayer(): Player & { advance(): Promise<void>; previous(): Promise<void>; unload(): void } {
   let routine: Routine | null = null;
   let classAudio: ClassAudio | undefined;
   let sourceTracks: Track[] = [];
@@ -923,6 +923,34 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
   globalThis.addEventListener?.('pagehide', onPageHide);
   globalThis.document?.addEventListener('visibilitychange', onVisibility);
 
+  function unload(): void {
+    if (disposed) return;
+    running = false;
+    ready = false;
+    cancelScheduled();
+    firedAlarms.clear();
+    buffers.clear();
+    fillerBuffers.clear();
+    releaseFillerCache();
+    routine = null;
+    classAudio = undefined;
+    sourceTracks = [];
+    segments = [];
+    routineStart = routineEnd = null;
+    checkpoint = alarmFloor = anchor = 0;
+    if (context) {
+      context.onstatechange = null;
+      void context.close().catch(() => undefined);
+      context = null;
+    }
+    musicBus?.disconnect();
+    beepBus?.disconnect();
+    outputBus?.disconnect();
+    musicBus = beepBus = outputBus = null;
+    state = { ...initialState(), ducked: state.ducked, beepsMuted: state.beepsMuted };
+    emit();
+  }
+
   return {
     async load(value, audio) {
       if (disposed) throw new Error('player_disposed');
@@ -945,8 +973,14 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
       try {
         assertRuntimeDecoderAvailable(true);
         if (validateRoutine(routine).length) throw new Error('invalid_routine');
-        classAudio = audio === undefined ? undefined : snapshotClassAudio(audio);
+        const selectedAudio = audio === undefined ? routineClassAudio(routine) : audio;
+        classAudio = selectedAudio === undefined ? undefined : snapshotClassAudio(selectedAudio);
         sourceTracks = [...routine.tracks, ...classAudio?.walkIn?.tracks ?? [], ...classAudio?.walkOut?.tracks ?? []];
+        if (sourceTracks.length > 100) throw new Error('invalid_routine');
+        for (const track of sourceTracks) {
+          if (track.duration > MAX_TRACK_SECONDS) throw new Error('audio_duration_mismatch');
+          if (estimateRuntimePcm(track.duration) > MAX_DECODED_BYTES) throw new Error('audio_memory_limit');
+        }
         if (routine.beepEvery > 0 && routine.beepEvery < 0.25) throw new Error('beep_interval_too_short');
         const readiness = classAudio ? await getReadinessClass(routine, classAudio) : await getReadiness(routine);
         if (token !== generation) return;
@@ -964,7 +998,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
           fillerBuffers.clear();
           releaseFillerCache();
           const buffer = await getFillerBuffer(audioContext(), filler);
-          if (token !== generation) return;
+          if (token !== generation) { releaseFillerCache(new Set(fillerBuffers.values())); return; }
           fillerBuffers.set(key, buffer);
         }
         if (token !== generation) return;
@@ -988,6 +1022,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
       }
     },
     play,
+    unload,
     advance: () => requestNext(true),
     seek,
     updateCues,
@@ -1041,24 +1076,12 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     },
     dispose() {
       if (disposed) return;
-      running = false;
-      cancelScheduled();
-      disposed = true;
-      firedAlarms.clear();
-      buffers.clear();
-      fillerBuffers.clear();
-      releaseFillerCache();
-      unregisterPcm();
       listeners.clear();
+      unload();
+      disposed = true;
+      unregisterPcm();
       globalThis.removeEventListener?.('pagehide', onPageHide);
       globalThis.document?.removeEventListener('visibilitychange', onVisibility);
-      if (context) {
-        context.onstatechange = null;
-        void context.close().catch(() => undefined);
-      }
-      musicBus?.disconnect();
-      beepBus?.disconnect();
-      outputBus?.disconnect();
     },
   };
 }

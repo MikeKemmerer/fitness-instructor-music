@@ -7,8 +7,8 @@ import { BlobConflict, encode, readJson, type BlobStore } from './store';
 
 export const HISTORY_LIMIT = 128;
 export const HEAD_BYTES = 64 * 1024;
-export interface DocumentState { id: string; revision: number; name: string; locked: boolean; published: boolean }
-export interface Pointer { key: string; revision: number; name: string; locked: boolean }
+export interface DocumentState { id: string; revision: number; name: string; locked: boolean; published: boolean; savedAt?: number }
+export interface Pointer { key: string; revision: number; name: string; locked: boolean; savedAt?: number }
 interface RevisionLink { revision: number; draft?: string; published?: string }
 interface Head { draft: Pointer; published?: Pointer; deleted: boolean; history?: RevisionLink[] }
 export type Mutation = 'save' | 'lock' | 'unlock' | 'publish' | 'delete';
@@ -34,6 +34,9 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
   abstract copy(body: Body): Body;
   abstract validatePublication(body: Body): void;
 
+  saved(body: Body): Body { return body; }
+  validateReplacement(_previous: Body, _next: Body): void {}
+
   get root(): string { return this.kind === 'class' ? 'classes' : `${this.kind}s`; }
   get indexPrefix(): string { return this.kind === 'routine' ? 'heads/' : `${this.root}/index/`; }
   headKey(id: string): string { return `${this.root}/${id}/head`; }
@@ -56,7 +59,8 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
       const validKey = (key: string, published: boolean) => typeof key === 'string'
         && key.startsWith(this.snapshotPrefix(id, published)) && safeId(key.slice(this.snapshotPrefix(id, published).length));
       const checkPointer = (pointer: Pointer, published: boolean) => {
-        strictRecord(pointer, ['key', 'revision', 'name', 'locked']);
+        strictRecord(pointer, ['key', 'revision', 'name', 'locked', ...(Object.hasOwn(pointer, 'savedAt') ? ['savedAt'] : [])]);
+        if (Object.hasOwn(pointer, 'savedAt') && (!Number.isSafeInteger(pointer.savedAt) || pointer.savedAt! < 0)) throw new Error();
         if (!validKey(pointer.key, published) || !validRevision(pointer.revision) || typeof pointer.locked !== 'boolean'
           || typeof pointer.name !== 'string' || !pointer.name.trim() || pointer.name.length > 160) throw new Error();
       };
@@ -171,7 +175,8 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
 
   pointer(key: string, body: Body): Pointer {
     const entity = this.entity(body);
-    return { key, revision: entity.revision, name: entity.name, locked: entity.locked };
+    return { key, revision: entity.revision, name: entity.name, locked: entity.locked,
+      ...(entity.savedAt !== undefined ? { savedAt: entity.savedAt } : {}) };
   }
 
   boundedHead(head: Head): Buffer {
@@ -183,7 +188,7 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
 
   async create(headers: Headers, input: unknown): Promise<Body> {
     const actor = await this.auth.authenticate(headers, true, true);
-    const body = await this.parse(input, headers);
+    const body = this.saved(await this.parse(input, headers));
     const entity = this.entity(body);
     if (entity.revision !== 1 || entity.locked || entity.published) throw new ApiError(400, `invalid_${this.kind}_state`);
     const id = entity.id;
@@ -212,7 +217,9 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
     if (expected >= Number.MAX_SAFE_INTEGER) throw new ApiError(412, 'revision_exhausted');
     const history = this.history(oldHead);
     if (history.length >= HISTORY_LIMIT) throw new ApiError(409, 'revision_limit_reached');
-    let body: Body = input === undefined ? await this.snapshot(oldHead.draft) : await this.parse(input, headers);
+    const previous = await this.snapshot(oldHead.draft);
+    let body: Body = input === undefined ? previous : await this.parse(input, headers);
+    if (input !== undefined) this.validateReplacement(previous, body);
     const entity = this.entity(body);
     if (entity.id !== id || entity.revision !== expected || entity.locked !== oldHead.draft.locked || entity.published) {
       throw new ApiError(400, `invalid_${this.kind}_state`);
@@ -221,6 +228,7 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
       body = await this.parse(body, headers);
       this.validatePublication(body);
     }
+    if (input !== undefined || action === 'save') body = this.saved(body);
     body = this.withEntity(body, { ...this.entity(body), revision: expected + 1,
       locked: action === 'lock' ? true : action === 'unlock' ? false : entity.locked, published: false });
     const publication = action === 'publish' ? this.withEntity(body, { ...this.entity(body), published: true }) : undefined;

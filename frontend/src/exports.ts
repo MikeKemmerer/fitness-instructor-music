@@ -1,4 +1,4 @@
-import { cueSeconds, transitionAfter, validateRoutine, type Cue, type Routine, type Track } from '../../shared/routine';
+import { allRoutineTracks, cueSeconds, transitionAfter, validateRoutine, type Cue, type Routine, type Track } from '../../shared/routine';
 import type { CellObject, Feature, Sheet } from 'write-excel-file/browser';
 import type { UserOptions } from 'jspdf-autotable';
 import { t, validationMessage, type MessageKey } from './i18n';
@@ -35,13 +35,13 @@ export function createExportSnapshot(routine: Routine, unsaved: boolean, now = n
   const rows: ExportRow[] = [];
   const issues = validateRoutine(copy);
   const trackIds = new Set<string>();
-  copy.tracks.forEach((track, trackIndex) => {
-    const trackIssues = validateRoutine({ ...copy, tracks: [{ ...track, cues: [] }] });
+  allRoutineTracks(copy).forEach((track, trackIndex) => {
+    const trackIssues = validateRoutine({ ...copy, sequence: undefined, tracks: [{ ...track, cues: [] }] });
     if (trackIds.has(track.id)) trackIssues.push('Track entry IDs must be unique');
     trackIds.add(track.id);
     const cueIds = new Set<string>();
     const cues = track.cues.map((cue, sourceIndex) => {
-      const cueIssues = validateRoutine({ ...copy, tracks: [{ ...track, cues: [cue] }] });
+      const cueIssues = validateRoutine({ ...copy, sequence: undefined, tracks: [{ ...track, cues: [cue] }] });
       if (cueIds.has(cue.id)) cueIssues.push('Cue IDs must be unique');
       cueIds.add(cue.id);
       let seconds: number | null = null;
@@ -86,6 +86,9 @@ export function exportTime(seconds: number | null): string | null {
 }
 
 export const exportColumns: readonly ExportColumn[] = freezeTree([
+  { id: 'track.phase', label: 'classSequence', group: 'exportTrackFields', type: 'string', width: 20, default: true,
+    value: row => t(row.routine.sequence?.walkIn?.tracks.some(track => track.id === row.track.id) ? 'phaseWalkIn' : row.routine.sequence?.walkOut?.tracks.some(track => track.id === row.track.id) ? 'phaseWalkOut' : 'phaseRoutine') },
+  { id: 'routine.sequence', label: 'classSequence', group: 'exportRoutineFields', type: 'string', width: 60, default: false, value: row => sequenceSummary(row.routine) },
   { id: 'routine.id', label: 'exportRoutineId', group: 'exportRoutineFields', type: 'string', width: 38, default: false, value: row => row.routine.id },
   { id: 'routine.name', label: 'routineName', group: 'exportRoutineFields', type: 'string', width: 30, default: false, value: row => row.routine.name },
   { id: 'routine.revision', label: 'exportRevision', group: 'exportRoutineFields', type: 'number', width: 14, default: false, value: row => row.routine.revision },
@@ -138,7 +141,15 @@ export function fillerSoundName(routine: Routine): string {
   return sound === 'recording' ? routine.filler.recording?.name ?? t('customFillers') : t(sound);
 }
 
+function sequenceSummary(routine: Routine): string | undefined {
+  if (!routine.sequence) return undefined;
+  const { crossfade, before, after, walkIn, walkOut } = routine.sequence;
+  return JSON.stringify({ crossfade, before, after, walkIn: walkIn ? { name: walkIn.name, source: walkIn.source } : undefined,
+    walkOut: walkOut ? { name: walkOut.name, source: walkOut.source } : undefined });
+}
+
 function routineColumnValue(routine: Routine, column: ExportColumn): ExportValue | undefined {
+  if (column.id === 'routine.sequence') return sequenceSummary(routine);
   if (column.id === 'filler.sound') return fillerSoundName(routine);
   if (column.id === 'filler.gain') return routine.filler.gain ?? 1;
   const [group, ...keys] = column.id.split('.');
@@ -192,7 +203,7 @@ export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: reado
     }
   }
   if (selected.has('track.duration') || selected.has('track.durationTime')) {
-    const total = snapshot.routine.tracks.reduce((seconds, track) => seconds + track.duration, 0);
+    const total = allRoutineTracks(snapshot.routine).reduce((seconds, track) => seconds + track.duration, 0);
     overview.push([t('exportSourceDuration'), Number.isFinite(total) && total >= 0 ? total : t('exportNeedsReview')]);
   }
   if (selected.has('filler.mode') && (snapshot.routine.tracks.every(track => !track.after) || (selected.has('track.after.mode') && selected.has('track.after.filler')))
@@ -263,7 +274,7 @@ export function buildPdfPacket(snapshot: ExportSnapshot, selectedIds: readonly s
     title: selected.has('routine.name') ? routine.name : t('exportPacket'),
     metadata: [t(snapshot.unsaved ? 'exportUnsaved' : 'exportSaved'), snapshot.exportedAt, t('exportPrivate')],
     settings,
-    tracks: routine.tracks.map((track, index) => ({
+    tracks: allRoutineTracks(routine).map((track, index) => ({
       heading: [selected.has('track.index') ? String(index + 1) : '', selected.has('track.title') ? track.title : ''].filter(Boolean).join('. '),
       details: columns.filter(column => column.group === 'exportTrackFields' && !['track.index', 'track.title'].includes(column.id))
         .map(column => `${t(column.label)}: ${display(columnValue(column, snapshot.rows.find(row => row.trackIndex === index + 1)!))}`).join(' / '),

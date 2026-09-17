@@ -1,6 +1,7 @@
 import { guess } from 'web-audio-beat-detector';
 import type { BpmEstimate } from '../../shared/preview-contract';
-import { getTrackBlob, MAX_DECODED_BYTES, MAX_TRACK_SECONDS } from './offline';
+import { validFillerRecording, type FillerRecording } from '../../shared/routine';
+import { getFillerRecordingBlob, getTrackBlob, MAX_DECODED_BYTES, MAX_TRACK_SECONDS } from './offline';
 
 let analysisQueue = Promise.resolve();
 let audioWorkPending = false;
@@ -205,4 +206,11 @@ export function detectTrackBpm(trackId: string): Promise<BpmEstimate> {
   });
   analysisQueue = operation.then(() => undefined, () => undefined);
   return operation;
+}
+
+export async function detectFillerBpm(recording: FillerRecording): Promise<BpmEstimate> {
+  if (!validFillerRecording(recording)) throw new Error('invalid_filler_recording');
+  const snapshot = structuredClone(recording);
+  if (!await getFillerRecordingBlob(snapshot)) throw new Error('missing_audio');
+  return detectTrackBpm(`filler-${snapshot.asset.id}`);
 }

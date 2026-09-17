@@ -1,5 +1,5 @@
 import type { CloudAsset } from '../../../shared/cloud-contract';
-import type { Filler, Routine, Track } from '../../../shared/routine';
+import { allRoutineFillers, type Filler, type Routine, type Track } from '../../../shared/routine';
 import { strictRecord } from '../validation';
 import { ApiError, LIMITS } from './config';
 import { CloudFillers } from './fillers';
@@ -12,7 +12,7 @@ export function boundedContent<Value>(value: Value): Value {
 }
 
 export function routineFillers(routine: Routine): Filler[] {
-  return [routine.filler, ...routine.tracks.flatMap(track => track.after?.mode === 'custom' ? [track.after.filler] : [])];
+  return allRoutineFillers(routine);
 }
 
 export async function resolveFillers(fillers: Filler[], library: CloudFillers): Promise<void> {

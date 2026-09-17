@@ -34,4 +34,5 @@ export interface LoudnessEstimate {
   targetLufs: number;
   recommendedGain: number;
   limited: boolean;
+  clippingRisk?: boolean;
 }

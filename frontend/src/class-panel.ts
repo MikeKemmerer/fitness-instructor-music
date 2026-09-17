@@ -3,19 +3,23 @@ import { newMusicPlaylist, type ClassSetup, type CloudMusicPlaylist, type MusicP
 import { newRoutine, type AudioAsset, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import { createClassLibrary, type ClassSelection, type LibraryAction } from './class-library';
 import { captureCloudIdentity, getCloudContext, getCloudRole } from './cloud-client';
+import type { AudioPreview } from '../../shared/preview-contract';
 import { cloudErrorMessage } from './cloud-ui';
 import { cloudHash, createCloudLibrary } from './cloud-library';
 import * as offline from './offline';
 import { fillerControls } from './filler-controls';
 import { createDraftProtection } from './draft-protection';
+import { createAudioLibraryPicker } from './audio-library-picker';
 import { t } from './i18n';
-import { element, field, iconButton, numberInput, selectInput, textInput } from './ui';
+import { element, field, gainSlider, iconButton, numberInput, selectInput, textInput } from './ui';
 
 export interface ClassPanelContext {
   hosted: boolean;
   draft(): Routine;
   busy(): boolean;
   recordings(): FillerRecording[];
+  preview?: AudioPreview;
+  beforePreview?(): void;
   routineMedia?(): Record<string, AudioAsset>;
   currentSelection?(): ClassSelection | null;
   selected(value: ClassSelection | null): void;
@@ -24,7 +28,7 @@ export interface ClassPanelContext {
 
 export function createClassPanel(context: ClassPanelContext) {
   const root = element('details', 'class-library');
-  root.append(element('summary', '', t('classSetup')));
+  root.append(element('summary', '', t('musicPlaylists')));
   const content = element('div', 'class-library-content');
   root.append(content);
   const media = createCloudLibrary();
@@ -53,11 +57,11 @@ export function createClassPanel(context: ClassPanelContext) {
   const available = () => !disposed && !busy && !context.busy();
   const editable = () => available() && author() && !(playlist ?? setup)?.locked && !(playlist ?? setup)?.published
     && (source === 'local' || getCloudContext().access === 'online');
-  const protection = createDraftProtection({ editable, apply: value => {
+  const protection = createDraftProtection({ editable, apply: (value, attachments) => {
     if ('routine' in value) setup = value;
     else if ('tracks' in value && !('filler' in value)) playlist = value;
     else return;
-    dirty = true; render();
+    reusableMedia = attachments.media; dirty = true; render();
   } });
   const protect = (grouped = false) => {
     const value = playlist ?? setup;
@@ -75,6 +79,18 @@ export function createClassPanel(context: ClassPanelContext) {
     }
     if (selectSetup) selectSetup.disabled = true;
   };
+  const picker = createAudioLibraryPicker({ library: media, hosted: context.hosted,
+    preview: context.preview, beforePreview: context.beforePreview,
+    available: () => editable() && !!playlist,
+    identity: () => `${generation}:${JSON.stringify(playlist)}`,
+    remaining: () => 100 - (playlist?.tracks.length ?? 0),
+    known: () => [{ routine: { ...newRoutine(), tracks: playlist?.tracks ?? [] }, media: { ...envelope?.media, ...reusableMedia } },
+      { routine: context.draft(), media: context.routineMedia?.() ?? {} }],
+    added: (tracks, assets) => {
+      if (!playlist || !editable()) return;
+      playlist.tracks.push(...tracks); Object.assign(reusableMedia, assets); changed(); render();
+    },
+  });
   const discard = () => !dirty || confirm(t('confirmSwitch', { name: (playlist ?? setup)?.name ?? '' }));
   const run = async (work: (signal: AbortSignal, assert: () => void) => Promise<void>) => {
     if (!available()) return;
@@ -138,7 +154,7 @@ export function createClassPanel(context: ClassPanelContext) {
     const key = (reference: RevisionReference) => JSON.stringify({ id: reference.id, revision: reference.revision, published: reference.published });
     const known = value && options.some(item => key(item) === key(value));
     const select = selectInput(known ? key(value) : '', [{ value: '', label: t(required ? 'cloudChoose' : 'none') },
-      ...options.map(reference => ({ value: key(reference), label: `${names.get(reference.id) ?? reference.id} / ${reference.revision} / ${t(reference.published ? 'exportPublished' : 'draft')}` }))], selected => {
+      ...options.map(reference => ({ value: key(reference), label: `${names.get(reference.id) ?? reference.id} / ${t(reference.published ? 'exportPublished' : 'draft')}` }))], selected => {
       if (!editable()) return;
       const reference = options.find(item => key(item) === selected);
       update(reference ? { id: reference.id, revision: reference.revision, published: reference.published } : undefined);
@@ -156,6 +172,7 @@ export function createClassPanel(context: ClassPanelContext) {
   const save = (action: LibraryAction) => { void run(async (signal, assert) => {
     const value = playlist ?? setup;
     if (!value) return;
+    if (content.querySelector('input[aria-invalid="true"]')) throw new Error('invalid_routine');
     if (!author()) throw new Error('forbidden');
     if (value.locked && !['unlock', 'duplicate'].includes(action)) throw new Error('routine_locked');
     if (value.published && action !== 'duplicate') throw new Error('cloud_head_required');
@@ -230,10 +247,11 @@ export function createClassPanel(context: ClassPanelContext) {
         void run(refresh);
       }));
     const routineOnly = iconButton(t('routineOnly'), Check, () => { if (available()) context.selected(null); }, true);
-    routineOnly.dataset.offlineAvailable = 'true'; filters.append(routineOnly);
+    routineOnly.dataset.offlineAvailable = 'true';
     content.append(filters);
     const list = element('div', 'library-lists');
     for (const [title, values] of [[t('classSetups'), classes], [t('musicPlaylists'), playlists]] as const) {
+      if (title === t('classSetups')) continue;
       const group = element('section'); group.append(element('h3', '', title));
       for (const value of values) {
         const row = element('div', 'routine-library-row');
@@ -264,12 +282,6 @@ export function createClassPanel(context: ClassPanelContext) {
       newActions.append(iconButton(t('newPlaylist'), Plus, () => {
         if (!available() || !discard()) return;
         playlist = newMusicPlaylist(); playlist.name = t('newPlaylist'); setup = null; envelope = null; reusableMedia = {}; revision = null; dirty = true; render();
-      }, true), iconButton(t('newClassSetup'), Plus, () => {
-        if (!available() || !discard()) return;
-        const routine = context.draft();
-        setup = { schemaVersion: 1, id: crypto.randomUUID(), name: t('newClassSetup'), revision: 1, locked: false, published: false,
-          routine: { id: routine.id, revision: routine.revision, published: routine.published }, crossfade: 2 };
-        playlist = null; envelope = null; revision = null; dirty = true; render();
       }, true));
       content.append(newActions);
     }
@@ -284,6 +296,17 @@ export function createClassPanel(context: ClassPanelContext) {
       playlist.tracks.forEach((track, index) => {
         const row = element('div', 'routine-library-row');
         row.append(element('span', '', track.title));
+        row.append(gainSlider(t('trackGain'), () => track.gain ?? 1, value => { if (editable()) { track.gain = value; changed(); } }, editable).element);
+        const bpm = numberInput(track.bpm ?? Number.NaN, 40, 220, value => {
+          if (!editable()) return;
+          const valid = !bpm.value.trim() || (Number.isFinite(value) && value >= 40 && value <= 220);
+          bpm.setAttribute('aria-invalid', String(!valid));
+          if (!bpm.value.trim()) { delete track.bpm; changed(); }
+          else if (valid) { track.bpm = value; changed(); }
+          if (pendingSave) pendingSave.disabled = !!content.querySelector('input[aria-invalid="true"]');
+        });
+        bpm.required = false; bpm.value = track.bpm === undefined ? '' : String(track.bpm);
+        row.append(field(t('bpm'), bpm));
         for (const [direction, icon, label] of [[-1, ArrowUp, 'moveUp'], [1, ArrowDown, 'moveDown']] as const) {
           const move = iconButton(t(label), icon, () => {
             if (!editable() || !playlist) return;
@@ -317,7 +340,7 @@ export function createClassPanel(context: ClassPanelContext) {
           }
         });
       });
-      fields.append(file);
+      fields.append(file, picker.element);
     } else if (setup) {
       const editing = setup;
       fields.append(referenceControl(t('routine'), setup.routine, routines, routineNames, reference => {
@@ -369,6 +392,7 @@ export function createClassPanel(context: ClassPanelContext) {
     content.append(actions); sync();
   };
   function sync(): void {
+    picker.sync();
       protection.sync();
     for (const fields of content.querySelectorAll<HTMLFieldSetElement>('fieldset[data-library-content]')) fields.disabled = !editable();
     for (const button of content.querySelectorAll<HTMLButtonElement>('button')) {
@@ -400,5 +424,5 @@ export function createClassPanel(context: ClassPanelContext) {
       envelope = null; reusableMedia = structuredClone(record.media); revision = null; dirty = true;
       root.open = true; render();
     },
-    dispose: () => { disposed = true; protection.dispose(); generation++; controller?.abort(); } };
+    dispose: () => { disposed = true; picker.dispose(); protection.dispose(); generation++; controller?.abort(); } };
 }

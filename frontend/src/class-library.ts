@@ -7,7 +7,7 @@ import { canonicalAudioType, cloudHash, createCloudLibrary, parseCloudRoutine, t
 import * as offline from './offline';
 
 export interface ClassSelection { setup: ClassSetup; source: 'local' | 'household' }
-export interface ResolvedClass { setup: ClassSetup; routine: Routine; audio: ClassAudio; envelope?: CloudRoutine }
+export interface ResolvedClass { setup: ClassSetup; routine: Routine; audio: ClassAudio; envelope?: CloudRoutine; media?: CloudRoutine['media'] }
 export type LibraryAction = 'save' | 'lock' | 'unlock' | 'publish' | 'duplicate' | 'delete';
 
 function exact(value: RevisionReference, reference: RevisionReference): void {
@@ -170,7 +170,9 @@ export function createClassLibrary(client: CloudClient = cloudClient, media = cr
         if (filler?.recording && !await offline.getFillerRecordingBlob(filler.recording)) throw new Error('class_cache_unavailable');
         assert();
       }
-      return structuredClone(cached);
+      const resolved = structuredClone(cached);
+      for (const phase of ['walkIn', 'walkOut'] as const) if (!resolved.audio[phase]?.tracks.length) delete resolved.audio[phase];
+      return resolved;
     }
     const assert = guard(transfer);
     const response = await client.request<{ setup: unknown; routine: unknown; walkIn?: unknown; walkOut?: unknown }>(
@@ -194,6 +196,7 @@ export function createClassLibrary(client: CloudClient = cloudClient, media = cr
     const authority = setup.published ? { classId: setup.id, revision: setup.revision } : undefined;
     const envelope = await media.download(routine, transfer, setup.routine.published, authority ?? null);
     assert();
+    const assets = { ...envelope.media };
     const audio: ClassAudio = { crossfade: resolved.crossfade, before: resolved.before, after: resolved.after };
     for (const key of ['walkIn', 'walkOut'] as const) {
       const playlist = playlists[key];
@@ -201,7 +204,8 @@ export function createClassLibrary(client: CloudClient = cloudClient, media = cr
       await media.downloadTracks(playlist.playlist.tracks, playlist.media, transfer, authority);
       assert();
       await offline.cacheMusicPlaylist(playlist);
-      assert(); audio[key] = playlist.playlist;
+      assert(); Object.assign(assets, playlist.media);
+      if (playlist.playlist.tracks.length) audio[key] = playlist.playlist;
     }
     for (const filler of [resolved.before, resolved.after]) {
       if (filler?.recording) await media.ensureFiller(filler.recording, transfer, authority);
@@ -209,7 +213,12 @@ export function createClassLibrary(client: CloudClient = cloudClient, media = cr
     }
     await offline.cacheClassSetup(resolved);
     assert();
-    return { setup: resolved, routine: envelope.routine, envelope, audio };
+    return { setup: resolved, routine: envelope.routine, envelope, audio, media: assets };
   };
-  return { listPlaylists, listClasses, readPlaylist, savePlaylist, saveClass, prepare };
+  const legacy = async (selection: ClassSelection, transfer: CloudTransfer = {}): Promise<ResolvedClass> => {
+    const resolved = await prepare(selection, transfer);
+    for (const phase of ['walkIn', 'walkOut'] as const) if (!resolved.audio[phase]?.tracks.length) delete resolved.audio[phase];
+    return resolved;
+  };
+  return { listPlaylists, listClasses, readPlaylist, savePlaylist, saveClass, prepare, legacy };
 }
