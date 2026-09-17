@@ -220,7 +220,8 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .chooser-empty { padding-block: 24px; color: var(--muted); font-size: .9rem; }
 @media (max-width: 760px) {
   .editor-heading { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .editor-heading-actions { grid-row: 2; justify-content: flex-end; flex-wrap: wrap; }
+  .editor-heading-actions { position: relative; grid-row: 2; justify-content: flex-end; flex-wrap: wrap; }
+  .editor-heading-actions .export-section { position: static; }
   .editor-actions > .draft-status { flex-basis: 100%; order: -1; text-align: start; }
   .editor-actions > .draft-protection { flex: 1 1 100%; }
   .editor-actions > .primary { margin-inline-start: auto; }

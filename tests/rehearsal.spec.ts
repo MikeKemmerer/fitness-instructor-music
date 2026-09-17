@@ -38,6 +38,15 @@ async function openRoutineActions(page: Page) {
   if (!await menu.evaluate(node => (node as HTMLDetailsElement).open)) await menu.locator(':scope > summary').click();
 }
 
+async function expectMenuInsideViewport(menu: Locator) {
+  await expect(menu).toBeVisible();
+  const bounds = await menu.boundingBox();
+  const width = await menu.page().evaluate(() => document.documentElement.clientWidth);
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+}
+
 async function automaticReady(page: Page) {
   await page.getByRole('tab', { name: 'Teach', exact: true }).click();
   await expect(page.locator('.readiness')).toContainText('Audio verified on this device');
@@ -129,6 +138,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(edit.locator('.draft-identity')).toContainText('Last saved:');
     await expect(edit.locator('.draft-status')).not.toContainText('Unsaved');
     await edit.locator('.export-section > summary').click();
+    await expectMenuInsideViewport(edit.locator('.export-section > .command-menu-items'));
+    await page.screenshot({ path: `test-results/editor-share-${viewport.width}.png`, fullPage: true });
     await edit.getByRole('button', { name: 'Export Excel cue sheet', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
     await page.getByRole('tab', { name: 'Teach', exact: true }).click();
@@ -162,12 +173,14 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(edit.getByRole('button', { name: 'Open different routine', exact: true })).toBeFocused();
     await openRoutineActions(page);
     await expect(edit.getByRole('button', { name: 'Duplicate to new routine', exact: true })).toBeVisible();
+    await expectMenuInsideViewport(edit.locator('.editor-actions > .command-menu > .command-menu-items'));
     await page.screenshot({ path: `test-results/editor-actions-${viewport.width}.png`, fullPage: true });
     await page.keyboard.press('Escape');
     const tracksHeading = edit.locator('.track-section-heading');
     await tracksHeading.locator('summary').click();
     await expect(tracksHeading.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
     await expect(tracksHeading.getByRole('button', { name: 'From audio library', exact: true })).toBeVisible();
+    await expectMenuInsideViewport(tracksHeading.locator('.command-menu-items'));
     await expect(edit.locator('.editor-actions').getByRole('button', { name: 'Import audio', exact: true })).toHaveCount(0);
     await page.keyboard.press('Escape');
     await edit.getByRole('button', { name: 'Close routine', exact: true }).click();
@@ -1245,8 +1258,12 @@ test('practice seeks and drags cue timing without changing class mode', async ({
   await automaticReady(page);
   const seek = page.getByRole('slider', { name: 'Seek current song', exact: true });
   const box = await seek.boundingBox();
+  const duration = Number(await seek.getAttribute('aria-valuemax'));
   await seek.click({ position: { x: box!.width / 4, y: box!.height / 2 } });
-  await expect.poll(async () => Number(await page.getByRole('progressbar').getAttribute('aria-valuenow'))).toBe(6);
+  await expect.poll(async () => Math.abs(Number(await seek.getAttribute('aria-valuenow')) - duration / 4))
+    .toBeLessThanOrEqual(duration / box!.width);
+  const sought = await seek.getAttribute('aria-valuenow');
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.floor(Number(sought))));
   await page.getByRole('button', { name: 'Edit cue times', exact: true }).click();
   await expect(seek).toHaveAttribute('aria-disabled', 'true');
   const handle = page.locator('.cue-handle').nth(2);
@@ -1257,7 +1274,8 @@ test('practice seeks and drags cue timing without changing class mode', async ({
   await page.mouse.move(start!.x + start!.width / 2 + box!.width / 8, start!.y + start!.height / 2, { steps: 8 });
   await page.mouse.up();
   await expect(page.locator(`.cue-handle[data-cue-id="${id}"]`)).toHaveAttribute('aria-label', /15 seconds/);
-  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6');
+  await expect(seek).toHaveAttribute('aria-valuenow', sought!);
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.floor(Number(sought))));
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   const moved = page.locator(`.cue-row[data-cue-id="${id}"]`);
   await expect(moved.getByLabel('Value', { exact: true })).toHaveValue('0:15.0');

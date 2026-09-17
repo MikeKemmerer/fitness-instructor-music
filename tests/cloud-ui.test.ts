@@ -2212,6 +2212,33 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     button(t('closeChooser')).click();
   });
 
+  it.each(['save', 'discard'] as const)('preserves dirty routine content after %s when the target fails to open', async decision => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    appMocks.editor.routine!.name = 'Keep this choreography'; appMocks.editor.changed!();
+    const before = structuredClone(appMocks.editor.routine!);
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation((input, init) => {
+      if (String(input) === '/api/routines' && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(json({ routines: [{ ...app.server.envelope.routine, id: 'unavailable', name: 'Unavailable target' }] }));
+      }
+      if (String(input).startsWith('/api/routines/unavailable')) return Promise.resolve(json({ error: 'routine_not_found' }, 404));
+      return handler(input, init);
+    });
+    await cloudClick(t('cloudRefresh')); button(t('openDifferent')).click();
+    const chooser = appNodes.find(node => node.classList.contains('routine-chooser'))!;
+    chooser.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: 'Unavailable target' }))!.click();
+    const confirmation = appNodes.find(node => node.tag === 'dialog' && node.open && node.attributes.get('aria-label') === t('switchRoutine'))!;
+    confirmation.querySelectorAll('button').find(node => node.title === t(decision === 'save' ? 'saveChanges' : 'discard'))!.click();
+    await vi.waitFor(() => expect(chooser.querySelector('.chooser-feedback')!.textContent).toBe(t('cloudNotFound')));
+    expect(chooser.open).toBe(true);
+    expect(appMocks.editor.routine!.id).toBe(before.id);
+    expect(appMocks.editor.routine!.name).toBe(before.name);
+    expect(appMocks.editor.routine!.tracks).toEqual(before.tracks);
+    if (decision === 'save') expect(app.working.get(before.id)?.envelope.routine.name).toBe(before.name);
+    else expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    button(t('closeChooser')).click();
+  });
+
   const pickExistingAudio = async (app: Awaited<ReturnType<typeof bootCloudApp>>) => {
     const asset = { ...app.data.asset, id: 'catalog-track' };
     const availability = { status: 200 };
