@@ -127,7 +127,7 @@ describe('export registry and snapshots', () => {
     routine.tracks[0]!.after = { mode: 'none' };
     routine.tracks[1]!.after = { mode: 'custom', crossfade: 1.25, filler: { ...routine.filler, mode: 'hold', sound: 'recording',
       recording: { id: 'gap-private', name: 'Private gap', duration: 8, asset: { id: 'gap-asset', sha256: 'f'.repeat(64), bytes: 128, contentType: 'audio/wav' } } } };
-    const snapshot = createExportSnapshot(routine, false);
+    const snapshot = createExportSnapshot(routine, false, new Date('2026-09-13T12:34:01.250Z'));
     for (const output of [buildWorkbookSheets(snapshot, allIds()), buildPdfPacket(snapshot, allIds())]) {
       expect(JSON.stringify(output)).toContain('gap-private');
       expect(JSON.stringify(output)).not.toContain(t('exportOpenEnded'));
@@ -135,8 +135,13 @@ describe('export registry and snapshots', () => {
     for (const output of [buildWorkbookSheets(snapshot, ['cue.note']), buildPdfPacket(snapshot, ['cue.note'])]) {
       expect(JSON.stringify(output)).not.toContain('gap-private');
       expect(JSON.stringify(output)).not.toContain('Private gap');
-      expect(JSON.stringify(output)).not.toContain('1.25');
     }
+    const workbook = buildWorkbookSheets(snapshot, ['cue.note']);
+    expect(workbook.flatMap(sheet => sheet.data.flatMap(row => row.map(cell => cell?.value)))).not.toContain(1.25);
+    const packet = buildPdfPacket(snapshot, ['cue.note']);
+    expect(packet.settings).toEqual([]);
+    expect(packet.tracks.every(track => track.details === '' && track.columns.every(column => column.id === 'cue.note'))).toBe(true);
+    expect(packet.metadata).toContain(snapshot.exportedAt);
   });
 
   it('makes one row per cue-less track, with genuinely blank cue cells and selectable stable IDs', () => {
