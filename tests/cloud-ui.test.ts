@@ -1894,6 +1894,7 @@ class AppNode extends EventTarget {
   classList = {
     contains: (name: string) => this.className.split(' ').includes(name),
     add: (...names: string[]) => { names.forEach(name => this.classList.toggle(name, true)); },
+    remove: (...names: string[]) => { names.forEach(name => this.classList.toggle(name, false)); },
     toggle: (name: string, force?: boolean) => {
       const names = new Set(this.className.split(' ').filter(Boolean));
       const enabled = force ?? !names.has(name);
@@ -1906,7 +1907,8 @@ class AppNode extends EventTarget {
     super(); this.tag = tag; this.className = className; this.textContent = textContent; appNodes.push(this);
   }
   get ownerDocument() { return document; }
-  append(...children: AppNode[]) { this.children.push(...children); }
+  get firstChild() { return this.children[0] ?? null; }
+  append(...children: AppNode[]) { for (const child of children) { child.remove(); this.children.push(child); } }
   after(...children: AppNode[]) {
     const parent = appNodes.find(node => node.children.includes(this));
     if (!parent) return;
@@ -1914,11 +1916,14 @@ class AppNode extends EventTarget {
     for (const child of children) parent.insertBefore(child, next);
   }
   insertBefore(child: AppNode, next: AppNode | null) {
+    if (child === next) return child;
+    child.remove();
     const index = next ? this.children.indexOf(next) : this.children.length;
     this.children.splice(index < 0 ? this.children.length : index, 0, child); return child;
   }
-  replaceChildren(...children: AppNode[]) { this.children = [...children]; }
+  replaceChildren(...children: AppNode[]) { this.children = []; this.append(...children); }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   removeAttribute(name: string) { this.attributes.delete(name); }
   querySelectorAll(selector: string): AppNode[] {
     return this.children.flatMap(child => [...(child.tag === selector || (selector.startsWith('.') && child.classList.contains(selector.slice(1))) ? [child] : []), ...child.querySelectorAll(selector)]);
@@ -2122,6 +2127,118 @@ async function openCloudRoutine(): Promise<void> {
 }
 
 describe('main hosted orchestration with synthetic DOM and player', () => {
+  it('opens a single modal chooser and closes it without changing the draft or prepared audio', async () => {
+    await bootCloudApp(); await openCloudRoutine(); await enterTeach();
+    const routine = structuredClone(appMocks.editor.routine);
+    const loads = appMocks.player.load.mock.calls.length;
+    const library = appNodes.find(node => node.className === 'routine-library')!;
+    const dialog = appNodes.find(node => node.classList.contains('routine-chooser'))!;
+    button(t('openDifferent')).click();
+    expect(dialog.open).toBe(true); expect(dialog.children).toContain(library);
+    expect(appNodes.filter(node => node.children.includes(library))).toEqual([dialog]);
+    expect(document.documentElement.classList.contains('routine-chooser-open')).toBe(true);
+    const search = appNodes.find(node => node.attributes.get('aria-label') === t('searchRoutines'))!;
+    search.value = 'No such routine'; search.dispatchEvent(new Event('input'));
+    expect(library.querySelector('.chooser-empty')?.textContent).toBe(t('noRoutineMatches'));
+    expect(appMocks.editor.routine).toEqual(routine);
+    dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    expect(dialog.open).toBe(false); expect(library.hidden).toBe(true);
+    expect(document.documentElement.classList.contains('routine-chooser-open')).toBe(false);
+    expect(appMocks.player.load).toHaveBeenCalledTimes(loads);
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+  });
+
+  it('keeps one Save and groups metadata and secondary commands without header import actions', async () => {
+    await bootCloudApp(); await openCloudRoutine();
+    const header = appNodes.find(node => node.className === 'editor-heading')!;
+    const toolbar = appNodes.find(node => node.classList.contains('editor-actions'))!;
+    const identity = header.querySelector('.draft-identity')!;
+    expect(identity.children.map(node => node.textContent)).toContain('ID routine-a');
+    expect(header.querySelector('.recovery-library')).not.toBeNull();
+    expect(toolbar.children).toContain(button(t('saveChanges')));
+    expect(toolbar.children).not.toContain(button(t('import')));
+    expect(toolbar.children).not.toContain(button(t('existingAudio')));
+    const more = toolbar.querySelector('.command-menu-items')!;
+    expect(more.children).toContain(button(t('cloudPublish')));
+    expect(more.children).not.toContain(button(t('cloudReplace')));
+    expect(button(t('localPublish')).hidden).toBe(true);
+    expect(button(t('localDelete')).hidden).toBe(true);
+    expect(button(t('cloudDelete')).hidden).toBe(false);
+  });
+
+  it('shows only local deletion for a new draft and blocks a disabled Add track trigger', async () => {
+    await bootCloudApp(); button(t('newRoutine')).click();
+    expect(button(t('cloudDelete')).hidden).toBe(true);
+    expect(button(t('cloudPublish')).hidden).toBe(true);
+    expect(button(t('localDelete')).hidden).toBe(false);
+    const trigger = appNodes.find(node => node.tag === 'summary' && node.attributes.get('aria-label') === t('addTrack'))!;
+    appMocks.editor.routine!.locked = true; appMocks.editor.changed!();
+    expect(trigger.attributes.get('aria-disabled')).toBe('true');
+    const event = new Event('click', { cancelable: true }); trigger.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('cancels a dirty modal routine switch without saving or replacing the current draft', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    appMocks.editor.routine!.name = 'Unsaved choreography'; appMocks.editor.changed!();
+    const before = structuredClone(appMocks.editor.routine);
+    app.server.envelope.routine.name = 'Newer Cloud head'; app.server.envelope.routine.revision++;
+    await cloudClick(t('cloudRefresh')); button(t('openDifferent')).click();
+    const chooser = appNodes.find(node => node.classList.contains('routine-chooser'))!;
+    chooser.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: 'Newer Cloud head' }))!.click();
+    const confirmation = appNodes.find(node => node.tag === 'dialog' && node.open && node.attributes.get('aria-label') === t('switchRoutine'))!;
+    expect(confirmation).toBeDefined(); confirmation.querySelectorAll('button').find(node => node.title === t('cancel'))!.click();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(chooser.open).toBe(true); expect(appMocks.editor.routine).toEqual(before);
+    expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    button(t('closeChooser')).click();
+  });
+
+  it('keeps the chooser and current routine when opening another Cloud revision fails', async () => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    const before = structuredClone(appMocks.editor.routine);
+    const remembered = app.store.getItem(hostedCloudSelectionKey);
+    app.server.envelope.routine.name = 'Unavailable head'; app.server.envelope.routine.revision++;
+    await cloudClick(t('cloudRefresh'));
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation((input, init) => String(input).startsWith('/api/routines/routine-a')
+      ? Promise.resolve(json({ error: 'routine_not_found' }, 404)) : handler(input, init));
+    button(t('openDifferent')).click();
+    const chooser = appNodes.find(node => node.classList.contains('routine-chooser'))!;
+    chooser.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: 'Unavailable head' }))!.click();
+    await vi.waitFor(() => expect(chooser.querySelector('.chooser-feedback')!.textContent).toBe(t('cloudNotFound')));
+    expect(chooser.open).toBe(true); expect(appMocks.editor.routine).toEqual(before);
+    expect(app.store.getItem(hostedCloudSelectionKey)).toBe(remembered);
+    button(t('closeChooser')).click();
+  });
+
+  it.each(['save', 'discard'] as const)('preserves dirty routine content after %s when the target fails to open', async decision => {
+    const app = await bootCloudApp(); await openCloudRoutine();
+    appMocks.editor.routine!.name = 'Keep this choreography'; appMocks.editor.changed!();
+    const before = structuredClone(appMocks.editor.routine!);
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation((input, init) => {
+      if (String(input) === '/api/routines' && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(json({ routines: [{ ...app.server.envelope.routine, id: 'unavailable', name: 'Unavailable target' }] }));
+      }
+      if (String(input).startsWith('/api/routines/unavailable')) return Promise.resolve(json({ error: 'routine_not_found' }, 404));
+      return handler(input, init);
+    });
+    await cloudClick(t('cloudRefresh')); button(t('openDifferent')).click();
+    const chooser = appNodes.find(node => node.classList.contains('routine-chooser'))!;
+    chooser.querySelectorAll('button').find(node => node.title === t('openRoutine', { name: 'Unavailable target' }))!.click();
+    const confirmation = appNodes.find(node => node.tag === 'dialog' && node.open && node.attributes.get('aria-label') === t('switchRoutine'))!;
+    confirmation.querySelectorAll('button').find(node => node.title === t(decision === 'save' ? 'saveChanges' : 'discard'))!.click();
+    await vi.waitFor(() => expect(chooser.querySelector('.chooser-feedback')!.textContent).toBe(t('cloudNotFound')));
+    expect(chooser.open).toBe(true);
+    expect(appMocks.editor.routine!.id).toBe(before.id);
+    expect(appMocks.editor.routine!.name).toBe(before.name);
+    expect(appMocks.editor.routine!.tracks).toEqual(before.tracks);
+    if (decision === 'save') expect(app.working.get(before.id)?.envelope.routine.name).toBe(before.name);
+    else expect(appMocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+    button(t('closeChooser')).click();
+  });
+
   const pickExistingAudio = async (app: Awaited<ReturnType<typeof bootCloudApp>>) => {
     const asset = { ...app.data.asset, id: 'catalog-track' };
     const availability = { status: 200 };

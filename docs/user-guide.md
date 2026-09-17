@@ -11,12 +11,12 @@ these changes; it is historical, not the current operating guide.
 
 ## Quick Recipes
 
-1. **Create:** Routines > New routine > name > Import audio or From Audio Library >
-   order songs/add cues > choose phases and fillers > Save to Cloud.
-2. **Duplicate:** open a routine > Duplicate to New Routine > enter an independent name >
-   edit the complete copy > Save to Cloud. New routine is hidden while one is open.
+1. **Create:** Routines > New routine > name > Track order > Add track >
+   From audio library or Import audio > order songs/add cues > choose phases and fillers > Save.
+2. **Duplicate:** open a routine > More actions > Duplicate to new routine > enter an independent name >
+   edit the complete copy > Save. New routine is hidden while one is open.
 3. **Fine-tune:** open an unlocked draft > Teach > wait for automatic preparation >
-   Edit cue times > type, nudge or drag a selected cue > Save to Cloud.
+   Edit cue times > type, nudge or drag a selected cue > Save.
 4. **Teach:** open the intended routine > Teach > check the complete phase queue >
    Start class > Play. Opening/preparation/Class Mode entry remain silent.
 5. **Playlists:** Settings > Music playlists > New music playlist > name > Import
@@ -25,7 +25,7 @@ these changes; it is historical, not the current operating guide.
 6. **Close:** Close routine at the editor footer > Save, Discard changes or Cancel.
    Save uses the same local-first path; closing does not delete the library/audio.
 
-The standalone build uses **Save on this device** in the same single Save slot.
+The standalone build uses the same **Save** button but saves only on this device.
 There is no separate class name or Save class setup step.
 
 ## Before You Begin
@@ -66,7 +66,11 @@ There is no separate class name or Save class setup step.
    single toolbar and fetches later metadata. Local and Cloud copies of the same
    routine can still appear as separate rows; check their Location before opening.
 - Successful Open hides the chooser including filters. **Open different routine**
-   reveals it again. Check the prominent name and Last saved/revision/status/ID
+   opens a searchable dialog over the unchanged editor. Close or Escape cancels;
+   opening another routine offers Save, Discard changes or Cancel when needed.
+   A failed open leaves the current draft and dialog intact. The current entry and
+   legacy classes are labeled separately; names alone do not identify duplicates.
+   Check the prominent name and Last saved/revision/status/ID
    metadata before editing; unavailable historical save times say **Unknown**.
    Routine/playlist choices, notices and Teach omit revision numbers; internal
    revision checks and explicitly selected exported metadata remain unchanged.
@@ -74,7 +78,10 @@ There is no separate class name or Save class setup step.
    filler, walk-out and content levels/crossfades. Save persists that complete value.
    A prepared class remains a separate playback snapshot; returning to Teach refreshes
    it from valid edits, with confirmation before replacing playing audio.
-- Published routines are immutable. Open cloud draft to change their current
+- **More actions** contains lock/unlock, duplication, publication and deletion.
+   **Publish for playback** makes the saved Cloud version available to authorized
+   playback-only users; Save alone does not change that publication. Published
+   routines are immutable. **More actions > Open cloud draft** changes their current
   draft, then save and publish a new revision. Explicitly unlock a locked draft first.
 - Do not sign out or clear site data to refresh the app: that removes local private
   data and prepared downloads. Save changes before closing the app.
@@ -84,10 +91,11 @@ There is no separate class name or Save class setup step.
 1. With no routine open, choose **Routines > New routine**. Enter the single
    **Routine name** below Class sequence; its pencil focuses the name field and
    the prominent title follows it. To make a variant of an open routine, use
-   **Duplicate to New Routine** and enter a new name. The copy retains all enabled phases,
+   **More actions > Duplicate to new routine** and enter a new name. The copy retains all enabled phases,
    cues, levels and immutable audio, with fresh routine/entry/cue IDs. It is an
    independent unsaved draft until Save, never an implicit overwrite/publication.
-2. Choose **Import audio** and select your songs, or use the existing-audio recipe
+2. In **Track order > Add track**, choose **Import audio** and select your songs,
+   or choose **From audio library** using the existing-audio recipe
    below. Wait for import completion and
    resolve any rejected files; an unsuccessful file is not added to the routine.
    Arrange tracks with their header grips or **Move track up/down**. Each entry

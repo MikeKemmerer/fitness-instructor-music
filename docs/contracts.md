@@ -8,6 +8,17 @@ are separate named routines. Existing v1 routines, playlists and ClassSetup
 snapshots remain readable; never bulk rewrite or delete private data. A v1 client
 must not overwrite a v2 routine head and lose its sequence.
 
+The Edit workspace uses sentence-case application labels, a grouped title and
+metadata header, one local-first Save, and contextual secondary commands in More
+actions. Track order owns the Add track source menu; existing import/picker
+handlers retain their identity, limits and history. Open different routine uses
+a modal chooser with search and existing filters/favorites. Browsing or dismissing
+it cannot change the draft or prepared playback; a failed switch preserves the
+current draft. Unsaved switches offer Save/Discard/Cancel. Author legacy-class
+conversion requires explicit selection and confirmation, never startup fallback;
+player restoration retains exact published class authority. Existing source
+records are not deleted or merged by this compatibility change.
+
 `Routine.schemaVersion` accepts 1 and 2; new routines use 2. `sequence` is v2-only:
 `{crossfade, walkIn?, before?, after?, walkOut?}`. Walk-in/out are owned snapshots
 `{name, tracks, source?:{id,revision,published}}`, not live library references.

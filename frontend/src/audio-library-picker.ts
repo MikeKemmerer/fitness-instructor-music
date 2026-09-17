@@ -37,6 +37,7 @@ export function createAudioLibraryPicker(context: {
   added(tracks: Track[], media: CloudRoutine['media']): void;
   preview?: AudioPreview;
   beforePreview?(): void;
+  restoreFocus?(): void;
   duration?(blob: Blob, signal: AbortSignal): Promise<number>;
 }) {
   const command = iconButton(t('existingAudio'), Plus, open, true);
@@ -81,7 +82,10 @@ export function createAudioLibraryPicker(context: {
       if (dialog !== root) return;
       generation++; controller?.abort(); controller = null; dialog = null;
       unsubscribePreview(); unsubscribeIdentity(); cancelPreview(); checkCurrent = undefined;
-      error.dispose(); root.close(); root.remove(); command.focus();
+      error.dispose(); root.close(); root.remove();
+      if (!disposed) {
+        if (context.restoreFocus) context.restoreFocus(); else command.focus();
+      }
     };
     checkCurrent = () => { try { current(); } catch { dismiss?.(); } };
     const run = async (action: (signal: AbortSignal) => Promise<void>) => {

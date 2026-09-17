@@ -29,8 +29,22 @@ async function demo(page: Page) {
   await page.goto('/');
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await page.getByRole('button', { name: 'Load demo', exact: true }).click();
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role="status"]')).toContainText('Routine saved locally.');
+}
+
+async function openRoutineActions(page: Page) {
+  const menu = page.locator('#panel-edit .editor-actions > .command-menu');
+  if (!await menu.evaluate(node => (node as HTMLDetailsElement).open)) await menu.locator(':scope > summary').click();
+}
+
+async function expectMenuInsideViewport(menu: Locator) {
+  await expect(menu).toBeVisible();
+  const bounds = await menu.boundingBox();
+  const width = await menu.page().evaluate(() => document.documentElement.clientWidth);
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
 }
 
 async function automaticReady(page: Page) {
@@ -97,10 +111,10 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   await page.clock.runFor(29_999); await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(1); await expect(page.locator('.notice.notice-error')).toBeHidden();
   await expect(value).toHaveValue('1:60'); await expect(value).toHaveAttribute('aria-invalid', 'true');
-  await expect(edit.getByRole('button', { name: 'Save on this device', exact: true })).toBeDisabled();
+  await expect(edit.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
 });
 
-for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 740 }]) {
   test(`unified routine remote workflow ${viewport.width}`, async ({ page }, testInfo) => {
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await page.setViewportSize(viewport);
@@ -120,10 +134,12 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(edit.getByRole('checkbox', { name: 'Post-routine filler', exact: true })).toBeChecked();
     await expect(edit.getByRole('button', { name: 'Save class setup', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Prepare for Practice / Teach', exact: true })).toHaveCount(0);
-    await edit.getByRole('button', { name: 'Save on this device', exact: true }).click();
+    await edit.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(edit.locator('.draft-identity')).toContainText('Last saved:');
     await expect(edit.locator('.draft-status')).not.toContainText('Unsaved');
     await edit.locator('.export-section > summary').click();
+    await expectMenuInsideViewport(edit.locator('.export-section > .command-menu-items'));
+    await page.screenshot({ path: `test-results/editor-share-${viewport.width}.png`, fullPage: true });
     await edit.getByRole('button', { name: 'Export Excel cue sheet', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
     await page.getByRole('tab', { name: 'Teach', exact: true }).click();
@@ -131,11 +147,42 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Pause', exact: true })).toHaveCount(0);
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-    await edit.getByRole('button', { name: 'Open different routine', exact: true }).click();
-    await edit.getByRole('checkbox', { name: 'Favorites only', exact: true }).check();
-    await expect(edit.locator('.routine-library-row')).toHaveCount(0);
-    await edit.getByRole('checkbox', { name: 'Favorites only', exact: true }).uncheck();
-    await expect(edit.locator('.routine-library-row')).toHaveCount(1);
+    const openDifferent = edit.getByRole('button', { name: 'Open different routine', exact: true });
+    await openDifferent.scrollIntoViewIfNeeded();
+    await edit.evaluate(async node => { await Promise.all(node.getAnimations().map(animation => animation.finished)); });
+    await page.screenshot({ path: `test-results/editor-header-${viewport.width}.png`, fullPage: true });
+    const titleBefore = await edit.locator('.routine-title').boundingBox();
+    const scrollBefore = await page.evaluate(() => window.scrollY);
+    await openDifferent.click();
+    const chooser = page.getByRole('dialog', { name: 'Open routine', exact: true });
+    await expect(chooser).toBeVisible();
+    expect(await edit.locator('.routine-title').boundingBox()).toEqual(titleBefore);
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore);
+    await expect(chooser.getByRole('searchbox')).toBeFocused();
+    await chooser.getByRole('checkbox', { name: 'Favorites only', exact: true }).check();
+    await expect(chooser.locator('.routine-library-row')).toHaveCount(0);
+    await chooser.getByRole('checkbox', { name: 'Favorites only', exact: true }).uncheck();
+    await expect(chooser.locator('.routine-library-row')).toHaveCount(1);
+    await expect(chooser.locator('.current-routine')).toHaveText('Current routine');
+    await chooser.getByRole('searchbox').fill('Unmatched routine');
+    await expect(chooser.locator('.chooser-empty')).toBeVisible();
+    await chooser.getByRole('searchbox').clear();
+    expect(await chooser.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/editor-chooser-${viewport.width}.png`, fullPage: true });
+    await page.keyboard.press('Escape'); await expect(chooser).toBeHidden();
+    await expect(edit.getByRole('button', { name: 'Open different routine', exact: true })).toBeFocused();
+    await openRoutineActions(page);
+    await expect(edit.getByRole('button', { name: 'Duplicate to new routine', exact: true })).toBeVisible();
+    await expectMenuInsideViewport(edit.locator('.editor-actions > .command-menu > .command-menu-items'));
+    await page.screenshot({ path: `test-results/editor-actions-${viewport.width}.png`, fullPage: true });
+    await page.keyboard.press('Escape');
+    const tracksHeading = edit.locator('.track-section-heading');
+    await tracksHeading.locator('summary').click();
+    await expect(tracksHeading.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
+    await expect(tracksHeading.getByRole('button', { name: 'From audio library', exact: true })).toBeVisible();
+    await expectMenuInsideViewport(tracksHeading.locator('.command-menu-items'));
+    await expect(edit.locator('.editor-actions').getByRole('button', { name: 'Import audio', exact: true })).toHaveCount(0);
+    await page.keyboard.press('Escape');
     await edit.getByRole('button', { name: 'Close routine', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(edit.locator('.routine-title')).toHaveText(`Unified synthetic ${viewport.width}`);
@@ -209,7 +256,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
     await row.getByLabel('Value', { exact: true }).press('Tab');
     await card.locator(':scope > summary').click();
   }
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.draft-status')).not.toContainText('Unsaved');
   const before = await savedTracks(page);
   expect(before.routines).toHaveLength(1); expect(before.media).toHaveLength(3);
@@ -250,7 +297,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
   await expect(page.locator('#panel-edit .visually-hidden[role="status"][aria-live="polite"]')).toHaveText(`${title} moved to position 3 of 3.`);
   await expect(page.locator('.draft-status')).toContainText('Unsaved');
   expect(await savedTracks(page)).toEqual(before);
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role="status"]')).toContainText('Routine saved locally.');
   const saved = await savedTracks(page);
   expect(saved.media).toEqual(before.media);
@@ -309,7 +356,7 @@ test('track reorder: Escape, outside release and small grip clicks never change 
   const first = page.locator('details[data-track-id]').first();
   const original = await trackOrder(page);
   await first.getByRole('textbox', { name: 'Track title', exact: true }).fill('Editable title <literal>');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role="status"]')).toContainText('Routine saved locally.');
   const saved = await savedTracks(page);
   const status = await page.locator('.draft-status').textContent();
@@ -431,6 +478,7 @@ test('track reorder: locked drafts block forced pointer, grip arrows and both mo
   page.on('pageerror', error => errors.push(error.message));
   await demo(page);
   page.once('dialog', dialog => dialog.accept());
+  await openRoutineActions(page);
   await page.getByRole('button', { name: 'Save and lock', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
   const original = await trackOrder(page);
@@ -478,20 +526,22 @@ test('duplicate preserves locked original and stale tab cannot unlock it', async
   await other.goto('/');
   await other.getByRole('tab', { name: 'Routines', exact: true }).click();
   await expect(other.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue(originalName);
+  await openRoutineActions(page);
   await page.getByRole('button', { name: 'Save and lock', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
   const locked = await savedTracks(page);
   expect(locked.localHeads).toHaveLength(1);
   expect(locked.localHeads[0]).toMatchObject({ name: originalName, locked: true });
   await other.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Stale unlocked edit');
-  await other.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await other.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(other.getByRole('alert')).toHaveText('Unlock the routine before editing.');
   await expect(other.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('Stale unlocked edit');
   expect(await savedTracks(other)).toEqual(locked);
-  await page.getByRole('button', { name: 'Duplicate to New Routine', exact: true }).click();
+  await openRoutineActions(page);
+  await page.getByRole('button', { name: 'Duplicate to new routine', exact: true }).click();
   await page.getByRole('dialog').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Second class');
   await page.getByRole('dialog').getByRole('button', { name: 'Apply', exact: true }).click();
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('#panel-edit .draft-status')).not.toContainText('Unsaved');
   const duplicated = await savedTracks(page);
   expect(duplicated.localHeads).toEqual(locked.localHeads);
@@ -531,7 +581,7 @@ test('mobile layout, theme preferences, and plain-text cue content', async ({ pa
   await page.setViewportSize({ width: 390, height: 844 });
   await demo(page);
   await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('<img src=x onerror=alert(1)>');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Dark', exact: true }).click();
   await page.getByRole('button', { name: 'Teal', exact: true }).click();
@@ -584,11 +634,12 @@ test('song preview captures cues, sorts committed times, and retains locked beep
   await row.getByLabel('Value', { exact: true }).press('Tab');
   await expect(song.locator('.cue-row').last()).toHaveAttribute('data-cue-id', cueId!);
   await page.getByRole('spinbutton', { name: 'Single warning (seconds remaining)', exact: true }).fill('5');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.reload();
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await expect(page.locator(`[data-cue-id="${cueId}"]`).getByLabel('Beep at cue')).toBeChecked();
   await expect(page.getByRole('spinbutton', { name: 'Single warning (seconds remaining)', exact: true })).toHaveValue('5');
+  await openRoutineActions(page);
   await page.getByRole('button', { name: 'Save and lock', exact: true }).click();
   await expect(song.getByLabel('Beep at cue').first()).toBeDisabled();
   await expect(song.getByRole('button', { name: 'Play preview', exact: true })).toBeEnabled();
@@ -607,18 +658,19 @@ test('invalid timestamps block saving, cue marker seeks never add cues, and dele
   await timing.press('Tab');
   await expect(timing).toHaveValue('1:60');
   await expect(timing).toHaveAttribute('aria-invalid', 'true');
-  await expect(page.getByRole('button', { name: 'Save on this device', exact: true })).toBeDisabled();
-  const duplicate = page.getByRole('button', { name: 'Duplicate to New Routine', exact: true });
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await openRoutineActions(page);
+  const duplicate = page.getByRole('button', { name: 'Duplicate to new routine', exact: true });
   await expect(duplicate).toBeDisabled();
   await duplicate.dispatchEvent('click');
   await row.getByRole('combobox', { name: 'Source', exact: true }).selectOption('count');
   await expect(row.getByRole('combobox', { name: 'Source', exact: true })).toHaveValue('timestamp');
   await expect(timing).toHaveValue('1:60');
   await expect(row.getByRole('textbox', { name: 'Move / note', exact: true })).toHaveValue(cueNote);
-  await expect(page.getByRole('button', { name: 'Save on this device', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   await timing.fill('0:01.125');
   await timing.press('Tab');
-  await expect(page.getByRole('button', { name: 'Save on this device', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   await song.getByRole('button', { name: 'Play preview', exact: true }).click();
   await expect(song.getByRole('button', { name: 'Pause preview', exact: true })).toBeVisible();
   const count = await song.locator('.cue-row').count();
@@ -702,11 +754,11 @@ test('empty optional playlists cannot be adopted and disabling them prepares the
     await sequence.getByRole('checkbox', { name: label, exact: true }).check();
     await page.getByRole('region', { name: label, exact: true }).getByRole('combobox', { name: 'Music playlist', exact: true })
       .selectOption({ label: 'Empty optional playlist / Local / Draft' });
-    await expect(page.getByRole('button', { name: 'Save on this device', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
     await expect(page.locator('.notice.notice-error')).toBeVisible();
     await sequence.getByRole('checkbox', { name: label, exact: true }).uncheck();
   }
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Routine saved locally.');
   await automaticReady(page);
   await expect(page.locator('.playing-title')).toHaveText(routine.tracks[0]!.title);
@@ -745,7 +797,7 @@ test('independent local playlist copied into one routine prepares silently and r
     .getByRole('combobox', { name: 'Music playlist', exact: true }).selectOption({ label: 'Lobby / Local / Draft' });
   await page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true }).fill('Morning');
   await expect(page.getByRole('button', { name: 'Save class setup', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Routine saved locally.');
   expect((await savedTracks(page)).routines[0]!.sequence?.walkIn).toMatchObject({ name: 'Lobby', tracks: [{ title: 'Lobby.wav', cues: [] }] });
   await automaticReady(page);
@@ -774,7 +826,7 @@ test('inline phase checkboxes configure the class in chronological order and per
   expect(await sequence.evaluate(node => node.previousElementSibling?.classList.contains('editor-actions'))).toBe(true);
   for (const checkbox of await sequence.getByRole('checkbox').all()) await expect(checkbox).not.toBeChecked();
   await sequence.getByRole('checkbox', { name: 'Walk-in music', exact: true }).check();
-  await expect(page.getByRole('button', { name: 'Save on this device', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   const arrival = page.getByRole('region', { name: 'Walk-in music', exact: true });
   await arrival.getByRole('button', { name: 'Manage music playlists', exact: true }).click();
   const library = page.locator('.class-library');
@@ -808,7 +860,7 @@ test('inline phase checkboxes configure the class in chronological order and per
     node.getAttribute('data-class-phase') ?? 'routine'))).toEqual(['walkIn', 'before', 'routine', 'after', 'walkOut']);
   await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Inline morning class');
   await sequence.getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Routine saved locally.');
   for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport); await sequence.scrollIntoViewIfNeeded();
@@ -865,7 +917,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   await gap.getByRole('combobox', { name: 'Filler sound', exact: true }).selectOption('drums');
   await gap.getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
   await gap.getByRole('button', { name: 'Apply', exact: true }).click();
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.draft-status')).not.toContainText('Unsaved');
   await automaticReady(page);
   await page.getByRole('button', { name: 'Play', exact: true }).click();
@@ -875,7 +927,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   await page.getByRole('button', { name: 'Edit cue times', exact: true }).click();
   await page.getByRole('button', { name: 'Move cue later', exact: true }).click();
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.draft-status')).not.toContainText('Unsaved');
   const saved = await savedTracks(page);
   await automaticReady(page);
@@ -918,7 +970,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   }
   await sequence.getByLabel('Crossfade (seconds)', { exact: true }).fill('0');
   await expect(sequence.getByRole('spinbutton', { name: 'Revision', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Routine saved locally.');
   await sequence.scrollIntoViewIfNeeded(); await page.screenshot({ path: testInfo.outputPath('class-setup-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1011,7 +1063,7 @@ test('custom filler summary follows its track while collapsed, reordered and rel
   await expect(indicator).not.toHaveClass(/active/);
   await page.locator(`details[data-track-id="${id}"]`).getByRole('button', { name: `Reorder ${title}`, exact: true }).press('ArrowUp');
   await expect(indicator).toHaveClass(/active/);
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.reload();
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await expect(indicator).toContainText('Synthetic drums / Until Continue');
@@ -1025,6 +1077,10 @@ test('Settings disables demo loading persistently without deleting existing rout
   await demo(page);
   const saved = await savedTracks(page);
   const loadDemo = page.getByRole('button', { name: 'Load demo', exact: true, includeHidden: true });
+  await expect(loadDemo).toBeHidden();
+  await page.getByRole('button', { name: 'Close routine', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Close routine', exact: true }).getByRole('button', { name: 'Discard changes', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'New routine', exact: true })).toBeVisible();
   await expect(loadDemo).toBeVisible();
   await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   const disableDemos = page.getByRole('checkbox', { name: 'Disable demos', exact: true });
@@ -1058,7 +1114,7 @@ test('readiness, undo and recovered drafts preserve the saved routine and prepar
   await expect(name).toHaveValue(original.name);
   await page.locator('.draft-protection').first().getByRole('button', { name: 'Redo edit', exact: true }).click();
   await expect(name).toHaveValue('Recover my routine');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('#panel-edit .draft-status')).not.toContainText('Unsaved');
   const saved = (await savedTracks(page)).routines[0]!;
   await page.locator('.draft-protection').first().getByRole('button', { name: 'Undo edit', exact: true }).click();
@@ -1111,7 +1167,7 @@ test('desktop practice keeps typed cue times during playback and saves repeated 
   await cueTime.press('Tab');
   await expect(cueTime).toHaveValue('0:03.2');
   await page.getByRole('button', { name: 'Pause', exact: true }).click();
-  await page.locator('.practice-tools').getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.locator('.practice-tools').getByRole('button', { name: 'Save', exact: true }).click();
   const saved = await savedTracks(page);
   expect(saved.routines[0]!.tracks[0]!.cues.find(cue => cue.id === cueId)?.anchor).toEqual({ kind: 'timestamp', seconds: 3.2 });
 });
@@ -1182,7 +1238,7 @@ test('playlist and class authoring recover independent copies with undo after sa
   await recovery.locator('.routine-library-row').filter({ hasText: 'Morning' }).getByRole('button', { name: 'Restore as new draft', exact: true }).click();
   const setupName = page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true });
   await expect(setupName).toHaveValue('Morning (recovered)');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await setupName.fill('Morning recovered'); await setupName.press('Tab');
   await expect(page.locator('#panel-edit .draft-protection')).toContainText('Recovery up to date');
   await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
@@ -1190,7 +1246,7 @@ test('playlist and class authoring recover independent copies with undo after sa
   await recovery.locator('.routine-library-row').filter({ hasText: 'Morning recovered' })
     .getByRole('button', { name: 'Restore as new draft', exact: true }).click();
   await expect(setupName).toHaveValue('Morning recovered (recovered)');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.draft-status')).not.toContainText('Unsaved');
   expect((await savedTracks(page)).routines.filter(routine => routine.name.startsWith('Morning'))).toHaveLength(2);
 });
@@ -1202,8 +1258,12 @@ test('practice seeks and drags cue timing without changing class mode', async ({
   await automaticReady(page);
   const seek = page.getByRole('slider', { name: 'Seek current song', exact: true });
   const box = await seek.boundingBox();
+  const duration = Number(await seek.getAttribute('aria-valuemax'));
   await seek.click({ position: { x: box!.width / 4, y: box!.height / 2 } });
-  await expect.poll(async () => Number(await page.getByRole('progressbar').getAttribute('aria-valuenow'))).toBe(6);
+  await expect.poll(async () => Math.abs(Number(await seek.getAttribute('aria-valuenow')) - duration / 4))
+    .toBeLessThanOrEqual(duration / box!.width);
+  const sought = await seek.getAttribute('aria-valuenow');
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.floor(Number(sought))));
   await page.getByRole('button', { name: 'Edit cue times', exact: true }).click();
   await expect(seek).toHaveAttribute('aria-disabled', 'true');
   const handle = page.locator('.cue-handle').nth(2);
@@ -1214,11 +1274,12 @@ test('practice seeks and drags cue timing without changing class mode', async ({
   await page.mouse.move(start!.x + start!.width / 2 + box!.width / 8, start!.y + start!.height / 2, { steps: 8 });
   await page.mouse.up();
   await expect(page.locator(`.cue-handle[data-cue-id="${id}"]`)).toHaveAttribute('aria-label', /15 seconds/);
-  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6');
+  await expect(seek).toHaveAttribute('aria-valuenow', sought!);
+  await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', String(Math.floor(Number(sought))));
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   const moved = page.locator(`.cue-row[data-cue-id="${id}"]`);
   await expect(moved.getByLabel('Value', { exact: true })).toHaveValue('0:15.0');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.getByRole('tab', { name: 'Teach', exact: true }).click();
   await page.getByRole('button', { name: 'Start class', exact: true }).click();
   await expect(seek).toBeHidden();
@@ -1243,7 +1304,7 @@ test('real drum BPM analysis and recorded filler work from the editor', async ({
   await page.getByRole('button', { name: 'Preview filler', exact: true }).click();
   await expect(page.locator('.filler-preview')).toContainText('Playing');
   await page.getByRole('button', { name: 'Stop filler preview', exact: true }).click();
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.reload();
   await context.setOffline(true);
@@ -1308,7 +1369,7 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   await page.getByRole('combobox', { name: 'Filler mode', exact: true }).selectOption('timed');
   await page.getByRole('spinbutton', { name: 'Filler duration (seconds)', exact: true }).fill('2');
   await page.getByRole('group', { name: 'Between tracks', exact: true }).getByRole('spinbutton', { name: 'Crossfade (seconds)', exact: true }).fill('0');
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role="status"]')).toHaveText('Routine saved locally.');
   await page.getByRole('tab', { name: 'Teach', exact: true }).click();
   await automaticReady(page);
@@ -1412,7 +1473,7 @@ test('downloads selected Excel columns and an offline PDF workout packet', async
   await page.locator('.analysis-details > summary').first().click();
   await setSlider(page.getByRole('slider', { name: 'Track level', exact: true }).first(), Number('1.25') * 100);
   await setSlider(page.getByRole('slider', { name: 'Filler level', exact: true }), Number('0.65') * 100);
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.export-section')).not.toHaveAttribute('open', '');
   await page.locator('.export-section > summary').click();
   await page.getByRole('button', { name: 'Export Excel cue sheet', exact: true }).click();
@@ -1546,7 +1607,7 @@ test('editor acceptance workflow preserves 1:05.5, analyzed levels and bounded t
   const gain = await song.getByRole('slider', { name: 'Track level', exact: true }).inputValue();
   expect(Number(gain)).toBeGreaterThan(0); expect(Number(gain)).toBeLessThanOrEqual(125);
   await setSlider(page.getByRole('slider', { name: 'Filler level', exact: true }), Number('0.65') * 100);
-  await page.getByRole('button', { name: 'Save on this device', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Routine saved locally.');
   await page.reload(); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await song.locator('.analysis-details > summary').click();

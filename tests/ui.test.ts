@@ -28,9 +28,12 @@ describe('unified review source guards', () => {
   const source = (file: string) => readFileSync(new URL(`../frontend/src/${file}`, import.meta.url), 'utf8');
   it('limits visible numeric revisions to header metadata and chosen export content', () => {
     const catalog = source('locales/en-US.ts').split('\n').filter(line => line.includes('{revision}'));
-    expect(catalog).toHaveLength(2); expect(catalog[0]).toContain('routineMetadata:'); expect(catalog[1]).toContain('exportPdfRevision:');
+    expect(catalog).toHaveLength(3);
+    expect(catalog[0]).toContain('revisionValue:'); expect(catalog[1]).toContain('routineMetadata:'); expect(catalog[2]).toContain('exportPdfRevision:');
     expect(source('class-panel.ts')).not.toContain('${reference.revision}');
-    expect(t('duplicate')).toBe('Duplicate to New Routine'); expect(t('existingAudio')).toBe('From Audio Library');
+    expect(t('duplicate')).toBe('Duplicate to new routine'); expect(t('existingAudio')).toBe('From audio library');
+    expect(t('cloudSave')).toBe('Save'); expect(t('save')).toBe('Save');
+    expect(t('addTrack')).toBe('Add track'); expect(t('cloudPublish')).toBe('Publish for playback');
   });
   it('places name before chronological phases and uses symmetric spacing and stacked gain output', () => {
     const editor = source('editor.ts');
@@ -45,6 +48,9 @@ describe('unified review source guards', () => {
       expect(css).toContain(`::-${engine}`);
     }
     expect(css).toContain('var(--accent) 80%, #c93240 100%');
+    expect(css).toMatch(/html \{[^}]*scrollbar-gutter: stable;/);
+    expect(css).toContain('.routine-chooser-open { overflow: hidden; }');
+    expect(css).toContain('.editor-heading-actions .export-section { position: static; }');
   });
   it('routes owned inline errors through deadline-aware helpers without direct error writes', () => {
     expect(source('filler-library.ts')).toContain("errors.show(t('audioByteLimit'))");
@@ -149,6 +155,7 @@ class TestElement extends EventTarget {
   classList = {
     contains: (name: string) => this.className.split(' ').includes(name),
     add: (...names: string[]) => { for (const name of names) this.classList.toggle(name, true); },
+    remove: (...names: string[]) => { for (const name of names) this.classList.toggle(name, false); },
     toggle: (name: string, force?: boolean): boolean => {
       const names = new Set(this.className.split(' ').filter(Boolean));
       const enabled = force ?? !names.has(name);
@@ -159,6 +166,7 @@ class TestElement extends EventTarget {
   };
   constructor(public tag: string, public className = '', public textContent = '') { super(); nodes.push(this); }
   get ownerDocument() { return document; }
+  get firstChild() { return this.children[0] ?? null; }
   get isConnected(): boolean { return this === document.documentElement as unknown || !!this.parentNode?.isConnected; }
   get valueAsNumber() { return this.value.trim() ? Number(this.value) : Number.NaN; }
   getBoundingClientRect() { return { x: 100, y: 100, left: 100, right: 400, top: 100, bottom: 400, width: 300, height: 300 }; }
@@ -197,6 +205,7 @@ class TestElement extends EventTarget {
   }
   contains(child: TestElement): boolean { return child === this || this.children.some(node => node.contains(child)); }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   removeAttribute(name: string) { this.attributes.delete(name); }
   querySelectorAll(tag: string): TestElement[] {
     return this.children.flatMap(child => {
@@ -2414,11 +2423,12 @@ describe('UI persistence and transport wiring', () => {
   it('unified app: uses checkbox menus in one toolbar and recovery immediately after metadata', async () => {
     await open(); await settled();
     const panel = nodes.find(node => node.className === 'edit-panel')!;
-    const identity = panel.children.find(node => node.className === 'draft-identity')!;
-    expect(panel.children[panel.children.indexOf(identity) + 1]!.className).toBe('recovery-library');
+    const identity = panel.querySelector('.draft-identity')!;
+    const identityGroup = identity.parentNode!;
+    expect(identityGroup.children[identityGroup.children.indexOf(identity) + 1]!.className).toBe('recovery-library');
     const library = nodes.find(node => node.className === 'routine-library')!;
     expect(library.hidden).toBe(true); button(t('openDifferent')).click(); expect(library.hidden).toBe(false);
-    const toolbar = library.children[0]!; expect(toolbar.className).toBe('library-toolbar');
+    const toolbar = library.querySelector('.library-toolbar')!; expect(toolbar).not.toBeNull();
     const menus = toolbar.children.filter(node => node.tag === 'details'); expect(menus).toHaveLength(2);
     for (const menu of menus) {
       expect(menu.children[0]!.tag).toBe('summary'); expect(menu.children[1]!.attributes.get('role')).toBe('group');
@@ -2481,7 +2491,8 @@ describe('UI persistence and transport wiring', () => {
     button(t('undoEdit')).click(); expect(currentDraft().sequence?.before).toBeDefined(); expect(currentDraft().sequence?.after).toBeUndefined();
     button(t('redoEdit')).click(); expect(currentDraft().sequence?.after).toBeDefined();
     const heading = nodes.find(node => node.className === 'routine-title')!.parentNode!.parentNode!;
-    expect(heading.querySelectorAll('.draft-protection')).toHaveLength(1);
+    expect(heading.querySelectorAll('.draft-protection')).toHaveLength(0);
+    expect(nodes.find(node => node.classList.contains('editor-actions'))!.querySelectorAll('.draft-protection')).toHaveLength(1);
     expect(mocks.saveClassSetup).not.toHaveBeenCalled();
   });
 
@@ -2514,7 +2525,8 @@ describe('UI persistence and transport wiring', () => {
     expect(currentDraft().name).toBe('Real editor history'); expect(currentDraft().tracks[0]!.cues).toHaveLength(1);
     expect(currentDraft().sequence?.before).toBeDefined(); expect(mocks.saveClassSetup).not.toHaveBeenCalled();
     const heading = nodes.find(node => node.className === 'routine-title')!.parentNode!.parentNode!;
-    expect(heading.querySelectorAll('.draft-protection')).toHaveLength(1);
+    expect(heading.querySelectorAll('.draft-protection')).toHaveLength(0);
+    expect(nodes.find(node => node.classList.contains('editor-actions'))!.querySelectorAll('.draft-protection')).toHaveLength(1);
   });
 
   it('unified app: local row Open awaits active identity before replacing the editor', async () => {
@@ -2664,6 +2676,7 @@ describe('UI persistence and transport wiring', () => {
 
   it('prepares saved empty optional playlists with a nonempty routine ReadySilent until explicit Play', async () => {
     const { resolved } = await selectSavedOptionalClass();
+    await vi.waitFor(() => expect(currentDraft().id).not.toBe(resolved.routine.id));
     const draftBefore = structuredClone(currentDraft());
     button(t('teach')).click();
     await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));

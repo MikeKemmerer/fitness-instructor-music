@@ -19,7 +19,8 @@ describe('local appearance', () => {
   it('uses Cloud for Azure storage labels without renaming translation keys', () => {
     expect(t('householdDestination')).toBe('Cloud');
     expect(t('householdFilter')).toBe('Cloud');
-    expect(t('cloudSave')).toBe('Save to Cloud');
+    expect(t('hosted')).toBe('Cloud');
+    expect(t('cloudSave')).toBe('Save');
     expect(t('cloudRoutines')).toBe('Cloud routines');
     expect(t('uploadFiller')).toBe('Upload recording to Cloud');
   });
