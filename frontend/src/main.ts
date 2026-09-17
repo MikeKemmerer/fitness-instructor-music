@@ -1751,6 +1751,7 @@ function syncAvailability(): void {
   if (composition && !routineOpen) composition.controls.hidden = true;
   protection.sync();
   recoveries.element.hidden = !author;
+  recoveries.sync();
   readyPanel.hidden = shell.classList.contains('class-mode');
   readySound.disabled = !loaded || busy || ['playing', 'filler'].includes(state?.status);
   prepare.setAttribute('aria-busy', String(transportOperation.pending));

@@ -7,7 +7,7 @@ import * as cloudState from '../frontend/src/cloud-client';
 import { CloudRequestError } from '../frontend/src/cloud-client';
 import { cloudErrorMessage } from '../frontend/src/cloud-ui';
 import type { CloudRoutine } from '../shared/cloud-contract';
-import type { RoutineWorkingCopy } from '../frontend/src/offline';
+import type { DraftRecovery, RoutineWorkingCopy } from '../frontend/src/offline';
 import type { createCloudLibrary } from '../frontend/src/cloud-library';
 import { cueSeconds, newRoutine, type Cue, type FillerRecording, type Routine, type Track } from '../shared/routine';
 import type { PlayerState } from '../shared/player-contract';
@@ -20,6 +20,7 @@ import { startApplication } from '../frontend/src/bootstrap';
 import { formatCueTime, parseCueTime } from '../frontend/src/cue-time';
 import { createClassPanel } from '../frontend/src/class-panel';
 import { createClassComposition } from '../frontend/src/class-composition';
+import { createRecoveryPanel } from '../frontend/src/draft-protection';
 import type { ClassSetup, MusicPlaylist, PreparedClass, RevisionReference } from '../shared/class-plan';
 import { readFileSync } from 'node:fs';
 
@@ -101,7 +102,7 @@ const mocks = vi.hoisted(() => ({
   recordRoutineSyncAttempt: vi.fn(), reconcileRoutineWorkingCopy: vi.fn<(envelope: CloudRoutine) => Promise<RoutineWorkingCopy | null>>(async () => null), deleteRoutineWorkingCopy: vi.fn(),
   listCloudRoutines: vi.fn(async (): Promise<Routine[]> => []), listRoutinePublications: vi.fn(async (): Promise<Routine[]> => []),
   getCloudRoutine: vi.fn(), cacheCloudRoutine: vi.fn(),
-  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
+  saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async (): Promise<DraftRecovery[]> => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), setActiveRoutine: vi.fn(), saveRoutine: vi.fn(),
   getActiveRoutineSelection: vi.fn<() => Promise<RevisionReference | null>>(async () => null), setActiveRoutineSelection: vi.fn(), listCachedClassSetups: vi.fn(async () => []),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), renderEditor: vi.fn(),
@@ -271,6 +272,52 @@ function key(target: EventTarget, value: string, shiftKey = false): void {
 describe('unified routine controls', () => {
   beforeEach(() => { stubDocument(); vi.stubGlobal('window', new EventTarget()); });
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('loads an already-open recovery panel when startup or preparation becomes available', async () => {
+    let allowed = false;
+    const routine = newRoutine(); routine.name = 'Morning';
+    const record = { id: 'morning-recovery', kind: 'routine' as const, source: 'local' as const,
+      value: routine, baseRevision: null, media: {}, updatedAt: 1000 };
+    mocks.listDraftRecoveries.mockReset().mockResolvedValue([record]);
+    const restore = vi.fn(async () => {});
+    const panel = createRecoveryPanel({ allowed: () => allowed, restore, message: vi.fn() });
+    try {
+      const root = panel.element as unknown as TestElement;
+      root.open = true; root.dispatchEvent(new Event('toggle'));
+      expect(mocks.listDraftRecoveries).not.toHaveBeenCalled();
+      allowed = true; panel.sync();
+      await vi.waitFor(() => expect(root.querySelectorAll('.routine-library-row')).toHaveLength(1));
+      root.querySelectorAll('button').find(button => button.title === t('restoreCopy'))!.click();
+      expect(restore).toHaveBeenCalledWith(record);
+      panel.sync(); panel.sync();
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(1);
+      root.open = false; allowed = false; panel.sync(); allowed = true; panel.sync();
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(1);
+      panel.dispose(); root.open = true; allowed = false; panel.sync(); allowed = true; panel.sync();
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(1);
+    } finally { panel.dispose(); mocks.listDraftRecoveries.mockReset().mockResolvedValue([]); }
+  });
+
+  it('retries an open recovery read interrupted by preparation and ignores stale results', async () => {
+    let allowed = true;
+    const routine = newRoutine(); routine.name = 'Morning';
+    const record = { id: 'morning-recovery', kind: 'routine' as const, source: 'local' as const,
+      value: routine, baseRevision: null, media: {}, updatedAt: 1000 };
+    const first = deferred();
+    mocks.listDraftRecoveries.mockReset().mockImplementationOnce(async () => { await first.promise; return []; }).mockResolvedValue([record]);
+    const panel = createRecoveryPanel({ allowed: () => allowed, restore: vi.fn(async () => {}), message: vi.fn() });
+    try {
+      const root = panel.element as unknown as TestElement;
+      root.open = true; root.dispatchEvent(new Event('toggle'));
+      allowed = false; panel.sync();
+      allowed = true; panel.sync();
+      await vi.waitFor(() => expect(root.querySelectorAll('.routine-library-row')).toHaveLength(1));
+      first.resolve(); await Promise.resolve(); await Promise.resolve();
+      expect(root.querySelectorAll('.routine-library-row')).toHaveLength(1);
+      expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(2);
+      panel.sync(); expect(mocks.listDraftRecoveries).toHaveBeenCalledTimes(2);
+    } finally { first.resolve(); panel.dispose(); mocks.listDraftRecoveries.mockReset().mockResolvedValue([]); }
+  });
 
   it('preserves an over-limit stored gain until the percentage slider is adjusted', () => {
     let gain = 1.5;

@@ -136,6 +136,13 @@ export function createRecoveryPanel(options: {
   const rows = element('div');
   let generation = 0;
   let disposed = false;
+  let wasAllowed = options.allowed();
+  function sync() {
+    const allowed = !disposed && options.allowed();
+    const resumed = allowed && !wasAllowed;
+    wasAllowed = allowed;
+    if (resumed && root.open) void refresh();
+  }
   async function refresh() {
     if (!options.allowed() || disposed) return;
     const request = ++generation;
@@ -163,5 +170,5 @@ export function createRecoveryPanel(options: {
   }
   root.append(iconButton(t('refreshRecoveries'), RefreshCw, () => { void refresh(); }), rows);
   root.addEventListener('toggle', () => { if (root.open) void refresh(); });
-  return { element: root, refresh, dispose() { disposed = true; generation++; } };
+  return { element: root, refresh, sync, dispose() { disposed = true; generation++; } };
 }
