@@ -3,8 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { ReadableStream } from 'node:stream/web';
 import type { ContainerClient } from '@azure/storage-blob';
-import { newRoutine, type FillerRecording } from '../../shared/routine';
-import type { CloudAsset, CloudRoutine } from '../../shared/cloud-contract';
+import { allRoutineTracks, newRoutine, type FillerRecording } from '../../shared/routine';
+import type { CloudAsset, CloudAudioPage, CloudRoutine } from '../../shared/cloud-contract';
 import type { CloudMusicPlaylist, RevisionReference } from '../../shared/class-plan';
 import { CloudAuth, derivePassword } from '../src/cloud/auth';
 import { ApiError, LIMITS, loadConfig, parsePasswordHash, type Account } from '../src/cloud/config';
@@ -16,8 +16,60 @@ import { QuotaBudget } from '../src/cloud/quota';
 import { CloudFillers } from '../src/cloud/fillers';
 import { HEAD_BYTES, HISTORY_LIMIT } from '../src/cloud/documents';
 import type { CloudClassSetup, ResolvedClassSetup } from '../src/cloud/plans';
+import { parseRoutineContent } from '../src/validation';
+import { LIBRARY_SCAN_LIMIT } from '../src/cloud/library';
 
 vi.mock('@azure/functions', () => ({ app: { http: vi.fn() } }));
+
+describe('unified strict content', () => {
+  const content = () => {
+    const { id, revision, locked, published, ...value } = newRoutine();
+    value.tracks = [{ id: 'main', title: 'Synthetic', duration: 60, firstBeat: 0, cues: [], bodyArea: '', gain: 1.5 }];
+    value.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [{ ...value.tracks[0]!, id: 'arrival' }] },
+      before: { mode: 'hold', seconds: 0, bpm: 100, sound: 'soft' } };
+    return value;
+  };
+  it('accepts detached schema two phases and unknown song BPM without changing legacy gains', () => {
+    const value = content();
+    expect(parseRoutineContent(value)).toEqual(value);
+    expect(parseRoutineContent(value).tracks[0]).not.toHaveProperty('bpm');
+    const legacy = { ...value, schemaVersion: 1 };
+    delete legacy.sequence;
+    expect(parseRoutineContent(legacy)).toEqual(legacy);
+  });
+  it.each(['', null, 0, 221, '100'])('rejects invalid supplied BPM %s', bpm => {
+    const value = content();
+    Object.assign(value.tracks[0]!, { bpm });
+    expect(() => parseRoutineContent(value)).toThrow();
+  });
+  it('rejects duplicate phase IDs, phase cues, forged fields, global overflow and count cues without BPM', () => {
+    const duplicate = content();
+    duplicate.sequence!.walkIn!.tracks[0]!.id = 'main';
+    const phaseCue = content();
+    phaseCue.sequence!.walkIn!.tracks[0]!.cues = [{ id: 'cue', note: 'Cue', anchor: { kind: 'timestamp', seconds: 1 } }];
+    const forged = content();
+    Object.assign(forged.sequence!.before!, { analysis: { bpm: 120 } });
+    const overflow = content();
+    overflow.tracks = Array.from({ length: 100 }, (_, index) => ({ ...overflow.tracks[0]!, id: `main-${index}` }));
+    const count = content();
+    count.tracks[0]!.cues = [{ id: 'cue', note: 'Cue', anchor: { kind: 'count', count: 2 } }];
+    for (const value of [duplicate, phaseCue, forged, overflow, count, { ...content(), schemaVersion: 1 }]) {
+      expect(() => parseRoutineContent(value)).toThrow();
+    }
+  });
+  it('strictly validates timestamps without guessing unknown BPM or accepting malformed sequence objects', () => {
+    for (const savedAt of [-1, 1.5, null, '', Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => parseRoutineContent({ ...content(), savedAt })).toThrow();
+    }
+    for (const sequence of [null, [], { crossfade: 0, walkIn: { name: 'Empty', tracks: [] } },
+      { crossfade: 0, before: { mode: 'timed', seconds: 1, bpm: 100, sound: 'soft' } }]) {
+      expect(() => parseRoutineContent({ ...content(), sequence })).toThrow();
+    }
+    const value = content();
+    value.tracks[0]!.bpm = 100;
+    expect(parseRoutineContent(value).tracks[0]!.bpm).toBe(100);
+  });
+});
 
 class FakeBlobStore implements BlobStore {
   readonly blobs = new Map<string, StoredBlob>();
@@ -209,6 +261,387 @@ async function planFixture(role = 'owner') {
   const publication = await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'publish');
   return { ...context, api, headers, asset, draft, publication };
 }
+
+async function unifiedFixture() {
+  const context = fixture();
+  const api = new CloudApi(context.store, context.env, context.auth.now);
+  const { headers } = await context.login();
+  const assets: CloudAsset[] = [];
+  for (let index = 0; index < 5; index++) assets.push(await uploadAudio(api.media, headers, wav(2048 + index * 2)));
+  const recording = await api.routines.fillers.create(headers, { name: 'Synthetic announcement', duration: 30, asset: assets[3]! });
+  const input = routine(assets[0]!);
+  const track = input.routine.tracks[0]!;
+  delete track.bpm;
+  track.gain = 1.5;
+  track.after = { mode: 'custom', filler: { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording }, crossfade: 3 };
+  input.routine.sequence = { crossfade: 4,
+    walkIn: { name: 'Arrival', tracks: [{ ...track, id: 'arrival', cues: [] }], source: { id: 'provenance-only', revision: 9, published: true } },
+    walkOut: { name: 'Departure', tracks: [{ ...track, id: 'departure', cues: [] }] },
+    before: { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording, gain: 1.5 },
+    after: { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording } };
+  delete input.routine.sequence.walkIn!.tracks[0]!.after;
+  delete input.routine.sequence.walkOut!.tracks[0]!.after;
+  input.media.arrival = assets[1]!;
+  input.media.departure = assets[2]!;
+  return { ...context, api, headers, assets, recording, input };
+}
+
+describe('unified routine HTTP aggregate', () => {
+  it('round-trips all phases in ONE head with server stamps, atomic lock and immutable publication', async () => {
+    const { api, store, auth, headers, input, advance } = await unifiedFixture();
+    input.routine.savedAt = 42;
+    const original = structuredClone(input);
+    const assetBytes = [...store.blobs].filter(([key]) => key.startsWith('assets/'));
+    const created = await api.handle(request('routines', 'POST', headers, input));
+    expect(created.status).toBe(201);
+    const body: CloudRoutine = JSON.parse(created.body.toString());
+    expect(body).toEqual({ ...input, routine: { ...input.routine, savedAt: auth.now() } });
+    expect([...store.blobs.keys()].filter(key => /^routines\/[^/]+\/head$/.test(key))).toHaveLength(1);
+    expect([...store.blobs.keys()].some(key => key.startsWith('classes/'))).toBe(false);
+    expect((await api.routines.list(headers, false)).routines[0]!.savedAt).toBe(auth.now());
+    advance(1000);
+    body.routine.savedAt = Number.MAX_SAFE_INTEGER;
+    body.routine.sequence!.walkIn!.name = 'Saved arrival';
+    const locked = await api.routines.mutate(atRevision(headers, 1), body.routine.id, 'lock', body);
+    expect(locked.routine).toMatchObject({ savedAt: auth.now(), locked: true, revision: 2 });
+    await expect(api.routines.mutate(atRevision(headers, 2), body.routine.id, 'save', locked)).rejects.toMatchObject({ status: 423 });
+    const unlocked = await api.routines.mutate(atRevision(headers, 2), body.routine.id, 'unlock');
+    advance(1000);
+    const published = await api.routines.mutate(atRevision(headers, 3), body.routine.id, 'publish');
+    expect(published.routine.savedAt).toBe(unlocked.routine.savedAt);
+    expect(published.routine.sequence).toEqual(locked.routine.sequence);
+    expect(await api.routines.get(headers, body.routine.id, false, 1)).toEqual({ ...original, routine: { ...original.routine, savedAt: auth.now() - 2000 } });
+    expect([...store.blobs].filter(([key]) => key.startsWith('assets/'))).toEqual(assetBytes);
+    expect(input).toEqual(original);
+  });
+
+  it('duplicates every entry and cue ID while retaining provenance, recording IDs, gains and asset bytes', async () => {
+    const { api, store, headers, input, advance, auth } = await unifiedFixture();
+    const original = await api.routines.create(headers, input);
+    const mediaBytes = [...store.blobs].filter(([key]) => key.startsWith('assets/') || key.startsWith('uploads/'));
+    advance(2000);
+    const copy = await api.routines.duplicate(headers, original.routine.id, false);
+    expect(copy.routine).toMatchObject({ revision: 1, locked: false, published: false, savedAt: auth.now() });
+    expect(copy.routine.id).not.toBe(original.routine.id);
+    const originals = allRoutineTracks(original.routine);
+    const tracks = allRoutineTracks(copy.routine);
+    const originalIds = originals.map(track => track.id);
+    expect(new Set(tracks.map(track => track.id)).size).toBe(3);
+    expect(Object.keys(copy.media).sort()).toEqual(tracks.map(track => track.id).sort());
+    for (const [index, track] of tracks.entries()) {
+      expect(originalIds).not.toContain(track.id);
+      expect(track.gain).toBe(1.5);
+      expect(copy.media[track.id]).toEqual(original.media[originals[index]!.id]);
+      expect(track).not.toHaveProperty('bpm');
+    }
+    expect(copy.routine.tracks[0]!.cues[0]!.id).not.toBe(original.routine.tracks[0]!.cues[0]!.id);
+    expect(copy.routine.sequence!.walkIn!.source).toEqual(original.routine.sequence!.walkIn!.source);
+    expect(copy.routine.sequence!.before).toEqual(original.routine.sequence!.before);
+    expect([...store.blobs].filter(([key]) => key.startsWith('assets/') || key.startsWith('uploads/'))).toEqual(mediaBytes);
+  });
+
+  it.each(['missing-media', 'extra-media', 'forged-media', 'duplicate-id', 'phase-cue', 'phase-after', 'forged-recording', 'forged-source'])('rejects %s without creating a head', async defect => {
+    const { api, headers, input, store } = await unifiedFixture();
+    const arrival = input.routine.sequence!.walkIn!;
+    if (defect === 'missing-media') delete input.media.arrival;
+    if (defect === 'extra-media') input.media.extra = input.media.arrival!;
+    if (defect === 'forged-media') input.media.arrival = { ...input.media.arrival!, sha256: '0'.repeat(64) };
+    if (defect === 'duplicate-id') arrival.tracks[0]!.id = input.routine.tracks[0]!.id;
+    if (defect === 'phase-cue') arrival.tracks[0]!.cues = input.routine.tracks[0]!.cues;
+    if (defect === 'phase-after') arrival.tracks[0]!.after = { mode: 'none' };
+    if (defect === 'forged-recording') input.routine.sequence!.before!.recording!.duration++;
+    if (defect === 'forged-source') Object.assign(arrival.source!, { role: 'owner' });
+    const quota = store.blobs.get('control/quota');
+    expect((await api.handle(request('routines', 'POST', headers, input))).status).toBe(400);
+    expect(store.blobs.has(api.routines.headKey(input.routine.id))).toBe(false);
+    expect(store.blobs.get('control/quota')).toEqual(quota);
+  });
+
+  it('authorizes the exact complete published phase/filler union and preserves old publication playback', async () => {
+    const { api, headers, input, assets, login } = await unifiedFixture();
+    const player = await login('player');
+    await api.routines.create(headers, input);
+    const published = await api.routines.mutate(atRevision(headers, 1), input.routine.id, 'publish');
+    const path = `routines/${input.routine.id}`;
+    expect((await api.handle(request(path, 'GET', player.headers))).status).toBe(403);
+    expect((await api.handle(request(path, 'PUT', atRevision(player.headers, 2), published))).status).toBe(403);
+    const draft = await api.routines.get(headers, input.routine.id, false);
+    delete draft.routine.sequence;
+    delete draft.routine.tracks[0]!.after;
+    delete draft.media.arrival;
+    delete draft.media.departure;
+    await api.routines.mutate(atRevision(headers, 2), input.routine.id, 'save', draft);
+    await api.routines.mutate(atRevision(headers, 3), input.routine.id, 'publish');
+    expect(await api.routines.get(player.headers, input.routine.id, true, 2)).toEqual(published);
+    for (const [index, asset] of assets.entries()) {
+      const suffix = `routineId=${input.routine.id}&revision=2`;
+      expect((await api.handle(request(`media/${asset.id}?${suffix}`, 'GET', player.headers))).status).toBe(index < 4 ? 200 : 403);
+      if (index > 0) expect((await api.handle(request(`media/${asset.id}?routineId=${input.routine.id}`, 'GET', player.headers))).status).toBe(403);
+    }
+    const bytes = await api.handle(request(`media/${assets[1]!.id}/chunks/0?routineId=${input.routine.id}&revision=2`, 'GET', player.headers));
+    expect(bytes.status).toBe(200);
+    expect(hashBytes(bytes.body as Buffer)).toBe(assets[1]!.sha256);
+  });
+
+  it.each(['save', 'lock'] as const)('rejects incoming v1 %s over a v2 head before quota or snapshot changes', async action => {
+    const { api, store, headers, input } = await unifiedFixture();
+    const body = await api.routines.create(headers, input);
+    const before = new Map(store.blobs);
+    body.routine.schemaVersion = 1;
+    delete body.routine.sequence;
+    delete body.media.arrival;
+    delete body.media.departure;
+    await expect(api.routines.mutate(atRevision(headers, 1), body.routine.id, action, body))
+      .rejects.toMatchObject({ status: 409, code: 'routine_schema_downgrade' });
+    expect(store.blobs).toEqual(before);
+  });
+
+  it('resolves competing full save/lock operations through one CAS without exposing the losing aggregate', async () => {
+    const { api, store, auth, headers, input } = await unifiedFixture();
+    const original = await api.routines.create(headers, input);
+    const first = structuredClone(original);
+    const second = structuredClone(original);
+    first.routine.sequence!.walkIn!.name = 'First contender';
+    second.routine.sequence!.walkIn!.name = 'Second contender';
+    const peer = new CloudRoutines(store, auth, api.media);
+    const results = await Promise.allSettled([
+      api.routines.mutate(atRevision(headers, 1), original.routine.id, 'save', first),
+      peer.mutate(atRevision(headers, 1), original.routine.id, 'lock', second),
+    ]);
+    const success = results.filter(result => result.status === 'fulfilled');
+    expect(success).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 412 } });
+    expect(await api.routines.get(headers, original.routine.id, false, 2)).toEqual(success[0]!.value);
+    await expect(api.routines.get(headers, original.routine.id, false, 3)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('reads unstamped legacy snapshots/classes unchanged and stamps only a subsequent content save', async () => {
+    const { api, headers, input, store, auth } = await unifiedFixture();
+    input.routine.schemaVersion = 1;
+    delete input.routine.sequence;
+    delete input.media.arrival;
+    delete input.media.departure;
+    const created = await api.routines.create(headers, input);
+    const head = await api.routines.head(created.routine.id);
+    const stored = store.blobs.get(head.value.draft.key)!;
+    const legacy = structuredClone(created);
+    delete legacy.routine.savedAt;
+    delete head.value.draft.savedAt;
+    await store.put(head.value.draft.key, encode(legacy), stored.etag);
+    await store.put(api.routines.headKey(created.routine.id), encode(head.value), head.etag);
+    expect(await api.routines.get(headers, created.routine.id, false)).toEqual(legacy);
+    expect((await api.routines.list(headers, false)).routines[0]).not.toHaveProperty('savedAt');
+    const setup = await api.classes.create(headers, classPlan(pin(legacy.routine)));
+    expect((await api.classes.prepare(headers, setup.setup.id, false)).routine).toEqual(legacy);
+    legacy.routine.schemaVersion = 2;
+    legacy.routine.savedAt = 1;
+    const saved = await api.routines.mutate(atRevision(headers, 1), legacy.routine.id, 'save', legacy);
+    expect(saved.routine).toMatchObject({ schemaVersion: 2, savedAt: auth.now() });
+    expect((await api.routines.get(headers, legacy.routine.id, false, 1)).routine).not.toHaveProperty('savedAt');
+  });
+
+  it.each([1, 2] as const)('preserves schema %s playlist state with omitted BPM and legacy gain', async schemaVersion => {
+    const { api, headers, assets } = await unifiedFixture();
+    const body = musicPlaylist(assets[0]!);
+    body.playlist.schemaVersion = schemaVersion;
+    delete body.playlist.tracks[0]!.bpm;
+    body.playlist.tracks[0]!.gain = 1.5;
+    expect(await api.playlists.create(headers, body)).toEqual(body);
+    expect((await api.playlists.mutate(atRevision(headers, 1), body.playlist.id, 'publish')).playlist)
+      .toEqual({ ...body.playlist, revision: 2, published: true });
+  });
+});
+
+describe('filler analysis HTTP metadata', () => {
+  it('rejects non-record analysis inputs without creating metadata', async () => {
+    const { api, headers, recording, store } = await unifiedFixture();
+    for (const input of [null, [], 100, 'analysis']) {
+      expect((await api.handle(request(`fillers/${recording.id}/analysis`, 'PUT', headers, input))).status).toBe(400);
+    }
+    expect(store.blobs.has(`fillers/analysis/${recording.id}`)).toBe(false);
+  });
+
+  it('uses conditional analysis writes and preserves the winner on contention', async () => {
+    const { api, headers, recording, auth, store } = await unifiedFixture();
+    const peer = new CloudFillers(store, auth, api.media);
+    const analysis = { bpm: 100, analyzer: 'Synthetic', sha256: recording.asset.sha256 };
+    const results = await Promise.allSettled([
+      api.routines.fillers.putAnalysis(headers, recording.id, analysis),
+      peer.putAnalysis(headers, recording.id, { ...analysis, bpm: 110 }),
+    ]);
+    const successes = results.filter(result => result.status === 'fulfilled');
+    expect(successes).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 409, code: 'analysis_conflict' } });
+    expect(await api.routines.fillers.getAnalysis(headers, recording.id)).toEqual(successes[0]!.value);
+  });
+
+  it('reserves quota and rechecks author identity before committing analysis', async () => {
+    const { api, headers, recording, store, accounts } = await unifiedFixture();
+    const path = `fillers/${recording.id}/analysis`;
+    const analysis = { bpm: 100, analyzer: 'Synthetic', sha256: recording.asset.sha256 };
+    const quota = (await readJson<Record<string, unknown>>(store, 'control/quota'))!;
+    await store.put('control/quota', encode({ ...quota.value, bytes: LIMITS.quotaBytes - 4095 }), quota.etag);
+    expect((await api.handle(request(path, 'PUT', headers, analysis))).status).toBe(507);
+    expect(store.blobs.has(`fillers/analysis/${recording.id}`)).toBe(false);
+    await store.put('control/quota', encode(quota.value), store.blobs.get('control/quota')!.etag);
+    const put = store.put.bind(store);
+    vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if (key === 'control/quota') accounts[0]!.authVersion++;
+      return etag;
+    });
+    expect((await api.handle(request(path, 'PUT', headers, analysis))).status).toBe(401);
+    expect(store.blobs.has(`fillers/analysis/${recording.id}`)).toBe(false);
+    expect((await readJson<{ bytes: number }>(store, 'control/quota'))!.value.bytes).toBe(Number(quota.value.bytes) + 4096);
+  });
+
+  it('returns null then separate hash-bound metadata, preserving archived recording identity and bytes', async () => {
+    const { api, headers, recording, store, login } = await unifiedFixture();
+    const path = `fillers/${recording.id}/analysis`;
+    const original = new Map([...store.blobs].filter(([key]) => key.startsWith('assets/') || key.startsWith('fillers/')));
+    const empty = await api.handle(request(path, 'GET', headers));
+    expect(empty.status).toBe(200);
+    expect(JSON.parse(empty.body.toString())).toEqual({ analysis: null });
+    const editor = await login('editor');
+    const analysis = { bpm: 112.5, confidence: 0, analyzer: 'Synthetic fixture v1', sha256: recording.asset.sha256 };
+    const result = await api.handle(request(path, 'PUT', editor.headers, analysis));
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body.toString())).toEqual({ analysis });
+    expect(result.headers['cache-control']).toContain('no-store');
+    for (const [key, blob] of original) expect(store.blobs.get(key)).toEqual(blob);
+    await api.routines.fillers.archive(headers, recording.id);
+    const archived = await api.handle(request(path, 'GET', headers));
+    expect(archived.status).toBe(200);
+    expect(JSON.parse(archived.body.toString())).toEqual({ analysis });
+    expect(await api.routines.fillers.get(headers, recording.id)).toEqual(recording);
+    const updated = await api.handle(request(path, 'PUT', headers, { bpm: 100, analyzer: 'Manual', sha256: recording.asset.sha256 }));
+    expect(updated.status).toBe(200);
+    expect(JSON.parse(updated.body.toString()).analysis).not.toHaveProperty('confidence');
+  });
+
+  it.each([{ bpm: '' }, { bpm: null }, { bpm: 39 }, { bpm: 221 }, { confidence: -0.1 }, { confidence: 1.1 },
+    { confidence: null }, { analyzer: '' }, { analyzer: 'x'.repeat(161) }, { sha256: '0'.repeat(64) }, { duration: 30 }])('rejects malformed analysis %j without metadata writes', async change => {
+    const { api, headers, recording, store } = await unifiedFixture();
+    const analysis = { bpm: 100, analyzer: 'Synthetic', sha256: recording.asset.sha256, ...change };
+    const quota = store.blobs.get('control/quota');
+    expect((await api.handle(request(`fillers/${recording.id}/analysis`, 'PUT', headers, analysis))).status).toBe(400);
+    expect(store.blobs.has(`fillers/analysis/${recording.id}`)).toBe(false);
+    expect(store.blobs.get('control/quota')).toEqual(quota);
+  });
+
+  it('enforces session, author role, CSRF, origin, exact methods/query, missing recording and catalog hash', async () => {
+    const { api, headers, recording, login, store } = await unifiedFixture();
+    const path = `fillers/${recording.id}/analysis`;
+    const analysis = { bpm: 100, analyzer: 'Synthetic', sha256: recording.asset.sha256 };
+    const player = await login('player');
+    for (const method of ['GET', 'PUT']) {
+      expect((await api.handle(request(path, method, player.headers, method === 'PUT' ? analysis : undefined))).status).toBe(403);
+      expect((await api.handle(request(path, method, new Headers({ origin: 'https://example.invalid', 'x-ms-client-principal': 'forged' }), method === 'PUT' ? analysis : undefined))).status).toBe(401);
+    }
+    for (const field of ['origin', 'x-csrf-token']) {
+      const invalid = new Headers(headers);
+      invalid.set(field, 'forged');
+      expect((await api.handle(request(path, 'PUT', invalid, analysis))).status).toBe(403);
+    }
+    expect((await api.handle(request(`${path}?revision=1`, 'GET', headers))).status).toBe(400);
+    expect((await api.handle(request(path, 'POST', headers, analysis))).status).toBe(404);
+    expect((await api.handle(request('fillers/missing/analysis', 'GET', headers))).status).toBe(404);
+    const key = `assets/${recording.asset.id}/catalog`;
+    const catalog = (await readJson<{ asset: CloudAsset; chunks: string[] }>(store, key))!;
+    catalog.value.asset.sha256 = '0'.repeat(64);
+    await store.put(key, encode(catalog.value), catalog.etag);
+    expect((await api.handle(request(path, 'PUT', headers, analysis))).status).toBe(503);
+  });
+});
+
+describe('completed audio library HTTP discovery', () => {
+  it('includes preexisting completed assets and derives current routine/playlist metadata without media reads or writes', async () => {
+    const { api, headers, input, assets, store } = await unifiedFixture();
+    await api.routines.create(headers, input);
+    const playlist = musicPlaylist(assets[4]!);
+    playlist.playlist.tracks[0]!.title = 'Playlist title';
+    playlist.playlist.tracks[0]!.bpm = 100;
+    await api.playlists.create(headers, playlist);
+    await stageAudio(api.media, headers, wav(3000));
+    const get = vi.spyOn(store, 'get');
+    const put = vi.spyOn(store, 'put');
+    const response = await api.handle(request('media/library', 'GET', headers));
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toContain('no-store');
+    const page: CloudAudioPage = JSON.parse(response.body.toString());
+    expect(page.items).toHaveLength(5);
+    expect(page.items.find(item => item.asset.id === assets[0]!.id)).toEqual({ asset: assets[0], title: '<literal song>', duration: 60 });
+    expect(page.items.find(item => item.asset.id === assets[1]!.id)).toEqual({ asset: assets[1], title: '<literal song>', duration: 60 });
+    expect(page.items.find(item => item.asset.id === assets[4]!.id)).toEqual({ asset: assets[4], title: 'Playlist title', duration: 60, bpm: 100 });
+    expect(page.items.find(item => item.asset.id === assets[3]!.id)).toEqual({ asset: assets[3], title: '' });
+    expect(get.mock.calls.some(([key]) => key.includes('/chunks/') || key.startsWith('uploads/'))).toBe(false);
+    expect(put.mock.calls.every(([key]) => key.startsWith('traffic/'))).toBe(true);
+  });
+
+  it('paginates existing catalog keys with a fixed scan bound, including empty chunks-only pages', async () => {
+    const context = fixture();
+    const api = new CloudApi(context.store, context.env, context.auth.now);
+    const { headers } = await context.login();
+    const asset = await uploadAudio(api.media, headers);
+    const record = (await api.media.catalog(asset.id));
+    for (let index = 0; index < LIBRARY_SCAN_LIMIT + 3; index++) {
+      const id = `asset-${String(index).padStart(4, '0')}`;
+      await context.store.put(`assets/${id}/catalog`, encode({ ...record, asset: { ...asset, id } }), null);
+    }
+    for (let index = 0; index < LIBRARY_SCAN_LIMIT; index++) {
+      await context.store.put(`assets/0000/chunks/${index}`, Buffer.alloc(1), null);
+    }
+    const list = vi.spyOn(context.store, 'list');
+    const found = new Set<string>();
+    let cursor: string | undefined;
+    for (let index = 0; index < 4; index++) {
+      const response = await api.handle(request(`media/library${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', headers));
+      expect(response.status).toBe(200);
+      const page: CloudAudioPage = JSON.parse(response.body.toString());
+      expect(page.items.length).toBeLessThanOrEqual(LIBRARY_SCAN_LIMIT);
+      if (index === 0) expect(page.items).toEqual([]);
+      for (const item of page.items) {
+        expect(found.has(item.asset.id)).toBe(false);
+        found.add(item.asset.id);
+      }
+      cursor = page.cursor;
+      if (!cursor) break;
+    }
+    expect(cursor).toBeUndefined();
+    expect(found.size).toBe(LIBRARY_SCAN_LIMIT + 4);
+    expect(list.mock.calls.filter(([prefix]) => prefix === 'assets/').every(([, limit]) => limit === LIBRARY_SCAN_LIMIT)).toBe(true);
+  });
+
+  it('denies player/spoofed browsing and cursor/query/method bypasses while preserving account throttling', async () => {
+    const { api, headers, login, store, auth } = await unifiedFixture();
+    const player = await login('player');
+    const editor = await login('editor');
+    expect((await api.handle(request('media/library', 'GET', editor.headers))).status).toBe(200);
+    expect((await api.handle(request('media/library', 'GET', player.headers))).status).toBe(403);
+    expect((await api.handle(request('media/library', 'GET', new Headers({ 'x-ms-client-principal': 'forged' })))).status).toBe(401);
+    for (const query of ['cursor=', 'cursor=-1', 'cursor=1&cursor=2', 'limit=10000', 'routineId=anything', 'published=true', `cursor=${'x'.repeat(4097)}`]) {
+      expect((await api.handle(request(`media/library?${query}`, 'GET', headers))).status).toBe(400);
+    }
+    for (const method of ['POST', 'PUT', 'DELETE', 'HEAD']) expect((await api.handle(request('media/library', method, headers))).status).toBe(404);
+    const bucket = createHash('sha256').update('owner').digest()[0]! % 64;
+    const key = `traffic/account-${bucket}`;
+    const previous = store.blobs.get(key)!;
+    await store.put(key, encode({ window: Math.floor(auth.now() / 60000), count: 240 }), previous.etag);
+    expect((await api.handle(request('media/library', 'GET', headers))).status).toBe(429);
+  });
+
+  it('fails closed on oversized or repeated storage pages and bounded corrupt document discovery', async () => {
+    const { api, headers, store } = await unifiedFixture();
+    const list = vi.spyOn(store, 'list');
+    list.mockResolvedValueOnce({ keys: Array.from({ length: LIBRARY_SCAN_LIMIT + 1 }, (_, index) => `assets/asset-${index}/catalog`), cursor: undefined });
+    expect((await api.handle(request('media/library', 'GET', headers))).status).toBe(503);
+    list.mockResolvedValueOnce({ keys: [], cursor: 'repeat' });
+    expect((await api.handle(request('media/library', 'GET', headers))).status).toBe(503);
+    list.mockRestore();
+    for (let index = 0; index <= LIMITS.routines; index++) await store.put(`heads/phantom-${index}`, encode({ id: `phantom-${index}` }), null);
+    expect((await api.handle(request('media/library', 'GET', headers))).status).toBe(503);
+  });
+});
 
 describe('approved class workflow (persistent services, Blob fake)', () => {
   it('authorizes archived gap-only audio from the exact publication, never from a newer draft or publication', async () => {
@@ -1811,7 +2244,7 @@ describe('actual HTTP dispatcher (Blob fake; no Azure ingress claim)', () => {
     const before = structuredClone(input);
     const created = await api.handle(request('routines', 'POST', headers, input));
     expect(created).toMatchObject({ status: 201, headers: { etag: '"1"' } });
-    expect(JSON.parse(created.body.toString())).toStrictEqual(before);
+    expect(JSON.parse(created.body.toString())).toStrictEqual({ ...before, routine: { ...before.routine, savedAt: context.auth.now() } });
     const path = `routines/${input.routine.id}`;
     let body: CloudRoutine = JSON.parse(created.body.toString());
     body.routine.name = 'Saved household draft';
@@ -1892,13 +2325,13 @@ describe('actual HTTP dispatcher (Blob fake; no Azure ingress claim)', () => {
       .map(([key, value]) => ({ key, bytes: Buffer.from(value.bytes), etag: value.etag }));
     const created = await api.handle(request('routines', 'POST', headers, input));
     expect(created).toMatchObject({ status: 201, headers: { etag: '"1"' } });
-    expect(JSON.parse(created.body.toString())).toStrictEqual(input);
+    expect(JSON.parse(created.body.toString())).toStrictEqual({ ...input, routine: { ...input.routine, savedAt: context.auth.now() } });
     const path = `routines/${input.routine.id}`;
     headers.set('if-match', created.headers.etag!);
     const published = await api.handle(request(`${path}/publish`, 'POST', headers));
     expect(published).toMatchObject({ status: 200, headers: { etag: '"2"' } });
     expect(JSON.parse(published.body.toString())).toStrictEqual({ ...input,
-      routine: { ...input.routine, revision: 2, published: true } });
+      routine: { ...input.routine, revision: 2, published: true, savedAt: context.auth.now() } });
     const draft = await api.handle(request(path, 'GET', headers));
     expect(draft.status).toBe(200);
     const entryIds = new Set(input.routine.tracks.map(track => track.id));

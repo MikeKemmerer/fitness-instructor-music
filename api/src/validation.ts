@@ -1,4 +1,4 @@
-import { validFillerRecording, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track, type TrackTransition } from '../../shared/routine';
+import { validFillerRecording, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type RoutinePlaylist, type RoutineSequence, type Track, type TrackTransition } from '../../shared/routine';
 import { ServiceError } from './errors';
 
 export type RoutineContent = Omit<Routine, 'id' | 'revision' | 'locked' | 'published'>;
@@ -79,7 +79,9 @@ function parseCue(value: unknown): Cue {
 }
 
 function parseTrack(value: unknown): Track {
-  const fields = ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea'];
+  const fields = ['id', 'title', 'duration', 'firstBeat', 'cues', 'bodyArea'];
+  const hasBpm = Object.prototype.hasOwnProperty.call(value, 'bpm');
+  if (hasBpm) fields.push('bpm');
   const hasGain = Object.prototype.hasOwnProperty.call(value, 'gain');
   if (hasGain) fields.push('gain');
   const hasAfter = Object.prototype.hasOwnProperty.call(value, 'after');
@@ -87,7 +89,7 @@ function parseTrack(value: unknown): Track {
   const track = strictRecord(value, fields);
   return {
     id: text(track.id), title: text(track.title, 300), duration: number(track.duration),
-    bpm: number(track.bpm), firstBeat: number(track.firstBeat),
+    ...(hasBpm ? { bpm: number(track.bpm) } : {}), firstBeat: number(track.firstBeat),
     cues: array(track.cues, 1000).map(parseCue), bodyArea: text(track.bodyArea, 160, true),
     ...(hasGain ? { gain: number(track.gain) } : {}),
     ...(hasAfter ? { after: parseTransition(track.after) } : {}),
@@ -135,18 +137,49 @@ export function parseFiller(value: unknown): Filler {
   };
 }
 
+function parseRoutinePlaylist(input: unknown): RoutinePlaylist {
+  const hasSource = Object.prototype.hasOwnProperty.call(input, 'source');
+  const value = strictRecord(input, hasSource ? ['name', 'tracks', 'source'] : ['name', 'tracks']);
+  const playlist: RoutinePlaylist = { name: text(value.name), tracks: array(value.tracks, 100).map(parseTrack) };
+  if (hasSource) {
+    const source = strictRecord(value.source, ['id', 'revision', 'published']);
+    playlist.source = { id: text(source.id), revision: expectedRevision(source.revision), published: boolean(source.published) };
+  }
+  return playlist;
+}
+
+function parseSequence(input: unknown): RoutineSequence {
+  const fields = ['crossfade'];
+  for (const key of ['walkIn', 'before', 'after', 'walkOut']) {
+    if (Object.prototype.hasOwnProperty.call(input, key)) fields.push(key);
+  }
+  const value = strictRecord(input, fields);
+  const sequence: RoutineSequence = { crossfade: number(value.crossfade) };
+  for (const key of ['walkIn', 'walkOut'] as const) {
+    if (fields.includes(key)) sequence[key] = parseRoutinePlaylist(value[key]);
+  }
+  for (const key of ['before', 'after'] as const) {
+    if (fields.includes(key)) sequence[key] = parseFiller(value[key]);
+  }
+  return sequence;
+}
+
 export function parseRoutineContent(input: unknown): RoutineContent {
   try {
     const fields = ['schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
     if (Object.prototype.hasOwnProperty.call(input, 'beepOnceRemaining')) fields.push('beepOnceRemaining');
+    if (Object.prototype.hasOwnProperty.call(input, 'sequence')) fields.push('sequence');
+    if (Object.prototype.hasOwnProperty.call(input, 'savedAt')) fields.push('savedAt');
     const value = strictRecord(input, fields);
-    if (value.schemaVersion !== 1) invalid();
+    if (value.schemaVersion !== 1 && value.schemaVersion !== 2) invalid();
     const content: RoutineContent = {
-      schemaVersion: 1, name: text(value.name), tracks: array(value.tracks, 100).map(parseTrack),
+      schemaVersion: value.schemaVersion, name: text(value.name), tracks: array(value.tracks, 100).map(parseTrack),
       filler: parseFiller(value.filler), crossfade: number(value.crossfade),
       beepEvery: number(value.beepEvery), beepRemaining: number(value.beepRemaining),
     };
     if (fields.includes('beepOnceRemaining')) content.beepOnceRemaining = number(value.beepOnceRemaining);
+    if (fields.includes('sequence')) content.sequence = parseSequence(value.sequence);
+    if (fields.includes('savedAt')) content.savedAt = number(value.savedAt);
     if (validateRoutine({ ...content, id: 'validation', revision: 1, locked: false, published: false }).length) invalid();
     return content;
   } catch (error) {

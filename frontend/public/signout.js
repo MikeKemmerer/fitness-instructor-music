@@ -1,4 +1,4 @@
-import { accessKeys, isCloudSession, requestAuth } from './signin.js';
+import { accessKeys, createAccessFeedback, isCloudSession, requestAuth } from './signin.js';
 
 export const signoutKeys = accessKeys;
 export const logoutUrl = '/signin.html';
@@ -89,13 +89,17 @@ export function startSignOutPage(owner = document) {
   const retry = owner.getElementById('signout-retry');
   if (!status || !retry) return;
   let running = false;
+  const feedback = createAccessFeedback(status, owner, window);
+  let generation = 0;
+  window.addEventListener?.('pagehide', () => { generation++; });
   const run = async () => {
-    if (running) return;
+    if (running || !feedback.active) return;
     running = true;
+    const current = ++generation;
     retry.hidden = true;
     status.className = '';
     status.setAttribute('role', 'status');
-    status.textContent = 'Removing this app\'s local data before signing out...';
+    feedback.show('Removing this app\'s local data before signing out...');
     try {
       await purgeHostedSession({
         storage: window.localStorage, cacheStorage: window.caches, database: window.indexedDB,
@@ -104,11 +108,12 @@ export function startSignOutPage(owner = document) {
         replace: url => window.location.replace(url), resetId: () => window.crypto.randomUUID(),
       });
     } catch (error) {
+      if (!feedback.active || current !== generation) return;
       status.className = 'access-error';
       status.setAttribute('role', 'alert');
-      status.textContent = error?.message === 'server_logout_failed'
+      feedback.show(error?.message === 'server_logout_failed'
         ? 'Local data was removed, but server sign-out could not be confirmed. Check your connection and retry.'
-        : 'Local data could not be fully cleared, so sign-out has not continued. Close other Fitness Music Player tabs, allow site storage, then retry.';
+        : 'Local data could not be fully cleared, so sign-out has not continued. Close other Fitness Music Player tabs, allow site storage, then retry.', true);
       retry.hidden = false;
       retry.focus();
     } finally { running = false; }

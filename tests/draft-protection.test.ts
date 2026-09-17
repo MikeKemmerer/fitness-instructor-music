@@ -6,11 +6,59 @@ import { newMusicPlaylist } from '../shared/class-plan';
 const persistence = vi.hoisted(() => ({ saveDraftRecovery: vi.fn(async () => {}), removeDraftRecovery: vi.fn(async () => {}), listDraftRecoveries: vi.fn(async () => []) }));
 vi.mock('../frontend/src/offline', () => persistence);
 vi.mock('../frontend/src/ui', () => {
-  const node = () => ({ textContent: '', children: [] as unknown[], append(...children: unknown[]) { this.children.push(...children); }, setAttribute() {} });
-  return { element: node, iconButton: node };
+  const node = () => ({ textContent: '', disabled: false, children: [] as unknown[], append(...children: unknown[]) { this.children.push(...children); }, setAttribute() {} });
+  return { element: node, iconButton: (_label: string, _icon: unknown, action: () => void) => ({ ...node(), click() { if (!this.disabled) action(); } }) };
 });
 
 describe('local edit history', () => {
+  it('restores media and incomplete phase choices with the visible buttons across a local-to-cloud save', () => {
+    vi.stubGlobal('document', new EventTarget()); vi.stubGlobal('window', new EventTarget());
+    let routine = newRoutine();
+    let media = {};
+    let editorState = { walkIn: false };
+    let source: 'local' | 'household' = 'local';
+    const controller = createDraftProtection({ editable: () => true, apply(value, attachments) {
+      routine = value as typeof routine; media = attachments.media;
+      editorState = attachments.editorState as typeof editorState; observe(true);
+    } });
+    const observe = (dirty: boolean) => controller.observe({ kind: 'routine', source, value: routine, baseRevision: routine.revision, media }, dirty, false, editorState);
+    const [undo, redo] = Array.from(controller.element.children) as HTMLButtonElement[];
+    try {
+      observe(false);
+      editorState = { walkIn: true }; media = { retained: { id: 'immutable' } }; observe(true);
+      source = 'household'; routine.revision = 7; routine.savedAt = 1234; observe(false);
+      undo.click(); expect(editorState.walkIn).toBe(false); expect(media).toEqual({});
+      expect(routine.revision).toBe(7); expect(routine.savedAt).toBe(1234);
+      redo.click(); expect(editorState.walkIn).toBe(true); expect(media).toEqual({ retained: { id: 'immutable' } });
+      expect(routine.savedAt).toBe(1234);
+    } finally { controller.dispose(); vi.unstubAllGlobals(); }
+  });
+
+  it('enables real undo and redo actions after the first edit and a busy save cycle', () => {
+    vi.stubGlobal('document', new EventTarget()); vi.stubGlobal('window', new EventTarget());
+    let busy = false;
+    let routine = newRoutine();
+    const original = routine.name;
+    const controller = createDraftProtection({ editable: () => !busy, apply(value) {
+      routine = value as typeof routine;
+      observe(true);
+    } });
+    const observe = (dirty: boolean) => controller.observe({ kind: 'routine', source: 'local', value: routine, baseRevision: routine.revision, media: {} }, dirty);
+    const [undo, redo] = Array.from(controller.element.children) as HTMLButtonElement[];
+    try {
+      observe(false);
+      expect(undo.disabled).toBe(true); expect(redo.disabled).toBe(true);
+      routine.name = 'Edited routine'; observe(true);
+      expect(undo.disabled).toBe(false);
+      busy = true; controller.sync(); expect(undo.disabled).toBe(true);
+      routine.revision = 2; observe(false);
+      busy = false; controller.sync(); expect(undo.disabled).toBe(false);
+      undo.click(); expect(routine.name).toBe(original); expect(routine.revision).toBe(2);
+      expect(redo.disabled).toBe(false);
+      redo.click(); expect(routine.name).toBe('Edited routine'); expect(routine.revision).toBe(2);
+    } finally { controller.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('does not mark newer typing protected when an older recovery write finishes', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('document', new EventTarget()); vi.stubGlobal('window', new EventTarget());

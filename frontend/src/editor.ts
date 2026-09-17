@@ -1,11 +1,12 @@
-import { ArrowDown, ArrowUp, Check, GripVertical, Pause, Play, Plus, ScanLine, Square, Trash2, ChevronsRight, Minus, Hand } from 'lucide';
+import { ArrowDown, ArrowUp, Check, GripVertical, Pause, Pencil, Play, Plus, ScanLine, Square, Trash2, ChevronsRight, Minus, Hand } from 'lucide';
 import { cueSeconds, reorderTrack, transitionAfter, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { AudioPreview, BpmEstimate, LoudnessEstimate, PreviewState } from '../../shared/preview-contract';
 import { formatCueTime, parseCueTime } from './cue-time';
 import { formatNumber, formatTime, t } from './i18n';
 import { createTrackReorder } from './track-reorder';
-import { fillerControls } from './filler-controls';
-import { cueAtSeconds, element, field, iconButton, numberInput, selectInput, setButtonIcon, textInput } from './ui';
+import { fillerControls, fillerSoundLabel } from './filler-controls';
+import { getFillerSoundBpm } from './filler-audio';
+import { cueAtSeconds, element, field, gainSlider, iconButton, numberInput, selectInput, setButtonIcon, textInput, transientText } from './ui';
 
 interface EditorContext {
   preview: AudioPreview;
@@ -50,7 +51,7 @@ export function duplicateDraft(routine: Routine): Routine {
 export function contentFingerprint(routine: Routine): string {
   return JSON.stringify({ name: routine.name, tracks: routine.tracks, filler: routine.filler,
     crossfade: routine.crossfade, beepEvery: routine.beepEvery, beepRemaining: routine.beepRemaining,
-    beepOnceRemaining: routine.beepOnceRemaining ?? 0 });
+    beepOnceRemaining: routine.beepOnceRemaining ?? 0, sequence: routine.sequence });
 }
 
 export function renderEditor(host: HTMLElement, routine: Routine, changed: (structural?: boolean) => void,
@@ -75,6 +76,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
   invalidTiming.set(routine, invalid);
   const refreshers: ((state: PreviewState) => void)[] = [];
   const cancelers: (() => void)[] = [];
+  const errorDisplays = new Map<HTMLElement, ReturnType<typeof transientText>>();
+  const errors = (node: HTMLElement) => { let display = errorDisplays.get(node); if (!display) { display = transientText(node); errorDisplays.set(node, display); } return display; };
   const contentFields: HTMLFieldSetElement[] = [];
   const content = (label: string) => {
     const fields = element('fieldset', 'editor-fields');
@@ -94,8 +97,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     try { await action(); }
     catch {
       if (current() && generation === auditionGeneration) {
-        auditionError.textContent = t('previewFailed');
-        auditionError.hidden = false;
+        errors(auditionError).show(t('previewFailed'));
       }
     }
   };
@@ -106,25 +108,14 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     changed(structural);
   };
   const gainControl = (label: string, read: () => number, write: (gain: number) => void) => {
-    const root = element('div', 'gain-control');
-    const slider = element('input');
-    slider.type = 'range'; slider.min = '0'; slider.max = '1.5'; slider.step = '0.05';
-    slider.setAttribute('aria-label', label);
-    const numeric = numberInput(read(), 0, 1.5, gain => mutate(() => { write(gain); syncGain(); }));
-    numeric.step = '0.05';
-    const output = element('output', 'muted');
-    const syncGain = () => {
-      slider.value = String(read()); numeric.value = String(read());
-      output.textContent = t('gainDb', { db: read() === 0 ? '-inf' : formatNumber(20 * Math.log10(read())), percent: formatNumber(read() * 100) });
-      slider.setAttribute('aria-valuetext', output.textContent);
-    };
-    slider.addEventListener('input', () => mutate(() => { write(slider.valueAsNumber); syncGain(); }));
-    root.append(field(label, numeric), slider, output);
-    syncGain();
-    return { element: root, sync: syncGain };
+    const control = gainSlider(label, read, value => mutate(() => write(value)), editable);
+    refreshers.push(control.sync); return control;
   };
   const nameFields = content(t('routineName'));
-  nameFields.append(field(t('routineName'), textInput(routine.name, 160, value => mutate(() => { routine.name = value; }))));
+  const nameInput = textInput(routine.name, 160, value => mutate(() => { routine.name = value; }));
+  const nameField = field(t('routineName'), nameInput); nameField.classList.add('routine-name-field');
+  nameField.append(iconButton(t('routineName'), Pencil, () => { if (editable()) { nameInput.focus(); nameInput.select(); } }));
+  nameFields.append(nameField);
   form.append(nameFields);
   const tracks = element('section', 'editor-section');
   tracks.append(element('h2', '', t('playlist')));
@@ -197,6 +188,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     const clock = element('span', 'preview-clock mono');
     const previewStatus = element('p', 'preview-status');
     previewStatus.setAttribute('role', 'status');
+    let previousStatus = '';
     const previewTimeline = element('div', 'preview-timeline');
     const previewMarkers = element('div', 'preview-markers');
     previewMarkers.setAttribute('role', 'group');
@@ -242,7 +234,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       if (clock.textContent !== time) clock.textContent = time;
       const status = active ? state.error ? t('previewFailed') : state.loading ? t('previewLoading')
         : t(playing ? 'playing' : 'paused') : '';
-      if (previewStatus.textContent !== status) previewStatus.textContent = status;
+      if (previousStatus !== status) { previousStatus = status; errors(previewStatus).show(status, !!state.error); }
     });
     const trackFields = content(track.title);
     const tools = element('div', 'track-tools');
@@ -379,6 +371,9 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     let analyzedGain = track.gain;
     const loudnessStatus = element('p', 'preview-status');
     loudnessStatus.setAttribute('role', 'status');
+    const clippingWarning = element('p', 'preview-status clipping-warning');
+    clippingWarning.setAttribute('role', 'status');
+    clippingWarning.hidden = true;
     const loudnessCurrent = () => trackEditable() && Object.is(track.gain, analyzedGain);
     const syncLoudness = () => {
       analyze.disabled = !trackEditable() || analyzing || !context.analyzeLoudness;
@@ -387,7 +382,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       applyGain.disabled = !loudness || !loudnessCurrent() || analyzing;
     };
     const invalidateLoudness = () => {
-      loudnessGeneration += 1; analyzing = false; loudness = null; loudnessStatus.textContent = ''; syncLoudness();
+      clippingWarning.hidden = true; clippingWarning.textContent = '';
+      loudnessGeneration += 1; analyzing = false; loudness = null; errors(loudnessStatus).dismiss(); syncLoudness();
     };
     const gain = gainControl(t('trackGain'), () => track.gain ?? 1, value => {
       stopTrackPreview(); track.gain = value; invalidateLoudness();
@@ -398,28 +394,31 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       const generation = loudnessGeneration;
       analyzedGain = track.gain;
       analyzing = true;
-      loudnessStatus.textContent = t('analyzingLoudness'); syncLoudness();
+      errors(loudnessStatus).show(t('analyzingLoudness'), false); syncLoudness();
       const fresh = () => generation === loudnessGeneration && loudnessCurrent();
       try {
         const estimate = await context.analyzeLoudness(track.id);
         if (!fresh()) return;
         if (![estimate.integratedLufs, estimate.peakDbfs, estimate.targetLufs, estimate.recommendedGain].every(Number.isFinite)
           || estimate.recommendedGain < 0 || estimate.recommendedGain > 1.5 || typeof estimate.limited !== 'boolean') throw new Error('invalid_estimate');
-        loudness = { ...estimate };
-        loudnessStatus.textContent = t('loudnessSuggestion', { lufs: formatNumber(estimate.integratedLufs),
+        const suggestedGain = Math.min(1.25, estimate.recommendedGain);
+        loudness = { ...estimate, recommendedGain: suggestedGain, limited: estimate.limited || estimate.recommendedGain > 1.25 };
+        errors(loudnessStatus).show(t('loudnessSuggestion', { lufs: formatNumber(estimate.integratedLufs),
           peak: formatNumber(estimate.peakDbfs), target: formatNumber(estimate.targetLufs),
-          db: estimate.recommendedGain === 0 ? '-inf' : formatNumber(20 * Math.log10(estimate.recommendedGain)),
-          percent: formatNumber(estimate.recommendedGain * 100), limit: estimate.limited ? t('gainLimited') : '' });
-      } catch { if (fresh()) loudnessStatus.textContent = t('loudnessFailed'); }
+          db: suggestedGain === 0 ? '-inf' : formatNumber(20 * Math.log10(suggestedGain)),
+          percent: formatNumber(suggestedGain * 100), limit: loudness.limited ? t('gainLimited') : '' }), false);
+        clippingWarning.hidden = !estimate.clippingRisk;
+        clippingWarning.textContent = estimate.clippingRisk ? t('clippingWarning') : '';
+      } catch { if (fresh()) errors(loudnessStatus).show(t('loudnessFailed')); }
       finally { if (generation === loudnessGeneration) { analyzing = false; syncLoudness(); } }
     })(); }, true);
     const applyGain = iconButton(t('applyGain'), Check, () => {
       if (!loudness || !loudnessCurrent() || analyzing) return;
-      const value = loudness.recommendedGain;
+      const value = Math.min(1.25, loudness.recommendedGain);
       mutate(() => { stopTrackPreview(); track.gain = value; gain.sync(); invalidateLoudness(); });
     }, true);
     const loudnessControls = element('div', 'loudness-analysis');
-    loudnessControls.append(analyze, applyGain, loudnessStatus);
+    loudnessControls.append(analyze, applyGain, loudnessStatus, clippingWarning);
     cancelers.push(invalidateLoudness);
     refreshers.push(() => {
       if (!loudnessCurrent() && (analyzing || loudness)) invalidateLoudness();
@@ -428,13 +427,13 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     let detectionGeneration = 0;
     let detecting = false;
     let suggestion: BpmEstimate | null = null;
-    let suggestedGrid: readonly [number, number] | null = null;
+    let suggestedGrid: readonly [number | undefined, number] | null = null;
     const detection = element('div', 'bpm-detection');
     const detectedValues = element('p', 'preview-status');
     detectedValues.setAttribute('role', 'status');
     const showSuggestion = () => {
       if (!suggestion) return;
-      detectedValues.textContent = t('bpmSuggestion', { bpm: formatNumber(suggestion.bpm), seconds: formatNumber(suggestion.firstBeat) });
+      errors(detectedValues).show(t('bpmSuggestion', { bpm: formatNumber(suggestion.bpm), seconds: formatNumber(suggestion.firstBeat) }), false);
       if (Number.isFinite(suggestion.confidence)) detectedValues.append(element('span', '', t('bpmConfidence', {
         percent: formatNumber(Math.max(0, Math.min(1, suggestion.confidence!)) * 100),
       })));
@@ -453,7 +452,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       detecting = false;
       suggestion = null;
       suggestedGrid = null;
-      detectedValues.textContent = '';
+      errors(detectedValues).dismiss();
       syncDetection();
     };
     cancelers.push(invalidateDetection);
@@ -465,7 +464,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       const fresh = () => generation === detectionGeneration && trackEditable()
         && Object.is(track.bpm, originalGrid[0]) && Object.is(track.firstBeat, originalGrid[1]);
       detecting = true;
-      detectedValues.textContent = t('detectingBpm');
+      errors(detectedValues).show(t('detectingBpm'), false);
       syncDetection();
       try {
         const estimate = await context.detectBpm(track.id);
@@ -483,14 +482,16 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
         }
         alternatives.value = String(estimate.bpm);
       } catch {
-        if (fresh()) detectedValues.textContent = t('bpmDetectionFailed');
+        if (fresh()) errors(detectedValues).show(t('bpmDetectionFailed'));
       } finally {
         if (generation === detectionGeneration) { detecting = false; syncDetection(); }
       }
     })(); }, true);
-    const bpmInput = numberInput(track.bpm, 40, 220, value => mutate(() => {
-      track.bpm = value; invalidateDetection(); updatePreviews();
+    const bpmInput = numberInput(track.bpm ?? Number.NaN, 40, 220, value => mutate(() => {
+      if (bpmInput.value.trim() === '') delete track.bpm; else track.bpm = value;
+      invalidateDetection(); updatePreviews();
     }));
+    bpmInput.required = false; bpmInput.value = track.bpm === undefined ? '' : String(track.bpm);
     const firstBeatInput = numberInput(track.firstBeat, 0, track.duration, value => mutate(() => {
       track.firstBeat = value; invalidateDetection(); updatePreviews();
     }));
@@ -526,8 +527,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       mutate(() => { track.bpm = Math.round(value * 10) / 10; bpmInput.value = String(track.bpm); invalidateDetection(); updatePreviews(); orderRows(true); });
     };
     const tempoTools = element('div', 'action-row');
-    tempoTools.append(iconButton(t('halfBpm'), Minus, () => setBpm(track.bpm / 2), true),
-      iconButton(t('doubleBpm'), Plus, () => setBpm(track.bpm * 2), true),
+    tempoTools.append(iconButton(t('halfBpm'), Minus, () => { if (track.bpm !== undefined) setBpm(track.bpm / 2); }, true),
+      iconButton(t('doubleBpm'), Plus, () => { if (track.bpm !== undefined) setBpm(track.bpm * 2); }, true),
       iconButton(t('tapTempo'), Hand, () => {
         if (!trackEditable()) return;
         const now = performance.now();
@@ -560,12 +561,12 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       timingFeedback.setAttribute('role', 'status');
       timingFeedback.hidden = true;
       const updatePreview = () => {
+        const count = cue.anchor.kind === 'count';
         try {
           const seconds = cueSeconds(cue, track);
-          timePreview.hidden = cue.anchor.kind !== 'count';
-          timePreview.textContent = !invalid.has(cue) && Number.isFinite(seconds) && seconds >= 0 && seconds < track.duration
-            ? formatCueTime(seconds) : t('invalidPreview');
-        } catch { timePreview.textContent = t('invalidPreview'); }
+          const valid = !invalid.has(cue) && Number.isFinite(seconds) && seconds >= 0 && seconds < track.duration;
+          errors(timePreview).refresh(count ? valid ? formatCueTime(seconds) : t('invalidPreview') : '', !valid);
+        } catch { errors(timePreview).refresh(count ? t('invalidPreview') : ''); }
       };
       const value = element('input');
       value.setAttribute('aria-label', t('value'));
@@ -588,34 +589,34 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
           else cue.anchor.seconds = nextValue;
         }
         value.setAttribute('aria-invalid', String(!valid));
-        timingFeedback.textContent = valid ? '' : t('invalidCueTime');
-        timingFeedback.hidden = valid;
+        errors(timingFeedback).show(valid ? '' : t('invalidCueTime'));
         updatePreview(); syncMarkers();
       }));
       value.addEventListener('change', commitTiming);
       value.addEventListener('blur', commitTiming);
       const kind = selectInput(cue.anchor.kind, (['timestamp', 'count', 'interval'] as const).map(source => ({ value: source, label: t(source) })),
         source => mutate(() => {
+          if (source === 'count' && (track.bpm === undefined || !Number.isFinite(track.bpm) || track.bpm < 40 || track.bpm > 220)) { kind.value = cue.anchor.kind; return; }
           const seconds = cueSeconds(cue, track);
           const converted = source === 'count'
             ? cueAtSeconds(track, { ...cue, anchor: { kind: 'count', count: 1 } }, seconds, track.duration)
             : { ...cue, anchor: { kind: source, seconds } };
           if (invalid.has(cue) || !Number.isFinite(seconds) || seconds < 0 || seconds >= track.duration || !converted) {
             kind.value = cue.anchor.kind;
-            timingFeedback.textContent = t('invalidCueTime'); timingFeedback.hidden = false;
+            errors(timingFeedback).show(t('invalidCueTime'));
             value.focus({ preventScroll: true });
             return;
           }
           if (converted.anchor.kind === 'count') converted.anchor.count = Math.min(100000, converted.anchor.count);
           cue.anchor = converted.anchor;
           const snapped = cueSeconds(cue, track);
-          timingFeedback.hidden = snapped === seconds;
-          timingFeedback.textContent = snapped === seconds ? '' : t('cueCountSnapped', { time: formatCueTime(snapped) });
+          errors(timingFeedback).show(snapped === seconds ? '' : t('cueCountSnapped', { time: formatCueTime(snapped) }), false);
           configureValue();
           updatePreview();
           syncMarkers();
           orderRows(true);
         }));
+      refreshers.push(() => { const option = Array.from(kind.options ?? []).find(option => option.value === 'count'); if (option) option.disabled = track.bpm === undefined || !Number.isFinite(track.bpm); });
       const note = element('textarea');
       note.rows = 2;
       note.value = cue.note;
@@ -693,7 +694,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     if (preview.getState().kind === 'filler') { auditionGeneration += 1; preview.stop(); }
   };
   const fillerFields = element('div', 'field-grid');
-  const duration = numberInput(routine.filler.seconds, 0, 600, value => mutate(() => { stopFiller(); routine.filler.seconds = value; }));
+  const duration = numberInput(routine.filler.seconds, 0, 600, value => { if (routine.filler.mode === 'timed') mutate(() => { stopFiller(); routine.filler.seconds = value; }); });
   const bpm = numberInput(routine.filler.bpm, 40, 220, value => {
     if (!['lofi', 'recording'].includes(routine.filler.sound)) mutate(() => { stopFiller(); routine.filler.bpm = value; });
   });
@@ -706,7 +707,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     const builtins = element('optgroup');
     builtins.label = t('builtInFillers');
     for (const value of ['lofi', 'soft', 'bright', 'drums'] as const) {
-      const option = element('option', '', t(value));
+      const option = element('option', '', fillerSoundLabel({ ...routine.filler, sound: value, recording: undefined }));
       option.value = value; builtins.append(option);
     }
     sound.append(builtins);
@@ -714,7 +715,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     const custom = element('optgroup');
     custom.label = t('customFillers');
     for (const recording of recordings) {
-      const option = element('option', '', recording.name);
+      const option = element('option', '', fillerSoundLabel({ ...routine.filler, sound: 'recording', recording }));
       option.value = `recording:${recording.id}`; custom.append(option);
     }
     if (recordings.length) sound.append(custom);
@@ -722,7 +723,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     if (routine.filler.sound === 'recording' && selected && !recordings.some(recording => recording.id === selected.id)) {
       const retained = element('optgroup');
       retained.label = t('retainedFillers');
-      const option = element('option', '', t('retainedFiller', { name: selected.name }));
+      const option = element('option', '', fillerSoundLabel(routine.filler));
       option.value = `recording:${selected.id}`; retained.append(option); sound.append(retained);
     }
     sound.value = routine.filler.sound === 'recording' ? `recording:${selected?.id ?? ''}` : routine.filler.sound;
@@ -738,9 +739,13 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     refreshFillers(); syncFiller();
   }));
   const syncFiller = () => {
-    duration.disabled = routine.filler.mode !== 'timed';
+    duration.readOnly = routine.filler.mode === 'hold';
+    duration.disabled = routine.filler.mode === 'none';
+    duration.value = routine.filler.mode === 'hold' ? '' : String(routine.filler.seconds);
+    duration.required = routine.filler.mode === 'timed';
     sound.disabled = routine.filler.mode === 'none';
     bpm.disabled = sound.disabled || ['lofi', 'recording'].includes(routine.filler.sound);
+    try { const known = getFillerSoundBpm(routine.filler); bpm.value = known === undefined ? '' : String(known); } catch { bpm.value = String(routine.filler.bpm); }
     originalTempo.hidden = !['lofi', 'recording'].includes(routine.filler.sound);
   };
   refreshFillers();
@@ -764,6 +769,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
   const stopFillerButton = iconButton(t('stopFillerPreview'), Square, stopFiller);
   const fillerStatus = element('p', 'preview-status');
   fillerStatus.setAttribute('role', 'status');
+  let previousFillerStatus = '';
   fillerPreview.append(playFiller, stopFillerButton, fillerStatus);
   refreshers.push(state => {
     const active = state.kind === 'filler';
@@ -772,7 +778,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     stopFillerButton.disabled = !active || !(state.loading || state.playing);
     const status = active ? state.error ? t('previewFailed') : state.loading ? t('previewLoading')
       : state.playing ? t('playing') : '' : '';
-    if (fillerStatus.textContent !== status) fillerStatus.textContent = status;
+    if (previousFillerStatus !== status) { previousFillerStatus = status; errors(fillerStatus).show(status, !!state.error); }
   });
   transitions.append(transitionFields, fillerPreview);
   const beeps = element('section', 'editor-section');
@@ -807,7 +813,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     syncAvailability: () => sync(preview.getState()),
     cancelJobs,
     refreshFillers,
-    dispose: () => { disposed = true; cancelJobs(); unsubscribe(); },
+    dispose: () => { disposed = true; cancelJobs(); for (const display of errorDisplays.values()) display.dispose(); unsubscribe(); },
   };
 }
 

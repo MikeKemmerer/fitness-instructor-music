@@ -356,7 +356,7 @@ class MockContext {
 }
 
 describe('local Web Audio player', () => {
-  let player: Player;
+  let player: ReturnType<typeof createPlayer>;
   let state: PlayerState;
   let nextFrame: FrameRequestCallback | undefined;
   const routine = () => {
@@ -420,6 +420,117 @@ describe('local Web Audio player', () => {
     walkOut: { ...newMusicPlaylist(), tracks: routine().tracks.slice(2).map(track => ({ ...track, cues: [] })) },
     before: { mode: 'hold', sound: 'soft', bpm: 100, seconds: 0, gain: 0.25 },
     after: { mode: 'hold', sound: 'drums', bpm: 120, seconds: 0, gain: 0.75 }, crossfade: 2,
+  });
+
+  it('unified sequence prepares silently and runs every owned phase without an external class setup', async () => {
+    const contexts = vi.fn(function () { return new MockContext(); });
+    vi.stubGlobal('AudioContext', contexts);
+    const value = routine();
+    const owned = (id: string) => ({ ...value.tracks[0], id, bpm: undefined, cues: [] });
+    storage.durations.push(12, 12);
+    value.sequence = { crossfade: 0, walkIn: { name: 'Arrival', tracks: [owned('3')] },
+      walkOut: { name: 'Departure', tracks: [owned('4')] },
+      before: { mode: 'hold', seconds: 0, bpm: 100, sound: 'soft' },
+      after: { mode: 'hold', seconds: 0, bpm: 120, sound: 'drums' } };
+    await player.load(value);
+    expect(state).toMatchObject({ status: 'idle', phase: 'walk-in', elapsed: 0, classElapsed: 0 });
+    expect(contexts).not.toHaveBeenCalled();
+    expect(storage.decoded.length).toBeLessThanOrEqual(2);
+    value.sequence.walkIn!.tracks[0].title = 'Unprepared edit';
+    await player.play();
+    expect(state.phaseTrackTitle).toBe('Synthetic');
+    await player.advance();
+    expect(state.phase).toBe('before');
+    await advance(MockContext.latest.currentTime + 3);
+    await player.advance();
+    expect(state.phase).toBe('routine');
+    await advance(MockContext.latest.currentTime + 3);
+    await player.next();
+    player.stop();
+    expect(state).toMatchObject({ phase: 'routine', trackIndex: 1, elapsed: 0, status: 'idle' });
+    await player.previous();
+    expect(state.trackIndex).toBe(0);
+    await player.play();
+    await player.next();
+    await advance(MockContext.latest.currentTime + 3);
+    await player.next();
+    await advance(MockContext.latest.currentTime + 3);
+    await player.next();
+    expect(state.phase).toBe('after');
+    await advance(MockContext.latest.currentTime + 3);
+    await player.advance();
+    expect(state.phase).toBe('walk-out');
+    await player.next();
+    expect(state.status).toBe('finished');
+  });
+
+  it('unified explicit class audio still overrides owned phase playback', async () => {
+    const value = routine();
+    value.sequence = { crossfade: 0, before: { mode: 'hold', seconds: 0, bpm: 100, sound: 'soft' } };
+    await player.load(value, { crossfade: 0 });
+    expect(state.phase).toBe('routine');
+  });
+
+  it('unified unload releases sound, phase state and PCM while retaining a reusable player and subscription', async () => {
+    await player.load(routine(), classAudio());
+    await player.play();
+    const context = MockContext.latest;
+    expect(runtimePcmBytes()).toBeGreaterThan(0);
+    player.unload();
+    expect(state).toMatchObject({ status: 'idle', duration: 0, classElapsed: 0, currentCue: '', error: null });
+    expect(state.phase).toBeUndefined();
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(context.sources.every(source => source.buffer === null)).toBe(true);
+    expect(runtimePcmBytes()).toBe(0);
+    await expect(player.play()).rejects.toThrow('routine_not_ready');
+    await player.load(routine());
+    expect(state.duration).toBe(12);
+    expect(MockContext.latest).not.toBe(context);
+    expect(MockContext.latest.resume).not.toHaveBeenCalled();
+    await player.play();
+    expect(state.status).toBe('playing');
+  });
+
+  it('unified unload invalidates late preparation without reviving the closed routine', async () => {
+    const pending = deferTrack('0');
+    const loading = player.load(routine());
+    await vi.waitFor(() => expect(storage.requested).toContain('0'));
+    player.unload();
+    pending.resolve();
+    await loading;
+    expect(storage.decoded).toEqual([]);
+    expect(state).toMatchObject({ status: 'idle', duration: 0 });
+    await expect(player.play()).rejects.toThrow('routine_not_ready');
+    storage.deferred.clear();
+    await player.load(routine());
+    expect(state.duration).toBe(12);
+  });
+
+  it('unified preparation bounds the total of explicit legacy class phases to 100 entries', async () => {
+    const value = routine();
+    const audio = classAudio();
+    audio.walkIn!.tracks = Array.from({ length: 98 }, (_, index) => ({ ...value.tracks[0], id: `arrival-${index}`, cues: [] }));
+    await expect(player.load(value, audio)).rejects.toThrow('invalid_routine');
+    expect(storage.decoded).toEqual([]);
+  });
+
+  it('unified preparation rejects an oversized later phase before declaring readiness', async () => {
+    const value = routine();
+    value.sequence = { crossfade: 0, walkOut: { name: 'Departure', tracks: [
+      { ...value.tracks[0], id: 'out', duration: 361, cues: [] },
+    ] } };
+    await expect(player.load(value)).rejects.toThrow('audio_duration_mismatch');
+    expect(storage.decoded).toEqual([]);
+  });
+
+  it('unified unknown BPM supports timed cues and rejects counts without guessing a grid', async () => {
+    const value = routine();
+    delete value.tracks[0].bpm;
+    value.tracks[0].cues.push({ id: 'interval', anchor: { kind: 'interval', seconds: 4 }, note: 'Interval' });
+    await player.load(value);
+    expect(state.nextCueIn).toBe(4);
+    value.tracks[0].cues.push({ id: 'count', anchor: { kind: 'count', count: 1 }, note: 'Count' });
+    await expect(player.load(value)).rejects.toThrow('invalid_routine');
   });
 
   it('class phases load silently, freeze outside cues and snapshots, and advance with one audio context', async () => {

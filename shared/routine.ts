@@ -15,7 +15,7 @@ export interface Track {
   id: string;
   title: string;
   duration: number;
-  bpm: number;
+  bpm?: number;
   firstBeat: number;
   cues: Cue[];
   bodyArea: string;
@@ -46,8 +46,22 @@ export interface Filler {
   recording?: FillerRecording;
 }
 
+export interface RoutinePlaylist {
+  name: string;
+  tracks: Track[];
+  source?: { id: string; revision: number; published: boolean };
+}
+
+export interface RoutineSequence {
+  walkIn?: RoutinePlaylist;
+  before?: Filler;
+  after?: Filler;
+  walkOut?: RoutinePlaylist;
+  crossfade: number;
+}
+
 export interface Routine {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
   name: string;
   revision: number;
@@ -59,6 +73,17 @@ export interface Routine {
   beepEvery: number;
   beepRemaining: number;
   beepOnceRemaining?: number;
+  sequence?: RoutineSequence;
+  savedAt?: number;
+}
+
+export function allRoutineTracks(routine: Routine): Track[] {
+  return [...(routine.sequence?.walkIn?.tracks ?? []), ...routine.tracks, ...(routine.sequence?.walkOut?.tracks ?? [])];
+}
+
+export function allRoutineFillers(routine: Routine): Filler[] {
+  return [routine.filler, ...routine.tracks.flatMap(track => track.after?.mode === 'custom' ? [track.after.filler] : []),
+    ...[routine.sequence?.before, routine.sequence?.after].filter((filler): filler is Filler => filler !== undefined)];
 }
 
 export type TrackTransition = { mode: 'none' } | { mode: 'custom'; filler: Filler; crossfade?: number };
@@ -77,7 +102,7 @@ export function cueSeconds(cue: Cue, track: Track, tempoRatio = 1): number {
   if (!Number.isFinite(tempoRatio) || tempoRatio <= 0) throw new Error('Invalid tempo ratio');
   if (cue.anchor.kind === 'interval') return cue.anchor.seconds;
   if (cue.anchor.kind === 'timestamp') return cue.anchor.seconds / tempoRatio;
-  if (!(track.bpm > 0) || cue.anchor.count < 1) throw new Error('Invalid beat grid');
+  if (track.bpm === undefined || !(track.bpm > 0) || cue.anchor.count < 1) throw new Error('Invalid beat grid');
   return (track.firstBeat + (cue.anchor.count - 1) * 60 / track.bpm) / tempoRatio;
 }
 
@@ -85,7 +110,9 @@ export function validateRoutine(routine: Routine): string[] {
   const errors: string[] = [];
   const nonnegative = (value: number) => Number.isFinite(value) && value >= 0;
   if (!routine || typeof routine !== 'object' || Array.isArray(routine)) return ['Invalid routine'];
-  if (routine.schemaVersion !== 1) errors.push('Unsupported schema');
+  if (routine.schemaVersion !== 1 && routine.schemaVersion !== 2) errors.push('Unsupported schema');
+  if (routine.savedAt !== undefined && (!Number.isSafeInteger(routine.savedAt) || routine.savedAt < 0)) errors.push('Invalid saved time');
+  if (routine.sequence !== undefined && routine.schemaVersion !== 2) errors.push('Unsupported sequence schema');
   if (typeof routine.id !== 'string' || !routine.id || typeof routine.name !== 'string' || !routine.name.trim() || routine.name.length > 160) errors.push('Invalid routine name or ID');
   if (!Number.isInteger(routine.revision) || routine.revision < 1) errors.push('Invalid revision');
   if (typeof routine.locked !== 'boolean' || typeof routine.published !== 'boolean') errors.push('Invalid routine state');
@@ -113,11 +140,12 @@ export function validateRoutine(routine: Routine): string[] {
       if (!after || typeof after !== 'object' || !['none', 'custom'].includes(after.mode)) errors.push('Invalid transition');
       else if (after.mode === 'custom') {
         if (!after.filler || typeof after.filler !== 'object') errors.push('Invalid transition');
-        else if (validateRoutine({ ...routine, tracks: [], filler: after.filler, crossfade: after.crossfade ?? routine.crossfade }).length) errors.push('Invalid transition');
+        else if (validateRoutine({ ...routine, sequence: undefined, tracks: [], filler: after.filler, crossfade: after.crossfade ?? routine.crossfade }).length) errors.push('Invalid transition');
       }
     }
     if (!Number.isFinite(track.duration) || track.duration <= 0 || track.duration > 1200) errors.push('Track duration must be 0-1200 seconds');
-    if (!Number.isFinite(track.bpm) || track.bpm < 40 || track.bpm > 220 || !nonnegative(track.firstBeat) || track.firstBeat >= track.duration) errors.push('Invalid track beat grid');
+    if ((track.bpm !== undefined && (!Number.isFinite(track.bpm) || track.bpm < 40 || track.bpm > 220))
+      || !nonnegative(track.firstBeat) || track.firstBeat >= track.duration) errors.push('Invalid track beat grid');
     const cueIds = new Set<string>();
     if (!Array.isArray(track.cues)) { errors.push('Invalid cues'); continue; }
     for (const cue of track.cues) {
@@ -134,6 +162,40 @@ export function validateRoutine(routine: Routine): string[] {
         const position = cueSeconds(cue, track);
         if (!nonnegative(position) || position >= track.duration) errors.push('Cue outside track');
       } catch { errors.push('Invalid cue position'); }
+    }
+  }
+  if (routine.sequence !== undefined) {
+    const sequence = routine.sequence;
+    if (!sequence || typeof sequence !== 'object' || Array.isArray(sequence)
+      || Object.keys(sequence).some(key => !['walkIn', 'before', 'after', 'walkOut', 'crossfade'].includes(key))) errors.push('Invalid routine sequence');
+    else {
+      if (!nonnegative(sequence.crossfade) || sequence.crossfade > 12) errors.push('Invalid class fade');
+      for (const filler of [sequence.before, sequence.after]) {
+        if (filler !== undefined && (!filler || filler.mode !== 'hold'
+          || validateRoutine({ ...routine, sequence: undefined, tracks: [], filler }).length)) errors.push('Invalid announcement filler');
+      }
+      let total = routine.tracks.length;
+      for (const playlist of [sequence.walkIn, sequence.walkOut]) {
+        if (playlist === undefined) continue;
+        if (!playlist || typeof playlist !== 'object' || Array.isArray(playlist)
+          || Object.keys(playlist).some(key => !['name', 'tracks', 'source'].includes(key))
+          || typeof playlist.name !== 'string' || !playlist.name.trim() || playlist.name.length > 160
+          || !Array.isArray(playlist.tracks) || !playlist.tracks.length) { errors.push('Invalid phase playlist'); continue; }
+        const source = playlist.source;
+        if (source !== undefined && (!source || typeof source !== 'object'
+          || Object.keys(source).some(key => !['id', 'revision', 'published'].includes(key))
+          || typeof source.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(source.id)
+          || !Number.isSafeInteger(source.revision) || source.revision < 1 || typeof source.published !== 'boolean')) errors.push('Invalid playlist source');
+        if (validateRoutine({ ...routine, sequence: undefined, tracks: playlist.tracks }).length
+          || playlist.tracks.some(track => !track || track.cues?.length !== 0 || track.after !== undefined)) errors.push('Invalid phase playlist');
+        total += playlist.tracks.length;
+        for (const track of playlist.tracks) {
+          if (!track) continue;
+          if (ids.has(track.id)) errors.push('Track entry IDs must be unique');
+          ids.add(track.id);
+        }
+      }
+      if (total > 100) errors.push('Too many tracks');
     }
   }
   return errors;
@@ -164,7 +226,7 @@ export function reorderTrack(routine: Routine, trackId: string, destination: num
 
 export function newRoutine(): Routine {
   return {
-    schemaVersion: 1, id: crypto.randomUUID(), name: 'My barre class', revision: 1,
+    schemaVersion: 2, id: crypto.randomUUID(), name: 'My barre class', revision: 1,
     locked: false, published: false, tracks: [],
     filler: { mode: 'timed', seconds: 15, bpm: 100, sound: 'soft' },
     crossfade: 2, beepEvery: 0, beepRemaining: 10, beepOnceRemaining: 0,

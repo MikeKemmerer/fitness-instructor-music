@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { newRoutine, validateRoutine, type FillerRecording } from '../shared/routine';
+import type { CloudRoutine } from '../shared/cloud-contract';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from '../frontend/src/hosted-session';
 import { AAC_IMPORT } from '../shared/audio-import';
 import { newMusicPlaylist, type ClassSetup, type MusicPlaylist } from '../shared/class-plan';
@@ -19,6 +20,7 @@ const storage = vi.hoisted(() => ({
   onRequest: undefined as ((store: string, method: string) => void | Promise<void>) | undefined,
 }));
 const stores = vi.hoisted(() => ({
+  routineWorkingCopies: new Map<string, unknown>(), cloudRoutineEnvelopes: new Map<string, unknown>(),
   draftRecovery: new Map<string, unknown>(),
   tracks: new Map<string, unknown>(), routines: new Map<string, unknown>(), meta: new Map<string, unknown>(),
   cloudRoutines: new Map<string, unknown>(),
@@ -122,6 +124,9 @@ import {
   MAX_TRACK_BYTES, removeTrack, saveRoutine, publishRoutine, deleteRoutine, setActiveRoutine, storeTrack,
   saveMusicPlaylist, getMusicPlaylist, listMusicPlaylists, saveClassSetup, getClassSetup, listClassSetups,
   deleteMusicPlaylist, deleteClassSetup,
+  acknowledgeRoutineWorkingCopy, clearActiveRoutine, getRoutineWorkingCopy, listRoutineWorkingCopies, saveRoutineWorkingCopy,
+  recordRoutineSyncAttempt, reconcileRoutineWorkingCopy, deleteRoutineWorkingCopy, listCloudRoutines, listRoutinePublications,
+  getActiveRoutineSelection, setActiveRoutineSelection, deleteRoutineAndWorkingCopy, listCachedClassSetups,
   cacheMusicPlaylist, cacheClassSetup, getCachedMusicPlaylist, getCachedClassSetup, getPreparedClass, getReadinessClass,
 } from '../frontend/src/offline';
 
@@ -331,7 +336,7 @@ describe('private draft recovery', () => {
     value.value.name = 'Changed caller';
     const records = await listDraftRecoveries();
     expect(records[0].value.name).not.toBe('Changed caller');
-    expect(storage.version).toBe(6); expect(stores.routines.size).toBe(0);
+    expect(storage.version).toBe(7); expect(stores.routines.size).toBe(0);
     expect(stores.tracks.size).toBe(0);
     await removeDraftRecovery(records[0].id, records[0].updatedAt);
     expect(await listDraftRecoveries()).toEqual([]);
@@ -351,6 +356,828 @@ describe('private draft recovery', () => {
     await expect(saveDraftRecovery({ ...value, value: { ...value.value, locked: true } })).rejects.toThrow('recovery_limit');
     await expect(saveDraftRecovery({ ...value, value: { ...value.value, published: true } })).rejects.toThrow('recovery_limit');
     expect(await listDraftRecoveries()).toEqual([]);
+  });
+});
+
+describe('unified durable working copies', () => {
+  const options = { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null };
+  const envelope = () => ({ routine: newRoutine(), media: {} });
+
+  it('commits a detached pending snapshot with an independent local counter and timestamp', async () => {
+    const value = envelope();
+    value.routine.revision = 12;
+    const first = await saveRoutineWorkingCopy(value, { ...options, cloudBaseRevision: 12 });
+    expect(first).toMatchObject({ localVersion: 1, cloudBaseRevision: 12, pendingCloud: true });
+    expect(first.savedAt).toBeGreaterThan(0);
+    expect(first.envelope.routine.savedAt).toBe(first.savedAt);
+    expect(value.routine.savedAt).toBeUndefined();
+    first.envelope.routine.name = 'Changed';
+    const second = await saveRoutineWorkingCopy(first.envelope, { ...options, expectedLocalVersion: 1, cloudBaseRevision: 12 });
+    expect(second.localVersion).toBe(2);
+    expect(second.envelope.routine.revision).toBe(12);
+    second.envelope.routine.name = 'Not committed';
+    expect((await getRoutineWorkingCopy(value.routine.id))?.envelope.routine.name).toBe('Changed');
+    expect(await getRoutine()).toEqual((await getRoutineWorkingCopy(value.routine.id))?.envelope.routine);
+  });
+
+  it('uses one transaction to reject a stale concurrent save without replacing the winner', async () => {
+    const value = envelope();
+    const results = await Promise.allSettled([saveRoutineWorkingCopy(value, options), saveRoutineWorkingCopy(value, options)]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(1);
+    expect((await getRoutineWorkingCopy(value.routine.id))?.localVersion).toBe(1);
+    expect(await listRoutineWorkingCopies()).toHaveLength(1);
+  });
+
+  it('preserves pending work through local saves, close and a module reload', async () => {
+    const saved = await saveRoutineWorkingCopy(envelope(), options);
+    await saveRoutineWorkingCopy(saved.envelope, { ...options, expectedLocalVersion: 1, cloud: false });
+    stores.meta.set('unrelated', 'retain');
+    await clearActiveRoutine();
+    expect(await getRoutine()).toBeNull();
+    expect(stores.meta.get('unrelated')).toBe('retain');
+    vi.resetModules();
+    const reopened = await import('../frontend/src/offline');
+    expect((await reopened.getRoutineWorkingCopy(saved.envelope.routine.id))?.pendingCloud).toBe(true);
+    expect(await reopened.listRoutineWorkingCopies()).toHaveLength(1);
+    await reopened.setActiveRoutine(saved.envelope.routine.id);
+    expect(await reopened.getRoutine()).not.toBeNull();
+  });
+
+  it('acknowledges only the sent local generation and retains the full authoritative envelope', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const response = structuredClone(first.envelope);
+    response.routine.revision = 1;
+    response.routine.savedAt = 123;
+    await acknowledgeRoutineWorkingCopy(response.routine.id, first.localVersion, response);
+    const acknowledged = await getRoutineWorkingCopy(response.routine.id);
+    expect(acknowledged).toEqual({ ...first, envelope: response, cloudBaseRevision: 1, pendingCloud: false });
+    expect(await getCloudRoutine(response.routine.id)).toEqual(response.routine);
+    expect([...stores.cloudRoutineEnvelopes.values()]).toEqual([response]);
+  });
+
+  it('retains newer content, descriptors and pending state after a delayed response', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), { ...options, cloudBaseRevision: 1 });
+    await recordRoutineSyncAttempt(first.envelope.routine.id, first.localVersion, first.envelope, 1);
+    const newer = structuredClone(first.envelope);
+    newer.routine.name = 'Newer local edit';
+    const saved = await saveRoutineWorkingCopy(newer, { ...options, expectedLocalVersion: 1, cloudBaseRevision: 1 });
+    const response = structuredClone(first.envelope);
+    response.routine.revision = 2;
+    await acknowledgeRoutineWorkingCopy(response.routine.id, 1, response);
+    const rebased = await getRoutineWorkingCopy(response.routine.id);
+    expect(rebased).toEqual({ ...saved, cloudAttempt: undefined, cloudBaseRevision: 2,
+      envelope: { ...newer, routine: { ...saved.envelope.routine, revision: 2 } } });
+    expect(await getCloudRoutine(response.routine.id)).toEqual(response.routine);
+    await recordRoutineSyncAttempt(response.routine.id, 2, rebased!.envelope, 2);
+    await acknowledgeRoutineWorkingCopy(response.routine.id, 2, { ...rebased!.envelope,
+      routine: { ...rebased!.envelope.routine, revision: 3 } });
+    expect(await getRoutineWorkingCopy(response.routine.id)).toMatchObject({ localVersion: 2, cloudBaseRevision: 3,
+      pendingCloud: false, envelope: { routine: { name: 'Newer local edit', revision: 3 } } });
+  });
+
+  it('allows an explicit local-version CAS rebase only after storing the authoritative response', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), { ...options, cloudBaseRevision: 1 });
+    await recordRoutineSyncAttempt(first.envelope.routine.id, 1, first.envelope, 1);
+    const response = structuredClone(first.envelope);
+    response.routine.revision = 2;
+    await expect(saveRoutineWorkingCopy(response, { ...options, expectedLocalVersion: 1, cloudBaseRevision: 2 }))
+      .rejects.toThrow('routine_conflict');
+    const newer = await saveRoutineWorkingCopy({ ...first.envelope, routine: { ...first.envelope.routine, name: 'New edit' } },
+      { ...options, expectedLocalVersion: 1, cloudBaseRevision: 1 });
+    await acknowledgeRoutineWorkingCopy(response.routine.id, 1, response);
+    const rebased = await saveRoutineWorkingCopy({ ...newer.envelope, routine: { ...newer.envelope.routine, revision: 2 } },
+      { expectedLocalVersion: 2, cloud: true, cloudBaseRevision: 2 });
+    expect(rebased).toMatchObject({ localVersion: 3, cloudBaseRevision: 2, pendingCloud: true });
+    expect(rebased.envelope.routine.name).toBe('New edit');
+  });
+
+  it('rejects undeclared envelope and nested runtime credentials', async () => {
+    const value = envelope();
+    await expect(saveRoutineWorkingCopy({ ...value, csrfToken: 'synthetic' } as typeof value, options)).rejects.toThrow('invalid_cloud_routine');
+    Object.assign(value.routine, { credentials: 'synthetic' });
+    await expect(saveRoutineWorkingCopy(value, options)).rejects.toThrow('invalid_cloud_routine');
+    expect(stores.routineWorkingCopies.size).toBe(0);
+  });
+
+  it('atomically retains pending work if acknowledgment mirror storage fails', async () => {
+    const saved = await saveRoutineWorkingCopy(envelope(), options);
+    const response = structuredClone(saved.envelope);
+    response.routine.revision = 1;
+    storage.onRequest = (store, method) => {
+      if (store === 'cloudRoutineHistory' && method === 'put') throw new Error('QuotaExceededError');
+    };
+    await expect(acknowledgeRoutineWorkingCopy(response.routine.id, 1, response)).rejects.toThrow('QuotaExceededError');
+    storage.onRequest = undefined;
+    expect(await getRoutineWorkingCopy(response.routine.id)).toEqual(saved);
+    expect(stores.cloudRoutineEnvelopes.size).toBe(0);
+    expect(stores.cloudRoutines.size).toBe(0);
+  });
+
+  it('aborts the whole save when a storage request fails, retaining the prior pending copy and active selection', async () => {
+    const saved = await saveRoutineWorkingCopy(envelope(), options);
+    storage.onRequest = (store, method) => { if (store === 'meta' && method === 'put') throw new Error('QuotaExceededError'); };
+    await expect(saveRoutineWorkingCopy(saved.envelope, { ...options, expectedLocalVersion: 1 })).rejects.toThrow('QuotaExceededError');
+    storage.onRequest = undefined;
+    expect(await getRoutineWorkingCopy(saved.envelope.routine.id)).toEqual(saved);
+    expect(stores.meta.get('active')).toBe(saved.envelope.routine.id);
+  });
+
+  it.each(['locked', 'published'] as const)('rejects %s snapshots without storing them', async field => {
+    const value = envelope();
+    value.routine[field] = true;
+    await expect(saveRoutineWorkingCopy(value, options)).rejects.toThrow(`routine_${field}`);
+    expect(stores.routineWorkingCopies.size).toBe(0);
+  });
+
+  it('does not bypass an existing local lock or downgrade a v2 head', async () => {
+    const value = envelope();
+    const locked = await saveRoutine(value.routine, null, 'lock');
+    await expect(saveRoutineWorkingCopy(value, options)).rejects.toThrow('routine_locked');
+    await saveRoutine(locked, locked.revision, 'unlock');
+    value.routine.schemaVersion = 1;
+    await expect(saveRoutineWorkingCopy(value, options)).rejects.toThrow('routine_conflict');
+  });
+
+  it('rejects missing phase media and keeps the complete v2 sequence in storage and recovery', async () => {
+    const value = envelope();
+    const track = { id: 'arrival', title: 'Arrival', duration: 2, firstBeat: 0, cues: [], bodyArea: '' };
+    value.routine.sequence = { crossfade: 1, walkIn: { name: 'Walk in', tracks: [track] } };
+    await expect(saveRoutineWorkingCopy(value, options)).rejects.toThrow('invalid_media');
+    const asset = { id: 'asset', sha256: 'a'.repeat(64), bytes: 44, contentType: 'audio/wav' };
+    const saved = await saveRoutineWorkingCopy({ ...value, media: { arrival: asset } }, options);
+    expect(saved.envelope.routine.sequence).toEqual(value.routine.sequence);
+    await expect(removeTrack('arrival')).rejects.toThrow('track_referenced');
+    await saveDraftRecovery({ id: 'recovery', kind: 'routine', source: 'household', value: value.routine,
+      media: { arrival: asset }, baseRevision: null, updatedAt: 1 });
+    expect((await listDraftRecoveries())[0]!.value).toEqual(value.routine);
+  });
+
+  it('migrates v6 without changing any prior record', async () => {
+    storage.version = 6;
+    const routine = newRoutine();
+    stores.routines.set(routine.id, routine);
+    stores.draftRecovery.set('old', { id: 'old', value: routine });
+    stores.tracks.set('audio', { bytes: 44 });
+    const previous = [structuredClone(stores.routines), structuredClone(stores.draftRecovery), structuredClone(stores.tracks)];
+    await saveRoutineWorkingCopy(envelope(), options);
+    expect(storage.version).toBe(7);
+    expect([stores.routines, stores.draftRecovery, stores.tracks]).toEqual(previous);
+  });
+
+  it('refuses excess records without evicting saved or pending work', async () => {
+    for (let index = 0; index < 64; index++) await saveRoutineWorkingCopy(envelope(), options);
+    await expect(saveRoutineWorkingCopy(envelope(), options)).rejects.toThrow('routine_working_copy_limit');
+    expect(await listRoutineWorkingCopies()).toHaveLength(64);
+  });
+});
+
+describe('unified working-copy review repairs', () => {
+  const options = { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null };
+  const envelope = (): CloudRoutine => {
+    const asset = { id: 'song-asset', sha256: 'a'.repeat(64), bytes: 44, contentType: 'audio/wav' };
+    const track = { id: 'song', title: 'Song', duration: 2, firstBeat: 0, cues: [], bodyArea: '' };
+    const routine = newRoutine();
+    routine.tracks = [track];
+    routine.sequence = { crossfade: 1, walkIn: { name: 'Arrival', tracks: [{ ...track, id: 'arrival' }] } };
+    routine.filler = { mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording: {
+      id: 'recording', name: 'Loop', duration: 2, asset: { ...asset, id: 'filler-asset', sha256: 'b'.repeat(64) },
+    } };
+    return { routine, media: { song: asset, arrival: asset } };
+  };
+
+  it('retains the exact lost-ack submission through B save, caller mutations and reload', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    const submitted = structuredClone(first.envelope);
+    submitted.routine.savedAt = 123;
+    await recordRoutineSyncAttempt(id, 1, submitted, null);
+    const expected = structuredClone(submitted);
+    submitted.routine.name = 'Caller mutation';
+    const newer = structuredClone(first.envelope);
+    newer.routine.name = 'B';
+    newer.media.song = { ...newer.media.song!, id: 'new-song', sha256: 'c'.repeat(64) };
+    await saveRoutineWorkingCopy(newer, { ...options, expectedLocalVersion: 1, cloud: false });
+    vi.resetModules();
+    const reopened = await import('../frontend/src/offline');
+    const pending = await reopened.getRoutineWorkingCopy(id);
+    expect(pending?.cloudAttempt).toEqual({ envelope: expected, localVersion: 1, baseRevision: null });
+    await reopened.acknowledgeRoutineWorkingCopy(id, 1, { ...expected, routine: { ...expected.routine, revision: 1, savedAt: 456 } });
+    const rebased = await reopened.getRoutineWorkingCopy(id);
+    expect(rebased).toMatchObject({ localVersion: 2, pendingCloud: true, cloudBaseRevision: 1,
+      envelope: { media: newer.media, routine: { name: 'B', revision: 1 } } });
+    expect(rebased?.cloudAttempt).toBeUndefined();
+    expect(rebased?.savedAt).toBe(pending?.savedAt);
+    expect(rebased?.envelope.routine.savedAt).toBe(pending?.envelope.routine.savedAt);
+    await reopened.recordRoutineSyncAttempt(id, 2, rebased!.envelope, 1);
+    await reopened.acknowledgeRoutineWorkingCopy(id, 2, { ...rebased!.envelope, routine: { ...rebased!.envelope.routine, revision: 2 } });
+    expect(await reopened.getRoutineWorkingCopy(id)).toMatchObject({ pendingCloud: false, cloudBaseRevision: 2 });
+  });
+
+  it('requires attempt CAS, exact content and base, and cannot replace an outstanding A with B', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await expect(recordRoutineSyncAttempt(id, 2, first.envelope, null)).rejects.toThrow('routine_conflict');
+    await expect(recordRoutineSyncAttempt(id, 1, first.envelope, 1)).rejects.toThrow('routine_conflict');
+    await expect(recordRoutineSyncAttempt(id, 1, { ...first.envelope, routine: { ...first.envelope.routine, name: 'Forged' } }, null))
+      .rejects.toThrow('routine_conflict');
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    await recordRoutineSyncAttempt(id, 1, structuredClone(first.envelope), null);
+    await expect(recordRoutineSyncAttempt(id, 1, { ...first.envelope, routine: { ...first.envelope.routine, savedAt: 1 } }, null))
+      .rejects.toThrow('routine_conflict');
+    const newer = await saveRoutineWorkingCopy(first.envelope, { ...options, expectedLocalVersion: 1 });
+    await expect(recordRoutineSyncAttempt(id, 2, newer.envelope, null)).rejects.toThrow('routine_conflict');
+    expect((await getRoutineWorkingCopy(id))?.cloudAttempt).toEqual({ envelope: first.envelope, localVersion: 1, baseRevision: null });
+  });
+
+  it.each(['name', 'media', 'phase', 'filler', 'revision', 'id', 'localVersion', 'extra-media'] as const)(
+    'rejects a forged %s acknowledgment without caching or losing its attempt', async field => {
+      const first = await saveRoutineWorkingCopy(envelope(), options);
+      const id = first.envelope.routine.id;
+      await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+      const before = await getRoutineWorkingCopy(id);
+      const response = structuredClone(first.envelope);
+      if (field === 'name') response.routine.name = 'Unrelated';
+      if (field === 'media') response.media.song = { ...response.media.song!, id: 'other' };
+      if (field === 'phase') response.routine.sequence!.walkIn!.name = 'Other phase';
+      if (field === 'filler') response.routine.filler.recording!.asset.sha256 = 'c'.repeat(64);
+      if (field === 'revision') response.routine.revision = 9;
+      if (field === 'id') response.routine.id = 'other';
+      if (field === 'extra-media') response.media.extra = response.media.song!;
+      await expect(acknowledgeRoutineWorkingCopy(id, field === 'localVersion' ? 2 : 1, response)).rejects.toThrow();
+      expect(await getRoutineWorkingCopy(id)).toEqual(before);
+      expect(stores.cloudRoutineEnvelopes.size + stores.cloudRoutines.size + stores.cloudRoutineHistory.size).toBe(0);
+    });
+
+  it('compares canonical content without treating key order or server metadata as edits', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    const response = structuredClone(first.envelope);
+    response.routine = Object.fromEntries(Object.entries(response.routine).reverse()) as typeof response.routine;
+    response.media = Object.fromEntries(Object.entries(response.media).reverse());
+    response.routine.savedAt = 123;
+    response.routine.locked = true;
+    response.routine.published = true;
+    await acknowledgeRoutineWorkingCopy(id, 1, response);
+    expect(await getRoutineWorkingCopy(id)).toEqual({ ...first, envelope: response, cloudBaseRevision: 1, pendingCloud: false });
+  });
+
+  it('rejects conflicting song and filler descriptors for one immutable asset ID', async () => {
+    const value = envelope();
+    value.routine.filler.recording!.asset.id = value.media.song!.id;
+    await expect(saveRoutineWorkingCopy(value, options)).rejects.toThrow('invalid_media');
+    expect(stores.routineWorkingCopies.size).toBe(0);
+  });
+
+  it('does not infer an older submission without an attempt or accept mismatched legacy content', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, { ...first.envelope, routine: { ...first.envelope.routine, name: 'Other' } }))
+      .rejects.toThrow('routine_conflict');
+    const newer = await saveRoutineWorkingCopy(first.envelope, { ...options, expectedLocalVersion: 1 });
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, first.envelope)).rejects.toThrow('routine_conflict');
+    expect(await getRoutineWorkingCopy(id)).toEqual(newer);
+  });
+
+  it('does not rebase B to an unrelated cached head or bypass the outstanding attempt', async () => {
+    const first = await saveRoutineWorkingCopy({ routine: newRoutine(), media: {} }, { ...options, cloudBaseRevision: 1 });
+    const id = first.envelope.routine.id;
+    await recordRoutineSyncAttempt(id, 1, first.envelope, 1);
+    await saveRoutineWorkingCopy({ ...first.envelope, routine: { ...first.envelope.routine, name: 'B' } },
+      { ...options, expectedLocalVersion: 1, cloudBaseRevision: 1 });
+    const pending = await getRoutineWorkingCopy(id);
+    const other = { ...first.envelope, routine: { ...first.envelope.routine, name: 'Other writer', revision: 2 } };
+    await cacheCloudRoutine(other.routine);
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, other)).rejects.toThrow('routine_conflict');
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, { ...first.envelope, routine: { ...first.envelope.routine, revision: 2 } }))
+      .rejects.toThrow('routine_conflict');
+    await expect(saveRoutineWorkingCopy({ ...pending!.envelope, routine: { ...pending!.envelope.routine, revision: 2 } },
+      { ...options, expectedLocalVersion: 2, cloudBaseRevision: 2 })).rejects.toThrow('routine_conflict');
+    expect(await getRoutineWorkingCopy(id)).toEqual(pending);
+    expect(await getCloudRoutine(id)).toEqual(other.routine);
+  });
+
+  it('rolls back an attempt or acknowledgment completely on a failed working-copy write', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    storage.onRequest = (store, method) => { if (store === 'routineWorkingCopies' && method === 'put') throw new Error('QuotaExceededError'); };
+    await expect(recordRoutineSyncAttempt(id, 1, first.envelope, null)).rejects.toThrow('QuotaExceededError');
+    storage.onRequest = undefined;
+    expect(await getRoutineWorkingCopy(id)).toEqual(first);
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    const pending = await getRoutineWorkingCopy(id);
+    storage.onRequest = (store, method) => { if (store === 'routineWorkingCopies' && method === 'put') throw new Error('QuotaExceededError'); };
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, first.envelope)).rejects.toThrow('QuotaExceededError');
+    storage.onRequest = undefined;
+    expect(await getRoutineWorkingCopy(id)).toEqual(pending);
+    expect(stores.cloudRoutineEnvelopes.size + stores.cloudRoutines.size + stores.cloudRoutineHistory.size).toBe(0);
+  });
+
+  it('refreshes clean lock, unlock and publication metadata while retaining the local CAS handle', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await acknowledgeRoutineWorkingCopy(id, 1, first.envelope);
+    await clearActiveRoutine();
+    for (const metadata of [
+      { revision: 2, locked: true, published: false, savedAt: 123 },
+      { revision: 3, locked: false, published: false, savedAt: 456 },
+      { revision: 4, locked: false, published: true, savedAt: 789 },
+    ]) {
+      const authoritative = { ...first.envelope, routine: { ...first.envelope.routine, ...metadata } };
+      const refreshed = await reconcileRoutineWorkingCopy(authoritative);
+      expect(refreshed).toEqual({ ...first, envelope: authoritative, cloudBaseRevision: metadata.revision,
+        pendingCloud: false, savedAt: metadata.savedAt });
+      expect(await getCloudRoutine(id)).toEqual(authoritative.routine);
+      expect(stores.meta.get('active')).toBeUndefined();
+      refreshed!.envelope.routine.name = 'Caller only';
+      expect((await getRoutineWorkingCopy(id))?.envelope.routine.name).toBe(first.envelope.routine.name);
+    }
+  });
+
+  it('returns authoritative clean content, rejects stale heads and accepts the returned local handle', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await acknowledgeRoutineWorkingCopy(id, 1, first.envelope);
+    const head = { ...first.envelope, routine: { ...first.envelope.routine, name: 'New authoritative content', revision: 2 } };
+    const refreshed = await reconcileRoutineWorkingCopy(head);
+    expect(refreshed).toMatchObject({ localVersion: 1, cloudBaseRevision: 2, pendingCloud: false, envelope: head });
+    await expect(reconcileRoutineWorkingCopy(first.envelope)).rejects.toThrow('routine_conflict');
+    await expect(saveRoutineWorkingCopy(first.envelope, { ...options, expectedLocalVersion: 1, cloudBaseRevision: 1 }))
+      .rejects.toThrow('routine_conflict');
+    const saved = await saveRoutineWorkingCopy(refreshed!.envelope,
+      { ...options, expectedLocalVersion: refreshed!.localVersion, cloudBaseRevision: refreshed!.cloudBaseRevision });
+    expect(saved).toMatchObject({ localVersion: 2, pendingCloud: true, cloudBaseRevision: 2 });
+  });
+
+  it('never reconciles over pending work, clears attempts implicitly or creates missing records', async () => {
+    const value = envelope();
+    expect(await reconcileRoutineWorkingCopy(value)).toBeNull();
+    expect(stores.cloudRoutines.size).toBe(0);
+    const first = await saveRoutineWorkingCopy(value, options);
+    const id = value.routine.id;
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    const before = await getRoutineWorkingCopy(id);
+    await expect(reconcileRoutineWorkingCopy({ ...first.envelope, routine: { ...first.envelope.routine, revision: 2, locked: true } }))
+      .rejects.toThrow('routine_conflict');
+    expect(await getRoutineWorkingCopy(id)).toEqual(before);
+  });
+
+  it('deletes with CAS, frees capacity, retains media and unrelated active selection, and cannot resurrect on a late ack', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    for (let index = 1; index < 64; index++) await saveRoutineWorkingCopy({ routine: newRoutine(), media: {} }, options);
+    const selected = stores.meta.get('active');
+    stores.tracks.set('retain', { blob: new Blob(['synthetic']) });
+    const media = structuredClone(stores.tracks);
+    await expect(deleteRoutineWorkingCopy(id, 2)).rejects.toThrow('routine_conflict');
+    await expect(saveRoutineWorkingCopy(envelope(), options)).rejects.toThrow('routine_working_copy_limit');
+    await deleteRoutineWorkingCopy(id, 1);
+    expect(await getRoutineWorkingCopy(id)).toBeNull();
+    expect(stores.meta.get('active')).toBe(selected);
+    expect(stores.tracks).toEqual(media);
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, first.envelope)).rejects.toThrow('routine_conflict');
+    expect(stores.cloudRoutines.size + stores.cloudRoutineEnvelopes.size).toBe(0);
+    await saveRoutineWorkingCopy(envelope(), options);
+    expect(await listRoutineWorkingCopies()).toHaveLength(64);
+  });
+
+  it('preserves a newer copy when local deletion loses CAS after simulated cloud success', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    const remoteDelete = deferred<void>();
+    const completion = remoteDelete.promise.then(() => deleteRoutineWorkingCopy(id, 1));
+    const newer = await saveRoutineWorkingCopy({ ...first.envelope, routine: { ...first.envelope.routine, name: 'B' } },
+      { ...options, expectedLocalVersion: 1 });
+    remoteDelete.resolve();
+    await expect(completion).rejects.toThrow('routine_conflict');
+    expect(await getRoutineWorkingCopy(id)).toEqual(newer);
+    expect(stores.meta.get('active')).toBe(id);
+    await deleteRoutineWorkingCopy(id, 2);
+    expect(stores.meta.get('active')).toBeUndefined();
+    await expect(deleteRoutineWorkingCopy(id, 2)).rejects.toThrow('routine_conflict');
+  });
+
+  it('rolls back working deletion when clearing its active pointer fails', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    const before = await getRoutineWorkingCopy(id);
+    storage.onRequest = (store, method) => { if (store === 'meta' && method === 'delete') throw new Error('QuotaExceededError'); };
+    await expect(deleteRoutineWorkingCopy(id, 1)).rejects.toThrow('QuotaExceededError');
+    storage.onRequest = undefined;
+    expect(await getRoutineWorkingCopy(id)).toEqual(before);
+    expect(stores.meta.get('active')).toBe(id);
+  });
+
+  it('rejects a tombstone race before recording or caching any acknowledgment', async () => {
+    const first = await saveRoutineWorkingCopy(envelope(), options);
+    const id = first.envelope.routine.id;
+    await recordRoutineSyncAttempt(id, 1, first.envelope, null);
+    const before = await getRoutineWorkingCopy(id);
+    stores.meta.set(JSON.stringify(['deleted', 'routine', id]), '2');
+    await expect(recordRoutineSyncAttempt(id, 1, first.envelope, null)).rejects.toThrow('routine_conflict');
+    await expect(acknowledgeRoutineWorkingCopy(id, 1, first.envelope)).rejects.toThrow('routine_conflict');
+    expect(await reconcileRoutineWorkingCopy(first.envelope)).toBeNull();
+    expect(await getRoutineWorkingCopy(id)).toEqual(before);
+    expect(stores.cloudRoutines.size + stores.cloudRoutineEnvelopes.size).toBe(0);
+    await deleteRoutineWorkingCopy(id, 1);
+    expect(await getRoutineWorkingCopy(id)).toBeNull();
+  });
+
+  it('removes a matching clean local working copy in the normal delete transaction', async () => {
+    const saved = await saveRoutine(newRoutine(), null);
+    await saveRoutineWorkingCopy({ routine: saved, media: {} }, { ...options, cloud: false });
+    await deleteRoutine(saved.id, saved.revision);
+    expect(await getRoutineWorkingCopy(saved.id)).toBeNull();
+    expect(await getRoutine()).toBeNull();
+    expect(await getRoutine(saved.id, saved.revision)).toEqual(saved);
+  });
+
+  it.each(['pending', 'different-content', 'cloud-backed', 'attempt'] as const)(
+    'refuses normal local deletion of %s working state without hiding it', async state => {
+      const saved = await saveRoutine(newRoutine(), null);
+      const working = await saveRoutineWorkingCopy({ routine: { ...saved, name: state === 'different-content' ? 'B' : saved.name }, media: {} },
+        { ...options, cloud: state === 'pending' || state === 'attempt', cloudBaseRevision: state === 'cloud-backed' ? 1 : null });
+      if (state === 'attempt') await recordRoutineSyncAttempt(saved.id, 1, working.envelope, null);
+      const before = await getRoutineWorkingCopy(saved.id);
+      await expect(deleteRoutine(saved.id, saved.revision)).rejects.toThrow('routine_conflict');
+      expect(await getRoutineWorkingCopy(saved.id)).toEqual(before);
+      expect(await getRoutine(saved.id)).toEqual(saved);
+      expect(stores.meta.get('active')).toBe(saved.id);
+    });
+
+  it('lists persisted cloud heads and only the latest local publication per ID across reload', async () => {
+    const demo = await createDemoRoutine();
+    const saved = await saveRoutine(demo, null);
+    await publishRoutine(saved.id, 1);
+    const edited = await saveRoutine({ ...(await getRoutine(saved.id))!, name: 'Second publication' }, 2);
+    const published = await publishRoutine(saved.id, edited.revision);
+    const draft = await saveRoutine({ ...(await getRoutine(saved.id))!, name: 'Unpublished edit' }, published.revision);
+    await cacheCloudRoutine(published);
+    await cacheCloudRoutine(draft);
+    const other = { ...newRoutine(), published: true };
+    await cacheCloudRoutine(other);
+    vi.resetModules();
+    const reopened = await import('../frontend/src/offline');
+    const publications = await reopened.listRoutinePublications();
+    expect(publications).toEqual([published]);
+    const heads = await reopened.listCloudRoutines();
+    expect(heads).toHaveLength(3);
+    expect(heads).toEqual(expect.arrayContaining([draft, published, other]));
+    publications[0]!.name = 'Caller change';
+    heads[0]!.name = 'Caller change';
+    expect(await reopened.listRoutinePublications()).toEqual([published]);
+    expect(await reopened.getCloudRoutine(draft.id)).toEqual(draft);
+    await reopened.deleteRoutine(saved.id, draft.revision);
+    expect(await reopened.listRoutinePublications()).toEqual([]);
+    expect(await reopened.getRoutine(saved.id, published.revision, true)).toEqual(published);
+    expect(await reopened.listCloudRoutines()).toHaveLength(3);
+  });
+
+  it.each(['cloudRoutines', 'cloudRoutineHistory', 'routineHistory'] as const)('rejects invalid persisted %s chooser data', async store => {
+    stores[store].set('bad', { ...newRoutine(), name: null, published: true });
+    await expect(store === 'routineHistory' ? listRoutinePublications() : listCloudRoutines()).rejects.toThrow('invalid_routine');
+  });
+});
+
+describe('cached cloud routine chooser', () => {
+  it.each(['publication-first', 'draft-first'])('lists both saved versions after caching %s', async order => {
+    const publication = { ...newRoutine(), name: 'Published', revision: 2, published: true, savedAt: 2000 };
+    const draft = { ...publication, name: 'Draft', revision: 3, published: false, savedAt: 3000 };
+    for (const routine of order === 'publication-first' ? [publication, draft] : [draft, publication]) {
+      await cacheCloudRoutine(routine);
+    }
+    const values = await listCloudRoutines();
+    expect(values).toHaveLength(2);
+    expect(values).toEqual(expect.arrayContaining([publication, draft]));
+    for (const value of values) value.name = 'Caller change';
+    expect(await listCloudRoutines()).toEqual(expect.arrayContaining([publication, draft]));
+    expect(await getCloudRoutine(draft.id)).toEqual(draft);
+    expect(await getCloudRoutine(publication.id, 2, true)).toEqual(publication);
+    expect(await getCloudRoutine(draft.id, 3, false)).toEqual(draft);
+    expect(await getCloudRoutine(draft.id, 3, true)).toBeNull();
+    expect(await getCloudRoutine(publication.id, 2, false)).toBeNull();
+  });
+
+  it('chooses only the latest revision of each status per ID despite an older current draft', async () => {
+    const routine = newRoutine();
+    const olderPublication = { ...routine, revision: 2, published: true, savedAt: 2000 };
+    const olderDraft = { ...routine, revision: 3, savedAt: 3000 };
+    const publication = { ...routine, revision: 4, published: true, savedAt: 4000 };
+    const draft = { ...publication, published: false };
+    const other = { ...newRoutine(), published: true, savedAt: 5000 };
+    for (const value of [olderPublication, olderDraft, draft, publication, other]) await cacheCloudRoutine(value);
+    stores.cloudRoutines.set(routine.id, olderDraft);
+    const values = await listCloudRoutines();
+    expect(values).toHaveLength(3);
+    expect(values).toEqual(expect.arrayContaining([draft, publication, other]));
+    expect(await getCloudRoutine(routine.id, 2, true)).toEqual(olderPublication);
+    expect(await getCloudRoutine(routine.id, 3, false)).toEqual(olderDraft);
+    expect(await getCloudRoutine(routine.id, 4, true)).toEqual(publication);
+    expect(await getCloudRoutine(routine.id, 4, false)).toEqual(draft);
+    expect(await getCloudRoutine(routine.id)).toEqual(olderDraft);
+  });
+
+  it('includes current-only legacy cache entries without treating local or working copies as Cloud publications', async () => {
+    const current = { ...newRoutine(), revision: 2, published: true, savedAt: 2000 };
+    stores.cloudRoutines.set(current.id, current);
+    const working = await saveRoutineWorkingCopy({ routine: newRoutine(), media: {} },
+      { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null });
+    const local = { ...newRoutine(), published: true };
+    stores.routines.set(local.id, local);
+    stores.routineHistory.set(JSON.stringify([local.id, local.revision, true]), local);
+    const oldCopy = { ...working, envelope: { ...working.envelope,
+      routine: { ...working.envelope.routine, published: true } } };
+    stores.routineWorkingCopies.set('old-copy', oldCopy);
+    const before = structuredClone(stores);
+    expect(await listCloudRoutines()).toEqual([current]);
+    expect(await listRoutinePublications()).toEqual([local]);
+    expect(await getRoutineWorkingCopy(working.envelope.routine.id)).toEqual(working);
+    expect(stores).toEqual(before);
+  });
+});
+
+describe('final review exact local selection', () => {
+  async function publication() {
+    const saved = await saveRoutine(await createDemoRoutine(), null);
+    const published = await publishRoutine(saved.id, saved.revision);
+    const draft = await saveRoutine({ ...(await getRoutine(saved.id))!, name: 'Newer draft' }, published.revision);
+    return { published, draft, selection: { id: published.id, revision: published.revision, published: true } };
+  }
+
+  it('persists Close/Open Published/Reload without selecting the newer draft or working copy', async () => {
+    const { published, draft, selection } = await publication();
+    stores.routineWorkingCopies.set(draft.id, { envelope: { routine: draft, media: {} }, localVersion: 7 });
+    await clearActiveRoutine();
+    expect(await getRoutine()).toBeNull();
+    await setActiveRoutineSelection(selection);
+    vi.resetModules();
+    const reopened = await import('../frontend/src/offline');
+    expect(await reopened.getActiveRoutineSelection()).toEqual(selection);
+    expect(await reopened.getRoutine()).toEqual(published);
+    expect(await reopened.getRoutine(draft.id)).toEqual(draft);
+    await reopened.clearActiveRoutine();
+    expect(await reopened.getActiveRoutineSelection()).toBeNull();
+    expect(await reopened.getRoutine()).toBeNull();
+    expect(stores.meta.has('activeRoutineSelection')).toBe(false);
+    expect(await reopened.getRoutine(draft.id, published.revision, true)).toEqual(published);
+  });
+
+  it.each(['missing', 'wrong-id', 'wrong-revision', 'wrong-publication'] as const)(
+    'does not fall back from a %s selected snapshot to draft or working content', async state => {
+      const { published, draft, selection } = await publication();
+      await setActiveRoutineSelection(selection);
+      stores.routineWorkingCopies.set(draft.id, { envelope: { routine: draft, media: {} }, localVersion: 1 });
+      stores.routineHistory.delete(JSON.stringify([published.id, published.revision]));
+      const key = JSON.stringify([published.id, published.revision, true]);
+      if (state === 'missing') stores.routineHistory.delete(key);
+      else stores.routineHistory.set(key, { ...published,
+        ...(state === 'wrong-id' ? { id: 'other' } : state === 'wrong-revision' ? { revision: 99 } : { published: false }) });
+      expect(await getRoutine()).toBeNull();
+      await expect(setActiveRoutineSelection(selection)).rejects.toThrow('routine_not_found');
+      expect(await getActiveRoutineSelection()).toEqual(selection);
+    });
+
+  it.each(['select', 'save', 'working-save'] as const)('clears the old publication on draft %s', async action => {
+    const { draft, selection } = await publication();
+    await setActiveRoutineSelection(selection);
+    if (action === 'select') await setActiveRoutine(draft.id);
+    else if (action === 'save') await saveRoutine(draft, draft.revision);
+    else await saveRoutineWorkingCopy({ routine: { ...draft, tracks: [] }, media: {} },
+      { expectedLocalVersion: null, cloud: false, cloudBaseRevision: null });
+    expect(await getActiveRoutineSelection()).toBeNull();
+    expect(await getRoutine()).toMatchObject({ id: draft.id, published: false });
+  });
+
+  it('selects an exact saved draft without following later working edits and snapshots caller input', async () => {
+    const saved = await saveRoutine(newRoutine(), null);
+    const selection = { id: saved.id, revision: saved.revision, published: false };
+    const pending = setActiveRoutineSelection(selection);
+    selection.id = 'caller-change';
+    selection.revision = 99;
+    await pending;
+    stores.routineWorkingCopies.set(saved.id, { envelope: { routine: { ...saved, name: 'Working edit' }, media: {} } });
+    const selected = await getActiveRoutineSelection();
+    expect(selected).toEqual({ id: saved.id, revision: saved.revision, published: false });
+    selected!.revision = 100;
+    expect(await getRoutine()).toEqual(saved);
+    expect((await getActiveRoutineSelection())?.revision).toBe(saved.revision);
+  });
+
+  it('requires local publication history instead of a cloud publication or unrecorded published head', async () => {
+    const { published, draft, selection } = await publication();
+    await cacheCloudRoutine(published);
+    stores.routineHistory.clear();
+    stores.routines.set(published.id, published);
+    const before = structuredClone(stores);
+    await expect(setActiveRoutineSelection(selection)).rejects.toThrow('routine_not_found');
+    expect(stores).toEqual(before);
+    expect(await getActiveRoutineSelection()).toBeNull();
+    expect(stores.meta.get('active')).toBe(draft.id);
+  });
+
+  it('rolls back the active ID when writing the exact pointer fails', async () => {
+    const { selection } = await publication();
+    await saveRoutine(newRoutine(), null);
+    const before = structuredClone(stores);
+    let writes = 0;
+    storage.onRequest = (store, method) => {
+      if (store === 'meta' && method === 'put' && ++writes === 2) throw new Error('QuotaExceededError');
+    };
+    await expect(setActiveRoutineSelection(selection)).rejects.toThrow('QuotaExceededError');
+    expect(stores).toEqual(before);
+  });
+});
+
+describe('final review combined local deletion', () => {
+  const options = { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null };
+  async function pendingCopy() {
+    const saved = await saveRoutine(newRoutine(), null);
+    const first = await saveRoutineWorkingCopy({ routine: { ...saved, name: 'Pending first save' }, media: {} }, options);
+    await recordRoutineSyncAttempt(saved.id, 1, first.envelope, null);
+    const newer = await saveRoutineWorkingCopy({ ...first.envelope, routine: { ...first.envelope.routine, name: 'New local edits' } },
+      { ...options, expectedLocalVersion: 1 });
+    return { saved, first, newer };
+  }
+
+  it('atomically removes pending changed work and its attempt, retains legacy history and all audio, and frees capacity', async () => {
+    const { saved, first } = await pendingCopy();
+    const audio = await createDemoRoutine();
+    const filler = await fillerFixture();
+    stores.fillerRecordings.set(filler.id, filler);
+    stores.tracks.set(`filler-${filler.asset.id}`, { blob: generateDemoWav(2, 100, 'soft') });
+    for (let index = 1; index < 64; index++) await saveRoutineWorkingCopy({ routine: newRoutine(), media: {} }, options);
+    await expect(saveRoutineWorkingCopy({ routine: newRoutine(), media: {} }, options)).rejects.toThrow('routine_working_copy_limit');
+    await setActiveRoutine(saved.id);
+    const tracks = structuredClone(stores.tracks);
+    const recordings = structuredClone(stores.fillerRecordings);
+    const deleted = vi.fn();
+    storage.onRequest = (store, method) => { if (store === 'routineWorkingCopies' && method === 'delete') deleted(); };
+    const transactions = storage.transactions;
+    await deleteRoutineAndWorkingCopy(saved.id, saved.revision, 2);
+    expect(storage.transactions - transactions).toBe(1);
+    expect(deleted).toHaveBeenCalledTimes(1);
+    expect(await getRoutineWorkingCopy(saved.id)).toBeNull();
+    expect(await getRoutine()).toBeNull();
+    expect(await getRoutine(saved.id)).toBeNull();
+    expect(await getRoutine(saved.id, saved.revision, false)).toEqual(saved);
+    expect(stores.routines.get(saved.id)).toEqual(saved);
+    expect(stores.tracks).toEqual(tracks);
+    expect(stores.fillerRecordings).toEqual(recordings);
+    expect((await getReadiness(audio)).ready).toBe(true);
+    await expect(acknowledgeRoutineWorkingCopy(saved.id, 1, first.envelope)).rejects.toThrow('routine_conflict');
+    await expect(saveRoutineWorkingCopy(first.envelope, options)).rejects.toThrow('routine_conflict');
+    await saveRoutineWorkingCopy({ routine: newRoutine(), media: {} }, options);
+    expect(await listRoutineWorkingCopies()).toHaveLength(64);
+    await expect(deleteRoutineAndWorkingCopy(saved.id, saved.revision, 2)).rejects.toThrow('routine_conflict');
+    expect(deleted).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts null only for an absent legacy head and preserves another exact active selection', async () => {
+    const working = await saveRoutineWorkingCopy({ routine: newRoutine(), media: {} }, options);
+    const other = await saveRoutine(await createDemoRoutine(), null);
+    const published = await publishRoutine(other.id, other.revision);
+    const selection = { id: other.id, revision: published.revision, published: true };
+    await setActiveRoutineSelection(selection);
+    await deleteRoutineAndWorkingCopy(working.envelope.routine.id, null, 1);
+    expect(await getRoutineWorkingCopy(working.envelope.routine.id)).toBeNull();
+    expect(await getActiveRoutineSelection()).toEqual(selection);
+    expect(await getRoutine()).toEqual(published);
+    await expect(saveRoutineWorkingCopy(working.envelope, options)).rejects.toThrow('routine_conflict');
+  });
+
+  it.each([[null, 2], [2, 2], [1, 1], [1, 3]] as const)(
+    'rejects stale head/local CAS %s/%s without hiding or removing either record', async (head, local) => {
+      const { saved } = await pendingCopy();
+      const before = structuredClone(stores);
+      await expect(deleteRoutineAndWorkingCopy(saved.id, head, local)).rejects.toThrow('routine_conflict');
+      expect(stores).toEqual(before);
+    });
+
+  it.each(['head-lock', 'working-lock', 'head-publication', 'working-publication', 'cloud-backed', 'missing-copy', 'tombstone'] as const)(
+    'rejects %s before deleting any confirmed local work', async state => {
+      const { saved, newer } = await pendingCopy();
+      if (state === 'head-lock') stores.routines.set(saved.id, { ...saved, locked: true });
+      if (state === 'head-publication') stores.routines.set(saved.id, { ...saved, published: true });
+      if (state === 'working-lock' || state === 'working-publication') stores.routineWorkingCopies.set(saved.id,
+        { ...newer, envelope: { ...newer.envelope, routine: { ...newer.envelope.routine,
+          locked: state === 'working-lock', published: state === 'working-publication' } } });
+      if (state === 'cloud-backed') stores.routineWorkingCopies.set(saved.id, { ...newer, cloudBaseRevision: 1 });
+      if (state === 'missing-copy') stores.routineWorkingCopies.delete(saved.id);
+      if (state === 'tombstone') stores.meta.set(JSON.stringify(['deleted', 'routine', saved.id]), '2');
+      const before = structuredClone(stores);
+      await expect(deleteRoutineAndWorkingCopy(saved.id, saved.revision, 2)).rejects.toThrow(
+        state.endsWith('-lock') ? 'routine_locked' : state.endsWith('-publication') ? 'routine_published' : 'routine_conflict');
+      expect(stores).toEqual(before);
+    });
+
+  it.each(['routineWorkingCopies:delete', 'routineHistory:put', 'meta:put', 'meta:delete'])(
+    'rolls back head history, tombstone, attempt and selection when %s fails', async target => {
+      const { saved } = await pendingCopy();
+      stores.routineHistory.clear();
+      const before = structuredClone(stores);
+      storage.onRequest = (store, method) => { if (`${store}:${method}` === target) throw new Error('QuotaExceededError'); };
+      await expect(deleteRoutineAndWorkingCopy(saved.id, saved.revision, 2)).rejects.toThrow('QuotaExceededError');
+      expect(stores).toEqual(before);
+      expect(storage.aborts).toBe(1);
+    });
+
+  it.each([undefined, 0, -1, 1.5, NaN, Infinity, '1'])(
+    'rejects invalid head and local CAS handles %s before opening storage', async value => {
+      await expect(deleteRoutineAndWorkingCopy('missing', value as number, 1)).rejects.toThrow('routine_conflict');
+      await expect(deleteRoutineAndWorkingCopy('missing', null, value as number)).rejects.toThrow('routine_conflict');
+      expect(storage.opens).toBe(0);
+    });
+
+  it('lets only one concurrent confirmed delete remove the working copy', async () => {
+    const { saved } = await pendingCopy();
+    const deleted = vi.fn();
+    storage.onRequest = (store, method) => { if (store === 'routineWorkingCopies' && method === 'delete') deleted(); };
+    const outcomes = await Promise.allSettled([
+      deleteRoutineAndWorkingCopy(saved.id, saved.revision, 2), deleteRoutineAndWorkingCopy(saved.id, saved.revision, 2),
+    ]);
+    expect(outcomes.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect(deleted).toHaveBeenCalledTimes(1);
+    expect(await getRoutineWorkingCopy(saved.id)).toBeNull();
+  });
+
+  it.each(['legacy', 'combined', 'cloud-copy'] as const)('clears a matching publication pointer in the %s delete path', async action => {
+    const saved = await saveRoutine(await createDemoRoutine(), null);
+    const published = await publishRoutine(saved.id, saved.revision);
+    const draft = (await getRoutine(saved.id))!;
+    stores.routineWorkingCopies.set(saved.id, { envelope: { routine: draft, media: {} }, localVersion: 1,
+      cloudBaseRevision: null, pendingCloud: false, savedAt: draft.savedAt });
+    await setActiveRoutineSelection({ id: saved.id, revision: published.revision, published: true });
+    if (action === 'legacy') await deleteRoutine(saved.id, draft.revision);
+    else if (action === 'combined') await deleteRoutineAndWorkingCopy(saved.id, draft.revision, 1);
+    else await deleteRoutineWorkingCopy(saved.id, 1);
+    expect(await getActiveRoutineSelection()).toBeNull();
+    expect(await getRoutine()).toBeNull();
+    expect(stores.meta.has('activeRoutineSelection')).toBe(false);
+    expect(await getRoutine(saved.id, published.revision, true)).toEqual(published);
+  });
+});
+
+describe('final review cached class enumeration', () => {
+  it('returns detached latest draft and publication heads without network, local entries or cache mutation across reload', async () => {
+    const setup: ClassSetup = { schemaVersion: 1, id: 'cached-class', name: 'Cached class', revision: 1,
+      locked: false, published: false, routine: { id: 'routine', revision: 1, published: true }, crossfade: 1 };
+    await cacheClassSetup(setup);
+    await cacheClassSetup({ ...setup, revision: 2, published: true });
+    const published = { ...setup, revision: 3, published: true };
+    const draft = { ...setup, revision: 4 };
+    await cacheClassSetup(published);
+    await cacheClassSetup(draft);
+    const onlyPublished = { ...setup, id: 'published-only', published: true };
+    await cacheClassSetup(onlyPublished);
+    stores.classSetups.set('local-only', { ...setup, id: 'local-only' });
+    const before = structuredClone(stores);
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    vi.resetModules();
+    const reopened = await import('../frontend/src/offline');
+    const heads = await reopened.listCachedClassSetups();
+    expect(heads).toHaveLength(3);
+    expect(heads).toEqual(expect.arrayContaining([draft, published, onlyPublished]));
+    heads[0].name = 'Caller edit';
+    heads[0].routine.revision = 99;
+    expect(await reopened.listCachedClassSetups()).toEqual(expect.arrayContaining([draft, published, onlyPublished]));
+    expect(stores).toEqual(before);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on invalid cached class records', async () => {
+    stores.cloudClassSetups.set('bad', { id: 'invalid' });
+    await expect(listCachedClassSetups()).rejects.toThrow('invalid_class_setup');
+  });
+});
+
+describe('unified save timestamps and unknown BPM', () => {
+  it('stamps local commits without making savedAt editable lock content', async () => {
+    const routine = newRoutine();
+    const saved = await saveRoutine(routine, null);
+    expect(saved.savedAt).toBeGreaterThan(0);
+    expect(routine.savedAt).toBeUndefined();
+    const locked = await saveRoutine(saved, saved.revision, 'lock');
+    const unlocked = await saveRoutine({ ...locked, savedAt: 1 }, locked.revision, 'unlock');
+    expect(unlocked.locked).toBe(false);
+    expect(unlocked.savedAt).toBeGreaterThan(1);
+  });
+
+  it('keeps imported BPM unknown while allowing timestamp and interval cues', async () => {
+    browserAudio(2);
+    const track = await storeTrack(new File(['synthetic audio'], 'synthetic.wav', { type: 'audio/wav' }));
+    expect(track.bpm).toBeUndefined();
+    const routine = newRoutine();
+    routine.tracks = [{ ...track, cues: [
+      { id: 'time', anchor: { kind: 'timestamp', seconds: 0 }, note: 'Start' },
+      { id: 'interval', anchor: { kind: 'interval', seconds: 1 }, note: 'Move' },
+    ] }];
+    expect(validateRoutine(routine)).toEqual([]);
+    routine.tracks[0]!.cues.push({ id: 'count', anchor: { kind: 'count', count: 1 }, note: 'Count' });
+    expect(validateRoutine(routine)).not.toEqual([]);
   });
 });
 
@@ -444,7 +1271,7 @@ describe('local package storage', () => {
     expect(await getRoutine()).toEqual(legacy);
     expect(await getRoutine(id)).toEqual(legacy);
     expect(await listRoutines()).toEqual([legacy]);
-    expect(storage.version).toBe(6);
+    expect(storage.version).toBe(7);
     expect(stores.meta.get('active')).toBe(id);
     expect(stores.tracks.has('legacy-track')).toBe(true);
   });
@@ -462,10 +1289,10 @@ describe('local package storage', () => {
 
   it('reads saved routines and blobs after a module reload', async () => {
     const routine = await createDemoRoutine();
-    await saveRoutine(routine, null);
+    const saved = await saveRoutine(routine, null);
     vi.resetModules();
     const reloaded = await import('../frontend/src/offline');
-    expect(await reloaded.getRoutine()).toEqual(routine);
+    expect(await reloaded.getRoutine()).toEqual(saved);
     expect(await reloaded.getReadiness(routine)).toEqual({ ready: true, missing: [] });
   });
 
@@ -528,7 +1355,7 @@ describe('local routine publication and deletion', () => {
     expect(unlocked).toMatchObject({ revision: 8, locked: false, published: false });
     expect(await getRoutine(legacy.id, 7)).toEqual(legacy);
     expect(await getRoutine(legacy.id, 7, false)).toEqual(head);
-    expect(storage.version).toBe(6);
+    expect(storage.version).toBe(7);
   });
 
   it('requires explicit publication and rejects empty routines without moving the head', async () => {
@@ -645,7 +1472,7 @@ describe('local routine publication and deletion', () => {
     const reloaded = await import('../frontend/src/offline');
     expect(await reloaded.getRoutine(saved.id)).toBeNull();
     expect(await reloaded.getRoutine(saved.id, 2)).toEqual(publication);
-    expect(storage.version).toBe(6);
+    expect(storage.version).toBe(7);
   });
 });
 
@@ -898,7 +1725,7 @@ describe('cloud package storage', () => {
     const pending = cacheCloudRoutine(cloud);
     cloud.name = 'Mutated after invocation';
     await pending;
-    expect(storage.version).toBe(6);
+    expect(storage.version).toBe(7);
     expect(await getRoutine()).toEqual(local);
     expect(await listRoutines()).toEqual([local]);
     expect(await getCloudRoutine(local.id)).toEqual(expected);
@@ -1092,7 +1919,7 @@ describe('custom filler storage', () => {
     stores.tracks.set('existing', { blob, bytes: blob.size, duration: 2, sha256: await sha256(blob) });
     if (version === 3) stores.cloudRoutines.set(routine.id, routine);
     expect(await listFillerRecordings()).toEqual([]);
-    expect(storage.version).toBe(6);
+    expect(storage.version).toBe(7);
     expect(await getRoutine()).toEqual(routine);
     expect(await (await getTrackBlob('existing'))!.arrayBuffer()).toEqual(await blob.arrayBuffer());
     if (version === 3) expect(await getCloudRoutine(routine.id)).toEqual(routine);
@@ -1270,8 +2097,11 @@ describe('hosted mutation ownership', () => {
   const mutations = ['storeTrack', 'saveRoutine', 'setActiveRoutine', 'removeTrack', 'createDemoRoutine',
     'cacheCloudTrack', 'cacheCloudRoutine', 'addFillerRecording', 'removeFillerRecording', 'cacheFillerRecording',
     'saveMusicPlaylist', 'saveClassSetup', 'cacheMusicPlaylist', 'cacheClassSetup',
-    'deleteRoutine', 'deleteMusicPlaylist', 'deleteClassSetup', 'saveDraftRecovery', 'removeDraftRecovery'] as const;
-  const guardedOperations = [...mutations, 'publishRoutine', 'listDraftRecoveries'] as const;
+    'deleteRoutine', 'deleteMusicPlaylist', 'deleteClassSetup', 'saveDraftRecovery', 'removeDraftRecovery',
+    'saveRoutineWorkingCopy', 'acknowledgeRoutineWorkingCopy', 'clearActiveRoutine', 'recordRoutineSyncAttempt',
+    'reconcileRoutineWorkingCopy', 'deleteRoutineWorkingCopy', 'deleteRoutineAndWorkingCopy', 'setActiveRoutineSelection'] as const;
+  const guardedOperations = [...mutations, 'publishRoutine', 'listDraftRecoveries', 'getRoutineWorkingCopy', 'listRoutineWorkingCopies',
+    'listCloudRoutines', 'listRoutinePublications', 'listCachedClassSetups', 'getActiveRoutineSelection'] as const;
   const file = () => new File(['synthetic audio'], 'synthetic.wav', { type: 'audio/wav' });
   let cloudHash: string;
   let custom: FillerRecording;
@@ -1284,6 +2114,23 @@ describe('hosted mutation ownership', () => {
     events.dispatchEvent(Object.assign(new Event('storage'), { key, oldValue, newValue, storageArea: sessionStorage }));
   };
   const mutate = (name: typeof guardedOperations[number]) => {
+    if (name === 'saveRoutineWorkingCopy') return offline.saveRoutineWorkingCopy({ routine: newRoutine(), media: {} },
+      { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null });
+    if (name === 'acknowledgeRoutineWorkingCopy') return offline.acknowledgeRoutineWorkingCopy('working', 1,
+      { routine: { ...newRoutine(), id: 'working' }, media: {} });
+    if (name === 'clearActiveRoutine') return offline.clearActiveRoutine();
+    if (name === 'getRoutineWorkingCopy') return offline.getRoutineWorkingCopy('working');
+    if (name === 'listRoutineWorkingCopies') return offline.listRoutineWorkingCopies();
+    if (name === 'recordRoutineSyncAttempt') return offline.recordRoutineSyncAttempt('working', 1,
+      { routine: { ...newRoutine(), id: 'working' }, media: {} }, null);
+    if (name === 'reconcileRoutineWorkingCopy') return offline.reconcileRoutineWorkingCopy({ routine: newRoutine(), media: {} });
+    if (name === 'deleteRoutineWorkingCopy') return offline.deleteRoutineWorkingCopy('working', 1);
+    if (name === 'deleteRoutineAndWorkingCopy') return offline.deleteRoutineAndWorkingCopy('working', null, 1);
+    if (name === 'setActiveRoutineSelection') return offline.setActiveRoutineSelection({ id: 'routine-guard', revision: 1, published: true });
+    if (name === 'getActiveRoutineSelection') return offline.getActiveRoutineSelection();
+    if (name === 'listCachedClassSetups') return offline.listCachedClassSetups();
+    if (name === 'listCloudRoutines') return offline.listCloudRoutines();
+    if (name === 'listRoutinePublications') return offline.listRoutinePublications();
     if (name === 'saveDraftRecovery') return offline.saveDraftRecovery({ id: 'guarded-recovery', kind: 'routine', source: 'household',
       value: newRoutine(), media: {}, baseRevision: null, updatedAt: 1 });
     if (name === 'removeDraftRecovery') return offline.removeDraftRecovery('guarded-recovery');
@@ -1336,6 +2183,18 @@ describe('hosted mutation ownership', () => {
     expect(await offline.getRoutine()).toEqual(unlocked);
     expect(await offline.getTrackBlob(track.id)).toBeInstanceOf(Blob);
     expect(listen.mock.calls.map(([name]) => name)).toEqual(['storage', 'pagehide', hostedInvalidationEvent]);
+  });
+
+  it.each(['account', 'reset'])('rejects listCloudRoutines when %s changes during its history read', async reason => {
+    const publication = { ...newRoutine(), revision: 2, published: true };
+    await offline.cacheCloudRoutine(publication);
+    await offline.cacheCloudRoutine({ ...publication, revision: 3, published: false });
+    storage.onRequest = (store, method) => {
+      if (store !== 'cloudRoutineHistory' || method !== 'getAll') return;
+      if (reason === 'account') markers.set(hostedUserKey, 'owner-B');
+      else markers.set(hostedResetKey, 'reset-generation');
+    };
+    await expect(offline.listCloudRoutines()).rejects.toThrow('hosted_session_invalidated');
   });
 
   it.each(guardedOperations)('rejects %s at invocation for missing owner, any reset, or unavailable storage', async name => {
@@ -1520,6 +2379,58 @@ describe('hosted mutation ownership', () => {
     expect(stores.meta.size).toBe(0);
     expect(stores.cloudRoutines.size).toBe(0);
   });
+
+  it.each(['cache-list', 'selection-read', 'selected-routine-read'] as const)(
+    'rejects final review %s after account switch during a readonly transaction', async operation => {
+      const routine = await offline.saveRoutine(await offline.createDemoRoutine(), null);
+      const published = await offline.publishRoutine(routine.id, routine.revision);
+      await offline.setActiveRoutineSelection({ id: routine.id, revision: published.revision, published: true });
+      await offline.cacheClassSetup({ schemaVersion: 1, id: 'private-class', name: 'Account A class', revision: 1,
+        locked: false, published: true, routine: { id: routine.id, revision: published.revision, published: true }, crossfade: 0 });
+      const before = structuredClone(stores);
+      const began = deferred<void>();
+      const resume = deferred<void>();
+      storage.onRequest = async (store, method) => {
+        if (operation === 'cache-list' ? store === 'cloudClassSetups' && method === 'getAll' : store === 'meta' && method === 'get') {
+          began.resolve(); await resume.promise;
+        }
+      };
+      const outcomes = Promise.allSettled([operation === 'cache-list' ? offline.listCachedClassSetups() :
+        operation === 'selection-read' ? offline.getActiveRoutineSelection() : offline.getRoutine()]);
+      await began.promise;
+      markers.set(hostedUserKey, 'owner-B');
+      resume.resolve();
+      expect((await outcomes)[0]).toMatchObject({ status: 'rejected', reason: new Error('hosted_session_invalidated') });
+      expect(stores).toEqual(before);
+    });
+
+  it.each(['combined-delete', 'exact-selection', 'close-selection'] as const)(
+    'rolls back final review %s after staged writes and preserves next-account records', async operation => {
+      const saved = await offline.saveRoutine(newRoutine(), null);
+      await offline.saveRoutineWorkingCopy({ routine: saved, media: {} },
+        { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null });
+      const before = structuredClone(stores);
+      const began = deferred<void>();
+      const resume = deferred<void>();
+      storage.onRequest = async (store, method) => {
+        if (operation === 'combined-delete' ? store === 'routineWorkingCopies' && method === 'delete' :
+          store === 'meta' && method === (operation === 'exact-selection' ? 'put' : 'delete')) {
+          began.resolve(); await resume.promise;
+        }
+      };
+      const outcomes = Promise.allSettled([operation === 'combined-delete' ? offline.deleteRoutineAndWorkingCopy(saved.id, saved.revision, 1) :
+        operation === 'exact-selection' ? offline.setActiveRoutineSelection({ id: saved.id, revision: 1, published: false }) : offline.clearActiveRoutine()]);
+      await began.promise;
+      notify(hostedUserKey, 'owner-A', 'owner-B');
+      markers.set(hostedUserKey, 'owner-B');
+      const nextAccount = { ...newRoutine(), id: 'next-account' };
+      stores.routines.set(nextAccount.id, nextAccount);
+      before.routines.set(nextAccount.id, nextAccount);
+      resume.resolve();
+      expect((await outcomes)[0]).toMatchObject({ status: 'rejected', reason: new Error('hosted_session_invalidated') });
+      expect(storage.aborts).toBe(1);
+      expect(stores).toEqual(before);
+    });
 
   it.each(mutations)('aborts %s when reset starts during transaction creation', async name => {
     storage.onTransaction = () => {

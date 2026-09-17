@@ -98,7 +98,7 @@ describe('editor audio preview', () => {
   });
   afterEach(() => { preview.dispose(); vi.unstubAllGlobals(); });
 
-  it.each([undefined, 0, 0.5, 1, 1.5])('keeps track gain %s separate from fades through seek and resume', async gain => {
+  it.each([undefined, 0, 0.5, 1, 1.25, 1.5])('keeps track gain %s separate from fades through seek and resume', async gain => {
     await preview.playTrack({ ...track, gain });
     const audio = Context.instances[0];
     const buffer = audio.sources[0].buffer;
@@ -124,7 +124,7 @@ describe('editor audio preview', () => {
     expect(audio.gains[1].disconnect).toHaveBeenCalledOnce();
   });
 
-  it.each([undefined, 0, 0.5, 1, 1.5])('applies filler gain %s without changing generated samples', async gain => {
+  it.each([undefined, 0, 0.5, 1, 1.25, 1.5])('applies filler gain %s without changing generated samples', async gain => {
     const filler = { ...newRoutine().filler, gain };
     await preview.playFiller(filler);
     const audio = Context.instances[0];

@@ -31,6 +31,21 @@ function pdfText(bytes: Buffer): string {
 }
 
 describe('export registry and snapshots', () => {
+  it('exports unified phases in order with unknown BPM blank and no excluded cue leakage', () => {
+    const routine = fixture();
+    routine.tracks[0]!.cues.push({ id: 'private-note', note: 'Excluded private move', anchor: { kind: 'timestamp', seconds: 1 } });
+    routine.sequence = { crossfade: 2,
+      walkIn: { name: 'Arrival', tracks: [{ ...routine.tracks[0]!, id: 'walk-in', title: 'Arrival audio', bpm: undefined, cues: [] }] },
+      walkOut: { name: 'Exit', tracks: [{ ...routine.tracks[0]!, id: 'walk-out', title: 'Exit audio', cues: [] }] } };
+    const snapshot = createExportSnapshot(routine, false);
+    expect(snapshot.rows.map(row => row.track.id)).toEqual(['walk-in', 'first-entry', 'second-entry', 'walk-out']);
+    expect(snapshot.issues).toEqual([]);
+    expect(columnValue(exportColumns.find(column => column.id === 'track.bpm')!, snapshot.rows[0]!)).toBeNull();
+    const columns = ['track.phase', 'track.title', 'track.bpm', 'routine.sequence'];
+    const packet = buildPdfPacket(snapshot, columns); expect(packet.tracks.map(track => track.heading)).toEqual(['Arrival audio', 'Opening song', 'Closing song', 'Exit audio']);
+    expect(JSON.stringify(packet)).not.toContain('Excluded private move');
+    expect(JSON.stringify(buildWorkbookSheets(snapshot, columns))).not.toContain('Excluded private move');
+  });
   it('retains only selected routine settings for a draft without tracks', () => {
     const routine = fixture();
     routine.tracks = [];
@@ -63,6 +78,7 @@ describe('export registry and snapshots', () => {
   }, 30000);
   it('covers every current scalar schema field and stable derived order without invented song metadata', () => {
     expect(allIds()).toEqual([
+      'track.phase', 'routine.sequence',
       'routine.id', 'routine.name', 'routine.revision', 'routine.schemaVersion', 'routine.locked', 'routine.published',
       'track.index', 'track.id', 'track.title', 'track.duration', 'track.durationTime', 'track.bpm', 'track.firstBeat', 'track.bodyArea', 'track.gain',
       'track.after.mode', 'track.after.crossfade', 'track.after.filler',

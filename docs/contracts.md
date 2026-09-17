@@ -1,5 +1,95 @@
 # Initial Rehearsal Contract
 
+## Unified Routine Revision (September 16)
+
+This section supersedes separate class authoring below. One Routine is the entire
+class and one Save persists it locally before synchronizing to Cloud. Variants
+are separate named routines. Existing v1 routines, playlists and ClassSetup
+snapshots remain readable; never bulk rewrite or delete private data. A v1 client
+must not overwrite a v2 routine head and lose its sequence.
+
+`Routine.schemaVersion` accepts 1 and 2; new routines use 2. `sequence` is v2-only:
+`{crossfade, walkIn?, before?, after?, walkOut?}`. Walk-in/out are owned snapshots
+`{name, tracks, source?:{id,revision,published}}`, not live library references.
+Their entries are cue-free, without after-rules, and have globally unique IDs
+across the entire routine. The source is provenance only. Settings owns playlist
+editing; adopting a playlist copies entries into one undoable routine edit.
+`allRoutineTracks`, `allRoutineFillers` and `routineClassAudio` are shared helpers.
+`CloudRoutine.media` covers exactly every main/walk-in/walk-out track ID. Resolve
+all recording descriptors and authorize only the complete published asset union.
+The existing 100-track bound applies to the total, not each phase separately.
+New MusicPlaylist objects use schema 2; legacy schema 1 remains accepted.
+
+`Track.bpm` may be absent for unknown imported/reused audio. Timestamp and interval
+cues work without BPM; count cues require an explicit valid grid. Known stored
+100 BPM values are not guessed to be defaults or erased. Synthetic filler tempo
+remains numeric. Legacy gain values up to 1.5 remain readable; new slider edits
+and suggestions are limited to 0..1.25, preserving older values until explicitly
+adjusted. Routine `savedAt?:number` is a save timestamp, never a content edit:
+local saves stamp the local commit; Cloud writes stamp server time. Old unknown
+timestamps stay unknown. Exclude savedAt from undo content/fingerprints.
+
+Offline exports `RoutineWorkingCopy {envelope:CloudRoutine, localVersion:number,
+cloudBaseRevision:number|null, pendingCloud:boolean, savedAt:number}` and:
+`getRoutineWorkingCopy(id)`, `listRoutineWorkingCopies()`,
+`saveRoutineWorkingCopy(envelope,{expectedLocalVersion:number|null,
+cloud:boolean,cloudBaseRevision:number|null})`,
+`acknowledgeRoutineWorkingCopy(id,localVersion,envelope)`, `clearActiveRoutine()`.
+Save is one identity-fenced IndexedDB transaction over the full snapshot and
+pending state with local-version CAS. Never confuse a local version with Cloud
+If-Match revision. Acknowledgment clears pending only for the same localVersion;
+newer local edits survive. Cloud failures preserve the local copy. Lost responses
+require comparison against authoritative head before retrying, not blind POSTs.
+No credentials enter these records. Explicit logout purges as before; expiry does
+not. Publish/lock/CAS remain server enforced. Save does not autoplay or publish.
+
+Working copies additionally retain an optional `cloudAttempt` containing
+`{envelope,localVersion,baseRevision}` before a request can commit remotely.
+`recordRoutineSyncAttempt(id,localVersion,envelope,baseRevision)` stores it with
+local CAS. Newer local saves preserve an outstanding attempt. Acknowledging a
+proven attempt rebases newer pending work onto the returned Cloud revision but
+does not clear its pending flag or replace its content. Lost-response recovery
+compares the authoritative head with that exact submitted envelope, not only the
+newest local edit. An unrelated remote head remains a conflict.
+`reconcileRoutineWorkingCopy(envelope)` refreshes an existing CLEAN working copy
+after an authoritative read/lock/unlock/publication, preserving its local CAS
+version; pending work is never overwritten. `deleteRoutineWorkingCopy(id,
+expectedLocalVersion)` explicitly removes that saved working record with CAS,
+not its media; cloud deletion must finish first for a Cloud-backed routine.
+`listCloudRoutines()` and `listRoutinePublications()` enumerate cached Cloud heads
+and local publications respectively for the combined routine chooser.
+
+Private author-only `GET /api/media/library?cursor=...` returns
+`CloudAudioPage {items:CloudAudioItem[],cursor?}` with bounded metadata pages;
+items are `{asset,title,duration?,bpm?}`. Completed asset catalog bytes/hash are
+authoritative; descriptive metadata can be derived from existing private routine
+and playlist references. Missing metadata is unknown, never fabricated. GET never
+downloads the entire audio library or rewrites it. Add selected assets with fresh
+entry IDs and empty cues, preserve bytes, avoid a second upload, hash before use.
+Player accounts cannot browse the catalog. Responses remain private/no-store.
+
+Custom filler analysis is separate metadata, never part of immutable recording
+identity: `GET/PUT /api/fillers/{id}/analysis` uses
+`FillerAnalysis {bpm,confidence?,analyzer,sha256}`. PUT is authenticated/CSRF/author
+guarded and validates the hash against the actual recording. GET with no analysis
+returns `{analysis:null}`, otherwise `{analysis:FillerAnalysis}`; PUT returns the
+same envelope. Recorded playback never time-stretches. Built-in synthetic BPM is
+known from generation; the bundled recorded loop must have measured BPM evidence.
+
+One header Undo/Redo covers the full Routine, sequence, track insertions and media
+descriptors. It cannot rewind server revision, lock/publication or account state.
+Transient error displays expire after 30 seconds, not the underlying validation,
+pending-save or playback safety state. Preparation runs automatically on selection,
+restore and Teach entry, silently; replacing playing audio requires confirmation.
+Close prompts Save/Discard/Cancel and clears Edit/Teach active state, not the
+library, private audio or pending local saves. New is hidden while a routine is
+open; Duplicate creates a separate full routine with a user-chosen name.
+
+All 24 detailed acceptance requirements remain tracked in the implementation
+plan. No local preview/dev servers or local browser suites on this workstation;
+use bounded non-browser checks and synthetic remote CI. User authorized commit,
+push, GitHub merge and the existing Azure Free app deployment only after gates.
+
 ## Inline Class Sequence Editor
 
 The September16 follow-up exposes four enable checkboxes below the routine import

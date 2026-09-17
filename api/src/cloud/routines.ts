@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { CloudAsset, CloudRoutine, CloudRoutineSummary } from '../../../shared/cloud-contract';
-import type { Routine } from '../../../shared/routine';
+import { allRoutineTracks, type Routine } from '../../../shared/routine';
 import { parseRoutineContent, strictRecord } from '../validation';
 import { CloudAuth } from './auth';
 import { ApiError, safeId } from './config';
@@ -21,6 +21,14 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
 
   entity(body: CloudRoutine): Routine { return body.routine; }
   withEntity(body: CloudRoutine, routine: Routine): CloudRoutine { return { ...body, routine }; }
+  saved(body: CloudRoutine): CloudRoutine {
+    return this.withEntity(body, { ...body.routine, savedAt: this.auth.now() });
+  }
+  validateReplacement(previous: CloudRoutine, next: CloudRoutine): void {
+    if (previous.routine.schemaVersion === 2 && next.routine.schemaVersion === 1) {
+      throw new ApiError(409, 'routine_schema_downgrade');
+    }
+  }
   validatePublication(body: CloudRoutine): void {
     if (!body.routine.tracks.length) throw new ApiError(400, 'publication_requires_tracks');
   }
@@ -30,14 +38,17 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
     if (!value.routine || typeof value.routine !== 'object') throw new ApiError(400, 'invalid_input');
     const fields = ['id', 'revision', 'locked', 'published', 'schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
     if (Object.hasOwn(value.routine, 'beepOnceRemaining')) fields.push('beepOnceRemaining');
+    if (Object.hasOwn(value.routine, 'sequence')) fields.push('sequence');
+    if (Object.hasOwn(value.routine, 'savedAt')) fields.push('savedAt');
     const record = strictRecord(value.routine, fields);
     const { id, revision, locked, published, ...content } = record;
     if (!safeId(id) || typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1 ||
         typeof locked !== 'boolean' || typeof published !== 'boolean') throw new ApiError(400, 'invalid_input');
     const routine = { ...parseRoutineContent(content), id, revision, locked, published };
-    if (routine.tracks.some(track => !safeId(track.id))) throw new ApiError(400, 'invalid_id');
+    const tracks = allRoutineTracks(routine);
+    if (tracks.some(track => !safeId(track.id))) throw new ApiError(400, 'invalid_id');
     await resolveFillers(routineFillers(routine), this.fillers);
-    return boundedContent({ routine, media: await resolveMedia(value.media, routine.tracks, this.media) });
+    return boundedContent({ routine, media: await resolveMedia(value.media, tracks, this.media) });
   }
 
   async list(headers: Headers, published: boolean): Promise<{ routines: CloudRoutineSummary[] }> {
@@ -48,19 +59,22 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
       try { stored = await this.head(id); }
       catch (error) { if (error instanceof ApiError && error.status === 404) continue; throw error; }
       const pointer = published ? stored.value.published : stored.value.draft;
-      if (pointer) routines.push({ id, name: pointer.name, revision: pointer.revision, locked: pointer.locked, published });
+      if (pointer) routines.push({ id, name: pointer.name, revision: pointer.revision, locked: pointer.locked, published,
+        ...(pointer.savedAt !== undefined ? { savedAt: pointer.savedAt } : {}) });
     }
     return { routines };
   }
 
   copy(body: CloudRoutine): CloudRoutine {
+    const routine = structuredClone(body.routine);
     const media: Record<string, CloudAsset> = Object.create(null);
-    const tracks = body.routine.tracks.map(track => {
+    for (const track of allRoutineTracks(routine)) {
       const entryId = randomUUID();
-      media[entryId] = body.media[track.id]!;
-      return { ...track, id: entryId, cues: track.cues.map(cue => ({ ...cue, id: randomUUID() })) };
-    });
-    return { routine: { ...body.routine, id: randomUUID(), revision: 1, locked: false, published: false, tracks }, media };
+      media[entryId] = { ...body.media[track.id]! };
+      track.id = entryId;
+      track.cues = track.cues.map(cue => ({ ...cue, id: randomUUID() }));
+    }
+    return { routine: { ...routine, id: randomUUID(), revision: 1, locked: false, published: false }, media };
   }
 
   assetIds(body: CloudRoutine): string[] {

@@ -3,13 +3,16 @@ import { chromium, type Browser, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from '../frontend/node_modules/vite/dist/node/index.js';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { worker } from '../frontend/node_modules/web-audio-beat-detector/src/worker/worker';
-import { detectTrackBpm } from '../frontend/src/bpm';
+import { detectFillerBpm, detectTrackBpm } from '../frontend/src/bpm';
 
-const detector = vi.hoisted(() => ({ guess: vi.fn(), get: vi.fn(), decode: vi.fn() }));
+const detector = vi.hoisted(() => ({ guess: vi.fn(), get: vi.fn(), recording: vi.fn(), decode: vi.fn() }));
 vi.mock('../frontend/node_modules/web-audio-beat-detector', () => ({ guess: detector.guess }));
 vi.mock('../frontend/src/offline', async original => ({
-  ...await original<typeof import('../frontend/src/offline')>(), getTrackBlob: detector.get,
+  ...await original<typeof import('../frontend/src/offline')>(), getTrackBlob: detector.get, getFillerRecordingBlob: detector.recording,
 }));
 
 function pulses(firstBeat = 2.25, duration = 12, bpm = 120) {
@@ -172,9 +175,49 @@ describe('real Chromium Web Audio detector', () => {
   }, 45000);
 });
 
+describe('licensed loop native BPM evidence', () => {
+  it('records the pinned public loop detector limitation without fabricating a BPM', async () => {
+    const source = readFileSync(new URL('../frontend/src/assets/loops/lofi-hip-hop-v1.wav', import.meta.url));
+    const sha256 = createHash('sha256').update(source).digest('hex');
+    expect(sha256).toBe('4b4abf4e85b4887714ea58b7f96586f01cd2eeef3a11fb6953960861bb6c3379');
+    const filtered = execFileSync('ffmpeg', ['-v', 'error', '-f', 'wav', '-i', 'pipe:0', '-af', 'lowpass=f=240',
+      '-ar', '22050', '-ac', '1', '-f', 'f32le', 'pipe:1'], { input: source, timeout: 15000, maxBuffer: 2 * 1024 * 1024 });
+    const samples = new Float32Array(filtered.length / 4);
+    let maximum = 0;
+    for (let index = 0; index < samples.length; index++) {
+      samples[index] = filtered.readFloatLE(index * 4);
+      maximum = Math.max(maximum, samples[index]);
+    }
+    expect(samples.length / 22050).toBe(16);
+    expect(maximum).toBeGreaterThan(0);
+    for (let index = 0; index < samples.length; index++) samples[index] *= 0.9 / maximum;
+    let receive!: (event: unknown) => Promise<void>;
+    const postMessage = vi.fn();
+    runInNewContext(worker, { self: { addEventListener: (_name: string, listener: typeof receive) => { receive = listener; },
+      removeEventListener: vi.fn(), postMessage } });
+    const results = [];
+    for (const tempoSettings of [{ minTempo: 40, maxTempo: 220 }, { minTempo: 90, maxTempo: 180 }]) {
+      await receive({ data: { id: results.length + 1, method: 'guess', params: { channelData: samples, sampleRate: 22050, tempoSettings } } });
+      const response = postMessage.mock.calls.at(-1)![0];
+      if (response.error) {
+        expect(response.error).toEqual({ code: -32603, message: 'The given channelData does not contain any detectable beats.' });
+        results.push({ ...tempoSettings, error: response.error.message });
+      } else {
+        expect(response.result.bpm).toBeGreaterThanOrEqual(40);
+        expect(response.result.bpm).toBeLessThanOrEqual(220);
+        results.push({ ...tempoSettings, ...response.result });
+      }
+    }
+    console.info('Licensed loop native BPM evidence', { sha256, seconds: 16, analyzer: 'web-audio-beat-detector with FFmpeg 240 Hz lowpass', results });
+    expect(results[0]).toMatchObject({ error: 'The given channelData does not contain any detectable beats.' });
+    expect(createHash('sha256').update(source).digest('hex')).toBe(sha256);
+  }, 20000);
+});
+
 describe('bounded BPM and first-beat estimation', () => {
   beforeEach(() => {
     detector.get.mockReset().mockResolvedValue(new Blob(['synthetic']));
+    detector.recording.mockReset().mockResolvedValue(new Blob(['synthetic']));
     detector.decode.mockReset().mockResolvedValue(pulses());
     detector.guess.mockReset().mockResolvedValue({ bpm: 120, offset: 0.25, tempo: 120.001 });
     vi.stubGlobal('OfflineAudioContext', class {
@@ -194,6 +237,18 @@ describe('bounded BPM and first-beat estimation', () => {
     });
   });
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('reuses the serialized detector for a hash-verified filler storage ID without an invented fallback', async () => {
+    const recording = { id: 'loop', name: 'Synthetic loop', duration: 12,
+      asset: { id: 'recording', sha256: 'a'.repeat(64), bytes: 44, contentType: 'audio/wav' } };
+    expect(await detectFillerBpm(recording)).toMatchObject({ bpm: 120, firstBeat: 2.25 });
+    expect(detector.recording).toHaveBeenCalledWith(recording);
+    expect(detector.get).toHaveBeenCalledWith('filler-recording');
+    detector.recording.mockResolvedValueOnce(undefined);
+    await expect(detectFillerBpm(recording)).rejects.toThrow('missing_audio');
+    detector.decode.mockResolvedValueOnce(pulses(20));
+    await expect(detectFillerBpm(recording)).rejects.toThrow('bpm_no_beats');
+  });
 
   it('returns the first observed beat after leading silence, not the modulo-period phase', async () => {
     expect(await detectTrackBpm('one')).toMatchObject({ bpm: 120, firstBeat: 2.25, alternatives: [60, 120] });

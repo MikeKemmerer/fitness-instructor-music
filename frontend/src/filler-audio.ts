@@ -7,7 +7,26 @@ export const LOFI_ASSET = Object.freeze({
   url: loopUrl,
   sha256: '4b4abf4e85b4887714ea58b7f96586f01cd2eeef3a11fb6953960861bb6c3379',
   bytes: 705644, frames: 352800, sampleRate: 22050, channels: 1, seconds: 16,
+  measuredBpm: 120,
 });
+
+export function getFillerSoundBpm(filler: Filler): number | undefined {
+  if (filler.sound === 'lofi') return LOFI_ASSET.measuredBpm;
+  if (filler.sound === 'recording') return undefined;
+  if (!['soft', 'bright', 'drums'].includes(filler.sound) || !Number.isFinite(filler.bpm) || filler.bpm < 40 || filler.bpm > 220) {
+    throw new Error('invalid_filler');
+  }
+  return filler.bpm;
+}
+
+export function getFillerSoundDuration(filler: Filler): number {
+  if (filler.sound === 'lofi') return LOFI_ASSET.frames / LOFI_ASSET.sampleRate;
+  if (filler.sound === 'recording') {
+    if (!validFillerRecording(filler.recording)) throw new Error('invalid_filler_recording');
+    return filler.recording.duration;
+  }
+  return Math.round(22050 * 240 / getFillerSoundBpm(filler)!) / 22050;
+}
 
 interface CachedFiller {
   key: string;

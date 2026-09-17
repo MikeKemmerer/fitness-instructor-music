@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { FillerAnalysis } from '../../../shared/cloud-contract';
 import type { FillerRecording } from '../../../shared/routine';
 import { parseFillerRecording, strictRecord } from '../validation';
 import { CloudAuth } from './auth';
@@ -11,6 +12,18 @@ interface FillerRecord { recording: FillerRecording; archived: boolean }
 const RECORD_BYTES = 4096;
 const INDEX_PREFIX = 'fillers/index/';
 const recordKey = (id: string): string => `fillers/records/${id}`;
+
+function parseAnalysis(input: unknown, hash: string): FillerAnalysis {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ApiError(400, 'invalid_analysis');
+  const value = strictRecord(input, ['bpm', 'analyzer', 'sha256',
+    ...(Object.prototype.hasOwnProperty.call(input, 'confidence') ? ['confidence'] : [])]);
+  if (typeof value.bpm !== 'number' || !Number.isFinite(value.bpm) || value.bpm < 40 || value.bpm > 220
+    || typeof value.analyzer !== 'string' || !value.analyzer.trim() || value.analyzer.length > 160
+    || value.sha256 !== hash || (Object.hasOwn(value, 'confidence') && (typeof value.confidence !== 'number'
+      || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1))) throw new ApiError(400, 'invalid_analysis');
+  return { bpm: value.bpm, analyzer: value.analyzer, sha256: hash,
+    ...(Object.hasOwn(value, 'confidence') ? { confidence: value.confidence as number } : {}) };
+}
 
 export class CloudFillers {
   readonly budget: QuotaBudget;
@@ -44,6 +57,40 @@ export class CloudFillers {
   async get(headers: Headers, id: string): Promise<FillerRecording> {
     await this.auth.authenticate(headers, false, true);
     return (await this.record(id)).value.recording;
+  }
+
+  async analysisHash(id: string): Promise<string> {
+    const { recording } = (await this.record(id)).value;
+    const actual = (await this.media.catalog(recording.asset.id)).asset;
+    if (actual.sha256 !== recording.asset.sha256 || actual.bytes !== recording.asset.bytes
+      || actual.contentType !== recording.asset.contentType) throw new ApiError(503, 'storage_unavailable');
+    return actual.sha256;
+  }
+
+  async getAnalysis(headers: Headers, id: string): Promise<{ analysis: FillerAnalysis | null }> {
+    await this.auth.authenticate(headers, false, true);
+    const hash = await this.analysisHash(id);
+    const stored = await readJson(this.store, `fillers/analysis/${id}`, RECORD_BYTES);
+    let analysis: FillerAnalysis | null = null;
+    if (stored) {
+      try { analysis = parseAnalysis(stored.value, hash); }
+      catch { throw new ApiError(503, 'storage_unavailable'); }
+    }
+    await this.auth.authenticate(headers, false, true);
+    return { analysis };
+  }
+
+  async putAnalysis(headers: Headers, id: string, input: unknown): Promise<{ analysis: FillerAnalysis }> {
+    const actor = await this.auth.authenticate(headers, true, true);
+    const analysis = parseAnalysis(input, await this.analysisHash(id));
+    const key = `fillers/analysis/${id}`;
+    const previous = await readJson(this.store, key, RECORD_BYTES);
+    await this.budget.charge(RECORD_BYTES);
+    const fresh = await this.auth.authenticate(headers, true, true);
+    if (fresh.key !== actor.key || fresh.account.id !== actor.account.id) throw new ApiError(401, 'signin_required');
+    try { await this.store.put(key, encode(analysis), previous?.etag ?? null); }
+    catch (error) { if (error instanceof BlobConflict) throw new ApiError(409, 'analysis_conflict'); throw error; }
+    return { analysis };
   }
 
   async list(headers: Headers): Promise<{ fillers: FillerRecording[] }> {

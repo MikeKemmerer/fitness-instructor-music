@@ -9,7 +9,7 @@ export function cueAtSeconds(track: Track, cue: Cue, seconds: number, duration: 
   const maximum = end - Math.min(0.001, end / 2);
   const position = Math.max(0, Math.min(maximum, seconds));
   if (cue.anchor.kind !== 'count') return { ...cue, anchor: { kind: cue.anchor.kind, seconds: position } };
-  if (!Number.isFinite(track.bpm) || track.bpm <= 0 || !Number.isFinite(track.firstBeat)
+  if (track.bpm === undefined || !Number.isFinite(track.bpm) || track.bpm <= 0 || !Number.isFinite(track.firstBeat)
     || track.firstBeat < 0 || track.firstBeat >= end) return null;
   let lastCount = Math.ceil((end - track.firstBeat) * track.bpm / 60);
   if (track.firstBeat + (lastCount - 1) * 60 / track.bpm >= end) lastCount -= 1;
@@ -193,6 +193,73 @@ export function numberInput(value: number, minimum: number, maximum: number, cha
   input.required = true;
   input.addEventListener('input', () => change(input.valueAsNumber));
   return input;
+}
+
+export function gainSlider(label: string, read: () => number, write: (gain: number) => void, editable: () => boolean = () => true) {
+  const root = element('div', 'gain-control');
+  const input = element('input'); input.type = 'range'; input.min = '0'; input.max = '125'; input.step = '1';
+  const output = element('output', 'gain-percent');
+  const warning = element('span', 'muted gain-warning'); warning.setAttribute('role', 'status');
+  const wrapper = field(label, input); wrapper.append(output); root.append(wrapper, warning);
+  const sync = () => {
+    const percent = Math.round(read() * 100);
+    input.value = String(Math.min(125, percent));
+    output.textContent = `${percent}%`; input.setAttribute('aria-valuetext', output.textContent);
+    input.disabled = !editable(); warning.hidden = percent <= 125;
+    warning.textContent = percent > 125 ? t('legacyGain', { percent }) : '';
+  };
+  input.addEventListener('input', () => {
+    if (!editable()) { sync(); return; }
+    const value = input.valueAsNumber;
+    if (Number.isFinite(value) && value >= 0 && value <= 125) write(value / 100);
+    sync();
+  });
+  sync(); return { element: root, sync };
+}
+
+const errorDocuments = new WeakMap<Document, { callbacks: Set<() => void>; changed: () => void }>();
+
+export function transientText(node: HTMLElement, visibility?: (visible: boolean) => void) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  let disposed = false;
+  let deadline = 0;
+  let lastText = '';
+  let lastError = false;
+  const owner = node.ownerDocument;
+  const expire = () => {
+    if (!disposed && deadline && Date.now() >= deadline) {
+      clearTimeout(timer); deadline = 0;
+      node.textContent = ''; node.hidden = true;
+      visibility?.(false);
+    }
+  };
+  let subscription = errorDocuments.get(owner);
+  if (!subscription) {
+    const callbacks = new Set<() => void>();
+    subscription = { callbacks, changed: () => { for (const callback of callbacks) callback(); } };
+    errorDocuments.set(owner, subscription); owner.addEventListener('visibilitychange', subscription.changed);
+  }
+  const activeSubscription = subscription; activeSubscription.callbacks.add(expire);
+  const display = {
+    show(text: string, error = true, refresh = false) {
+      if (disposed) return;
+      if (refresh && text === lastText && error === lastError) { expire(); return; }
+      clearTimeout(timer); const current = ++generation;
+      lastText = text; lastError = error;
+      deadline = error && text ? Date.now() + 30_000 : 0;
+      node.textContent = text; node.hidden = !text;
+      visibility?.(!!text);
+      if (deadline) timer = setTimeout(() => { if (current === generation) expire(); }, 30_000);
+    },
+    refresh(text: string, error = true) { display.show(text, error, true); },
+    dismiss() { clearTimeout(timer); generation++; deadline = 0; lastText = ''; node.textContent = ''; node.hidden = true; visibility?.(false); },
+    dispose() {
+      disposed = true; generation++; clearTimeout(timer); activeSubscription.callbacks.delete(expire);
+      if (!activeSubscription.callbacks.size) { owner.removeEventListener('visibilitychange', activeSubscription.changed); errorDocuments.delete(owner); }
+    },
+  };
+  return display;
 }
 
 export function selectInput<Value extends string>(value: Value, options: readonly { value: Value; label: string }[], change: (value: Value) => void): HTMLSelectElement {

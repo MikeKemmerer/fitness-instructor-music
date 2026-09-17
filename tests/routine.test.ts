@@ -5,6 +5,30 @@ import { newMusicPlaylist, validateClassSetup, validateMusicPlaylist, type Class
 const track: Track = { id: 'track-1', title: 'Test', duration: 60, bpm: 120, firstBeat: 1, bodyArea: '', cues: [] };
 
 describe('cue timing contract', () => {
+  it('owns all phases in one routine and rejects duplicate entries or invalid phase content', () => {
+    const routine = newRoutine();
+    routine.tracks = [structuredClone(track)];
+    routine.sequence = { crossfade: 3, before: { ...routine.filler, mode: 'hold' },
+      walkIn: { name: 'Arrival', tracks: [{ ...structuredClone(track), id: 'arrival' }] } };
+    expect(validateRoutine(routine)).toEqual([]);
+    routine.sequence.walkIn!.tracks[0].id = track.id;
+    expect(validateRoutine(routine)).toContain('Track entry IDs must be unique');
+    routine.sequence.walkIn!.tracks[0].id = 'arrival';
+    routine.sequence.walkIn!.tracks[0].cues = [{ id: 'cue', note: 'Not playlist choreography', anchor: { kind: 'timestamp', seconds: 1 } }];
+    expect(validateRoutine(routine)).toContain('Invalid phase playlist');
+    expect(validateRoutine({ ...routine, schemaVersion: 1 })).toContain('Unsupported sequence schema');
+  });
+  it('allows unknown BPM for time cues but never invents a count grid', () => {
+    const routine = newRoutine();
+    const unknown = { ...track, bpm: undefined };
+    routine.tracks = [unknown];
+    expect(validateRoutine(routine)).toEqual([]);
+    unknown.cues = [{ id: 'cue', note: 'Timed', anchor: { kind: 'timestamp', seconds: 5 } }];
+    expect(validateRoutine(routine)).toEqual([]);
+    unknown.cues = [{ id: 'cue', note: 'Counted', anchor: { kind: 'count', count: 5 } }];
+    expect(validateRoutine(routine)).toContain('Invalid cue position');
+  });
+
   it.each([null, undefined, [], 'invalid'])('returns controlled errors for malformed roots %s', value => {
     expect(validateRoutine(value as unknown as ReturnType<typeof newRoutine>).length).toBeGreaterThan(0);
     expect(validateMusicPlaylist(value as unknown as MusicPlaylist).length).toBeGreaterThan(0);

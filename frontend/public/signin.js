@@ -75,6 +75,41 @@ export async function signIn({ username, password, fetch: fetcher, storage, repl
   replace('/');
 }
 
+export function createAccessFeedback(status, owner, platform) {
+  let timer;
+  let deadline = 0;
+  let disposed = false;
+  let suspended = false;
+  const expire = () => {
+    if (!disposed && deadline && Date.now() >= deadline) { clearTimeout(timer); deadline = 0; status.textContent = ''; }
+  };
+  const dispose = () => {
+    disposed = true; clearTimeout(timer);
+    owner.removeEventListener?.('visibilitychange', expire);
+    platform.removeEventListener?.('pagehide', hide);
+    platform.removeEventListener?.('pageshow', resume);
+  };
+  const hide = event => { suspended = true; clearTimeout(timer); if (!event.persisted) dispose(); };
+  const resume = () => {
+    if (disposed) return;
+    suspended = false; expire();
+    if (deadline) timer = setTimeout(expire, Math.max(0, deadline - Date.now()));
+  };
+  owner.addEventListener?.('visibilitychange', expire);
+  platform.addEventListener?.('pagehide', hide);
+  platform.addEventListener?.('pageshow', resume);
+  return {
+    get active() { return !disposed && !suspended; },
+    show(text, error = false) {
+      if (disposed || suspended) return;
+      clearTimeout(timer); status.textContent = text;
+      deadline = error && text ? Date.now() + 30000 : 0;
+      if (deadline) timer = setTimeout(expire, 30000);
+    },
+    dispose,
+  };
+}
+
 export function startSignInPage(owner = document, platform = window) {
   const form = owner.getElementById('signin-form');
   const username = owner.getElementById('signin-username');
@@ -84,30 +119,35 @@ export function startSignInPage(owner = document, platform = window) {
   const cleanup = owner.getElementById('signin-cleanup');
   if (!form || !username || !password || !submit || !status || !cleanup) return;
   let running = false;
+  const feedback = createAccessFeedback(status, owner, platform);
+  let generation = 0;
+  platform.addEventListener?.('pagehide', () => { generation++; });
   submit.disabled = false;
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (running || !form.reportValidity()) return;
+    if (running || !feedback.active || !form.reportValidity()) return;
     running = true;
+    const current = ++generation;
     submit.disabled = true;
     form.setAttribute('aria-busy', 'true');
     status.className = '';
     status.setAttribute('role', 'status');
-    status.textContent = 'Signing in...';
+    feedback.show('Signing in...');
     cleanup.hidden = true;
     try {
       const attempt = signIn({
         username: username.value.trim(), password: password.value, fetch: platform.fetch.bind(platform),
-        storage: platform.localStorage, replace: url => platform.location.replace(url),
+        storage: platform.localStorage, replace: url => { if (feedback.active && current === generation) platform.location.replace(url); },
         resetId: () => platform.crypto.randomUUID(),
       });
       password.value = '';
       await attempt;
     } catch (error) {
+      if (!feedback.active || current !== generation) return;
       status.className = 'access-error';
       status.setAttribute('role', 'alert');
-      status.textContent = error?.status === 429 ? 'Unable to sign in. Please wait before trying again.'
-        : 'Unable to sign in. Check your credentials and connection, then try again.';
+      feedback.show(error?.status === 429 ? 'Unable to sign in. Please wait before trying again.'
+        : 'Unable to sign in. Check your credentials and connection, then try again.', true);
       cleanup.hidden = error?.message !== 'auth_busy' && error?.message !== 'session_changed';
     } finally {
       password.value = '';

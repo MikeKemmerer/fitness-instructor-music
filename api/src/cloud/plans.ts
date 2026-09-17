@@ -49,7 +49,8 @@ export class CloudPlaylists extends CloudDocuments<CloudMusicPlaylist, MusicPlay
   async parse(input: unknown): Promise<CloudMusicPlaylist> {
     const envelope = strictRecord(input, ['playlist', 'media']);
     const record = strictRecord(envelope.playlist, [...stateKeys, 'tracks']);
-    const metadata = state(record);
+    if (record.schemaVersion !== 1 && record.schemaVersion !== 2) throw new ApiError(400, 'invalid_input');
+    const metadata: Omit<MusicPlaylist, 'tracks'> = { ...state({ ...record, schemaVersion: 1 }), schemaVersion: record.schemaVersion };
     const { tracks } = parseRoutineContent({ schemaVersion: 1, name: metadata.name, tracks: record.tracks,
       filler: { mode: 'none', seconds: 0, bpm: 100, sound: 'soft' }, crossfade: 0, beepEvery: 0, beepRemaining: 0 });
     if (tracks.some(track => !safeId(track.id))) throw new ApiError(400, 'invalid_id');

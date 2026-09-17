@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { requiredHostedCaseNames, requiredHostedTests } from './report-policy.mjs';
+import { requiredHostedCaseNames, requiredHostedTests, requiredLocalTests } from './report-policy.mjs';
 
 function fixture() {
   return { success: true, numFailedTests: 0, numPassedTests: 15, numPendingTests: 4, testResults: [
@@ -12,6 +12,35 @@ function fixture() {
 
 test('accepts only the four explicit opt-in private comparisons', () => {
   assert.equal(requiredHostedTests(fixture()).passed, 15);
+});
+
+test('accepts additional passing hosted cases without capping coverage at the historical count', () => {
+  const report = fixture();
+  report.testResults[0].assertionResults.push({ title: 'unified routine saves the complete v2 sequence', status: 'passed' });
+  report.numPassedTests++;
+  assert.equal(requiredHostedTests(report).hostedBrowser, 16);
+  report.testResults[0].assertionResults.at(-1).status = 'pending';
+  assert.throws(() => requiredHostedTests(report));
+});
+
+test('local results allow only hosted declarations plus their sentinel and the four private opt-ins', () => {
+  const report = fixture();
+  report.testResults[0].assertionResults.push({ title: 'additional v2 case', status: 'pending' },
+    { title: 'Requires frontend/dist built with VITE_HOSTED_PILOT=true', status: 'pending' });
+  report.testResults[0].assertionResults.forEach(test => { test.status = 'pending'; });
+  report.testResults.push({ name: '/workspace/tests/security.test.ts', assertionResults: [{ title: 'security', status: 'passed' }] });
+  report.numPassedTests = 1;
+  report.numPendingTests = 21;
+  assert.equal(requiredLocalTests(report).hostedCasesDeferred, 16);
+  for (const mutate of [
+    value => { value.testResults[0].assertionResults.pop(); value.numPendingTests--; },
+    value => { value.testResults[2].assertionResults[0].status = 'pending'; value.numPendingTests++; value.numPassedTests--; },
+    value => { value.testResults[0].assertionResults[0].status = 'passed'; },
+  ]) {
+    const invalid = structuredClone(report);
+    mutate(invalid);
+    assert.throws(() => requiredLocalTests(invalid));
+  }
 });
 
 test('rejects unrelated skips, failures, missing results and duplicate optional cases', () => {

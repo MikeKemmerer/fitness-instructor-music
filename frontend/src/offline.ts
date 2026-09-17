@@ -1,9 +1,10 @@
 import { openDB, type DBSchema, type IDBPTransaction } from 'idb';
-import { newRoutine, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import { allRoutineFillers, allRoutineTracks, newRoutine, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import type { CloudRoutine } from '../../shared/cloud-contract';
 import { AAC_IMPORT } from '../../shared/audio-import';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from './hosted-session';
 import type { ClassAudio, ClassSetup, CloudMusicPlaylist, MusicPlaylist, PreparedClass, RevisionReference } from '../../shared/class-plan';
-import { checkedClassSetup, checkedMusicPlaylist, classFillers, routineFillers, snapshotClassAudio } from './session-runtime';
+import { checkedClassSetup, checkedMusicPlaylist, classFillers, snapshotClassAudio } from './session-runtime';
 
 export const MAX_TRACK_BYTES = AAC_IMPORT.maxSourceBytes;
 export const MAX_TRACK_SECONDS = AAC_IMPORT.maxDuration;
@@ -18,6 +19,8 @@ interface StoredTrack {
 }
 
 interface RehearsalDatabase extends DBSchema {
+  routineWorkingCopies: { key: string; value: RoutineWorkingCopy };
+  cloudRoutineEnvelopes: { key: string; value: CloudRoutine };
   draftRecovery: { key: string; value: DraftRecovery };
   tracks: { key: string; value: StoredTrack };
   routines: { key: string; value: Routine };
@@ -90,7 +93,7 @@ function captureMutationSession(): MutationSession | undefined {
 
 async function database(session = captureMutationSession()) {
   session?.assert();
-  const connection = await openDB<RehearsalDatabase>('fitness-rehearsal', 6, {
+  const connection = await openDB<RehearsalDatabase>('fitness-rehearsal', 7, {
     upgrade(connection, oldVersion, _newVersion, transaction) {
       try { session?.assert(); }
       catch { transaction.abort(); return; }
@@ -102,6 +105,10 @@ async function database(session = captureMutationSession()) {
       if (oldVersion < 3) connection.createObjectStore('cloudRoutines');
       if (oldVersion < 4) connection.createObjectStore('fillerRecordings');
       if (oldVersion < 6) connection.createObjectStore('draftRecovery');
+      if (oldVersion < 7) {
+        connection.createObjectStore('routineWorkingCopies');
+        connection.createObjectStore('cloudRoutineEnvelopes');
+      }
       if (oldVersion < 5) {
         for (const name of ['routineHistory', 'cloudRoutineHistory', 'musicPlaylists', 'musicPlaylistHistory',
           'cloudMusicPlaylists', 'classSetups', 'classSetupHistory', 'cloudClassSetups'] as const) connection.createObjectStore(name);
@@ -126,7 +133,7 @@ async function database(session = captureMutationSession()) {
   return connection;
 }
 
-type StoreName = 'draftRecovery' | 'tracks' | 'routines' | 'cloudRoutines' | 'fillerRecordings' | 'meta' | 'routineHistory' |
+type StoreName = 'routineWorkingCopies' | 'cloudRoutineEnvelopes' | 'draftRecovery' | 'tracks' | 'routines' | 'cloudRoutines' | 'fillerRecordings' | 'meta' | 'routineHistory' |
   'cloudRoutineHistory' | 'musicPlaylists' | 'musicPlaylistHistory' | 'cloudMusicPlaylists' |
   'classSetups' | 'classSetupHistory' | 'cloudClassSetups';
 
@@ -222,6 +229,264 @@ function checkRoutine(routine: Routine): void {
 const revisionKey = (id: string, revision: number, published?: boolean) => JSON.stringify(published === undefined ? [id, revision] : [id, revision, published]);
 const deletedKey = (kind: 'routine' | 'playlist' | 'class', id: string) => JSON.stringify(['deleted', kind, id]);
 
+export interface RoutineWorkingCopy {
+  envelope: CloudRoutine;
+  localVersion: number;
+  cloudBaseRevision: number | null;
+  pendingCloud: boolean;
+  savedAt: number;
+  cloudAttempt?: { envelope: CloudRoutine; localVersion: number; baseRevision: number | null };
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ?
+    Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right))) : item);
+}
+
+function workingContent(envelope: CloudRoutine): string {
+  return canonicalJson({ ...envelope, routine: { ...envelope.routine,
+    revision: 0, savedAt: undefined, locked: false, published: false } });
+}
+
+async function putWorkingCopy(
+  store: IDBPTransaction<RehearsalDatabase, ['routineWorkingCopies'], 'readwrite'>['store'], record: RoutineWorkingCopy,
+): Promise<void> {
+  const size = (value: RoutineWorkingCopy) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  const records = (await store.getAll()).filter(value => value.envelope.routine.id !== record.envelope.routine.id);
+  if (size(record) > 256 * 1024 || records.length >= 64 ||
+    records.reduce((total, value) => total + size(value), size(record)) > 4 * 1024 * 1024) throw new Error('routine_working_copy_limit');
+  await store.put(record, record.envelope.routine.id);
+}
+
+function checkedWorkingEnvelope(value: CloudRoutine): CloudRoutine {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).some(key => !['routine', 'media'].includes(key))) throw new Error('invalid_cloud_routine');
+  const snapshot = structuredClone(value);
+  checkRoutine(snapshot.routine);
+  const fields = (value: object, allowed: string[]) => {
+    if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('invalid_cloud_routine');
+  };
+  fields(snapshot.routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
+    'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'sequence', 'savedAt']);
+  if (snapshot.routine.sequence) {
+    fields(snapshot.routine.sequence, ['crossfade', 'walkIn', 'before', 'after', 'walkOut']);
+    for (const playlist of [snapshot.routine.sequence.walkIn, snapshot.routine.sequence.walkOut]) {
+      if (!playlist) continue;
+      fields(playlist, ['name', 'tracks', 'source']);
+      if (playlist.source) fields(playlist.source, ['id', 'revision', 'published']);
+    }
+  }
+  const assets = new Map<string, string>();
+  const registerAsset = (asset: import('../../shared/routine').AudioAsset) => {
+    const identity = JSON.stringify([asset.sha256, asset.bytes, asset.contentType]);
+    if (assets.has(asset.id) && assets.get(asset.id) !== identity) throw new Error('invalid_media');
+    assets.set(asset.id, identity);
+  };
+  for (const filler of allRoutineFillers(snapshot.routine)) {
+    fields(filler, ['mode', 'seconds', 'bpm', 'sound', 'gain', 'recording']);
+    if (filler.recording) {
+      fields(filler.recording, ['id', 'name', 'duration', 'asset']);
+      fields(filler.recording.asset, ['id', 'sha256', 'bytes', 'contentType']);
+      registerAsset(filler.recording.asset);
+    }
+  }
+  const tracks = allRoutineTracks(snapshot.routine);
+  const media = snapshot.media;
+  if (!media || typeof media !== 'object' || Array.isArray(media) || Object.keys(media).length !== tracks.length) {
+    throw new Error('invalid_media');
+  }
+  for (const track of tracks) {
+    fields(track, ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
+    if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
+    for (const cue of track.cues) {
+      fields(cue, ['id', 'anchor', 'note', 'beep']);
+      fields(cue.anchor, cue.anchor.kind === 'count' ? ['kind', 'count'] : ['kind', 'seconds']);
+    }
+    const asset = Object.hasOwn(media, track.id) ? media[track.id] : undefined;
+    if (!asset || Object.keys(asset).some(key => !['id', 'sha256', 'bytes', 'contentType'].includes(key)) ||
+      !validFillerRecording({ id: 'descriptor', name: 'Descriptor', duration: Math.min(track.duration, 360), asset })) {
+      throw new Error('invalid_media');
+    }
+    registerAsset(asset);
+  }
+  return snapshot;
+}
+
+function checkRoutineDowngrade(previous: Routine | undefined, next: Routine): void {
+  if (previous?.schemaVersion === 2 && next.schemaVersion === 1) throw new Error('routine_conflict');
+}
+
+export async function getRoutineWorkingCopy(id: string): Promise<RoutineWorkingCopy | null> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const value = await connection.get('routineWorkingCopies', id);
+    session?.assert();
+    return value ?? null;
+  } finally { connection.close(); }
+}
+
+export async function listRoutineWorkingCopies(): Promise<RoutineWorkingCopy[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const values = await connection.getAll('routineWorkingCopies');
+    session?.assert();
+    return values.sort((left, right) => right.savedAt - left.savedAt);
+  } finally { connection.close(); }
+}
+
+export async function saveRoutineWorkingCopy(envelope: CloudRoutine, options: {
+  expectedLocalVersion: number | null; cloud: boolean; cloudBaseRevision: number | null;
+}): Promise<RoutineWorkingCopy> {
+  const session = captureMutationSession();
+  const snapshot = checkedWorkingEnvelope(envelope);
+  const { expectedLocalVersion, cloud, cloudBaseRevision } = options;
+  const validRevision = (value: number | null) => value === null || Number.isSafeInteger(value) && value > 0;
+  if (!validRevision(expectedLocalVersion) || !validRevision(cloudBaseRevision) || typeof cloud !== 'boolean' ||
+    cloudBaseRevision !== null && snapshot.routine.revision !== cloudBaseRevision) throw new Error('routine_conflict');
+  if (snapshot.routine.published) throw new Error('routine_published');
+  if (snapshot.routine.locked) throw new Error('routine_locked');
+  return mutate(session, ['routineWorkingCopies', 'routines', 'cloudRoutines', 'meta'], async transaction => {
+    const store = transaction.objectStore('routineWorkingCopies');
+    const id = snapshot.routine.id;
+    const previous = await store.get(id);
+    if (expectedLocalVersion !== (previous?.localVersion ?? null) ||
+      await transaction.objectStore('meta').get(deletedKey('routine', id))) throw new Error('routine_conflict');
+    const cloudHead = await transaction.objectStore('cloudRoutines').get(id);
+    for (const saved of [previous?.envelope.routine, await transaction.objectStore('routines').get(id), cloudHead]) {
+      checkRoutineDowngrade(saved, snapshot.routine);
+      if (saved?.locked) throw new Error('routine_locked');
+    }
+    if (previous && previous.cloudBaseRevision !== cloudBaseRevision &&
+      (previous.cloudAttempt || cloudBaseRevision === null || cloudBaseRevision < (previous.cloudBaseRevision ?? 0) ||
+        cloudHead?.revision !== cloudBaseRevision)) throw new Error('routine_conflict');
+    const localVersion = (previous?.localVersion ?? 0) + 1;
+    if (!Number.isSafeInteger(localVersion)) throw new Error('routine_conflict');
+    const savedAt = Date.now();
+    snapshot.routine.savedAt = savedAt;
+    const record: RoutineWorkingCopy = { envelope: snapshot, localVersion, cloudBaseRevision,
+      pendingCloud: cloud || previous?.pendingCloud === true, savedAt,
+      ...(previous?.cloudAttempt ? { cloudAttempt: previous.cloudAttempt } : {}) };
+    await putWorkingCopy(store, record);
+    await transaction.objectStore('meta').put(id, 'active');
+    await transaction.objectStore('meta').delete('activeRoutineSelection');
+    return record;
+  });
+}
+
+export async function recordRoutineSyncAttempt(
+  id: string, localVersion: number, envelope: CloudRoutine, baseRevision: number | null,
+): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = checkedWorkingEnvelope(envelope);
+  if (snapshot.routine.id !== id || !Number.isSafeInteger(localVersion) || localVersion < 1 ||
+    baseRevision !== null && (!Number.isSafeInteger(baseRevision) || baseRevision < 1 || snapshot.routine.revision !== baseRevision) ||
+    snapshot.routine.locked || snapshot.routine.published) throw new Error('routine_conflict');
+  await mutate(session, ['routineWorkingCopies', 'meta'], async transaction => {
+    const store = transaction.objectStore('routineWorkingCopies');
+    const current = await store.get(id);
+    if (!current || current.localVersion !== localVersion || !current.pendingCloud || current.cloudBaseRevision !== baseRevision ||
+      await transaction.objectStore('meta').get(deletedKey('routine', id)) ||
+      workingContent(current.envelope) !== workingContent(snapshot)) throw new Error('routine_conflict');
+    const cloudAttempt = { envelope: snapshot, localVersion, baseRevision };
+    if (current.cloudAttempt && canonicalJson(current.cloudAttempt) !== canonicalJson(cloudAttempt)) throw new Error('routine_conflict');
+    await putWorkingCopy(store, { ...current, cloudAttempt });
+  });
+}
+
+type WorkingCloudTransaction = IDBPTransaction<RehearsalDatabase,
+  ['routineWorkingCopies', 'cloudRoutineEnvelopes', 'cloudRoutines', 'cloudRoutineHistory', 'meta'], 'readwrite'>;
+
+async function cacheWorkingEnvelope(transaction: WorkingCloudTransaction, snapshot: CloudRoutine): Promise<void> {
+  const id = snapshot.routine.id;
+  const key = revisionKey(id, snapshot.routine.revision, snapshot.routine.published);
+  const mirrors = transaction.objectStore('cloudRoutineEnvelopes');
+  const existing = await mirrors.get(key);
+  if (existing && canonicalJson(existing) !== canonicalJson(snapshot)) throw new Error('routine_conflict');
+  const cloud = transaction.objectStore('cloudRoutines');
+  const previous = await cloud.get(id);
+  checkRoutineDowngrade(previous, snapshot.routine);
+  if (previous && (previous.revision > snapshot.routine.revision || previous.revision === snapshot.routine.revision &&
+    workingContent({ routine: previous, media: snapshot.media }) !== workingContent(snapshot))) throw new Error('routine_conflict');
+  const history = transaction.objectStore('cloudRoutineHistory');
+  const historical = await history.get(key);
+  if (historical && canonicalJson(historical) !== canonicalJson(snapshot.routine)) throw new Error('routine_conflict');
+  if (previous && !await history.get(revisionKey(id, previous.revision, previous.published))) {
+    await history.put(previous, revisionKey(id, previous.revision, previous.published));
+  }
+  await mirrors.put(snapshot, key);
+  await history.put(snapshot.routine, key);
+  await cloud.put(snapshot.routine, id);
+}
+
+export async function acknowledgeRoutineWorkingCopy(id: string, localVersion: number, envelope: CloudRoutine): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = checkedWorkingEnvelope(envelope);
+  if (snapshot.routine.id !== id || !Number.isSafeInteger(localVersion) || localVersion < 1) throw new Error('routine_conflict');
+  await mutate(session, ['routineWorkingCopies', 'cloudRoutineEnvelopes', 'cloudRoutines', 'cloudRoutineHistory', 'meta'], async transaction => {
+    const store = transaction.objectStore('routineWorkingCopies');
+    const current = await store.get(id);
+    if (!current || !current.pendingCloud || localVersion > current.localVersion ||
+      await transaction.objectStore('meta').get(deletedKey('routine', id))) throw new Error('routine_conflict');
+    const attempt = current.cloudAttempt ?? { envelope: current.envelope, localVersion: current.localVersion, baseRevision: current.cloudBaseRevision };
+    if (attempt.localVersion !== localVersion || attempt.baseRevision !== current.cloudBaseRevision ||
+      snapshot.routine.revision !== (attempt.baseRevision ?? 0) + 1 ||
+      workingContent(checkedWorkingEnvelope(attempt.envelope)) !== workingContent(snapshot)) throw new Error('routine_conflict');
+    checkRoutineDowngrade(current.envelope.routine, snapshot.routine);
+    await cacheWorkingEnvelope(transaction, snapshot);
+    const { cloudAttempt: _attempt, ...retained } = current;
+    await putWorkingCopy(store, { ...retained,
+      envelope: current.localVersion === localVersion ? snapshot : { ...current.envelope,
+        routine: { ...current.envelope.routine, revision: snapshot.routine.revision } },
+      cloudBaseRevision: snapshot.routine.revision, pendingCloud: current.localVersion !== localVersion });
+  });
+}
+
+export async function reconcileRoutineWorkingCopy(envelope: CloudRoutine): Promise<RoutineWorkingCopy | null> {
+  const session = captureMutationSession();
+  const snapshot = checkedWorkingEnvelope(envelope);
+  return mutate(session, ['routineWorkingCopies', 'cloudRoutineEnvelopes', 'cloudRoutines', 'cloudRoutineHistory', 'meta'], async transaction => {
+    const store = transaction.objectStore('routineWorkingCopies');
+    const id = snapshot.routine.id;
+    const current = await store.get(id);
+    if (!current || await transaction.objectStore('meta').get(deletedKey('routine', id))) return null;
+    if (current.pendingCloud || current.cloudAttempt || snapshot.routine.revision < (current.cloudBaseRevision ?? current.envelope.routine.revision) ||
+      snapshot.routine.revision === (current.cloudBaseRevision ?? current.envelope.routine.revision) &&
+      workingContent(snapshot) !== workingContent(current.envelope)) throw new Error('routine_conflict');
+    checkRoutineDowngrade(current.envelope.routine, snapshot.routine);
+    await cacheWorkingEnvelope(transaction, snapshot);
+    const refreshed = { ...current, envelope: snapshot, cloudBaseRevision: snapshot.routine.revision,
+      savedAt: snapshot.routine.savedAt ?? current.savedAt };
+    await putWorkingCopy(store, refreshed);
+    return refreshed;
+  });
+}
+
+export async function deleteRoutineWorkingCopy(id: string, expectedLocalVersion: number): Promise<void> {
+  const session = captureMutationSession();
+  if (!Number.isSafeInteger(expectedLocalVersion) || expectedLocalVersion < 1) throw new Error('routine_conflict');
+  await mutate(session, ['routineWorkingCopies', 'meta'], async transaction => {
+    const store = transaction.objectStore('routineWorkingCopies');
+    const current = await store.get(id);
+    if (!current || current.localVersion !== expectedLocalVersion) throw new Error('routine_conflict');
+    await store.delete(id);
+    const meta = transaction.objectStore('meta');
+    if (await meta.get('active') === id) {
+      await meta.delete('active');
+      await meta.delete('activeRoutineSelection');
+    }
+  });
+}
+
+export async function clearActiveRoutine(): Promise<void> {
+  const session = captureMutationSession();
+  await mutate(session, ['meta'], async transaction => {
+    await transaction.objectStore('meta').delete('active');
+    await transaction.objectStore('meta').delete('activeRoutineSelection');
+  });
+}
+
 export async function saveRoutine(
   routine: Routine, expectedRevision: number | null, action: 'save' | 'lock' | 'unlock' = 'save',
 ): Promise<Routine> {
@@ -231,9 +496,10 @@ export async function saveRoutine(
   return mutate(session, ['routines', 'routineHistory', 'meta'], async transaction => {
     const routines = transaction.objectStore('routines');
     const previous = await routines.get(snapshot.id);
+    checkRoutineDowngrade(previous, snapshot);
     session?.assert();
     const content = (value: Routine) => JSON.stringify({
-      ...value, beepOnceRemaining: value.beepOnceRemaining ?? 0, locked: false, published: false, revision: 0,
+      ...value, savedAt: undefined, beepOnceRemaining: value.beepOnceRemaining ?? 0, locked: false, published: false, revision: 0,
     });
     let error: string | undefined;
     if (await transaction.objectStore('meta').get(deletedKey('routine', snapshot.id)) ||
@@ -249,6 +515,7 @@ export async function saveRoutine(
       throw new Error(error);
     }
     snapshot.revision = (previous?.revision ?? 0) + 1;
+    snapshot.savedAt = Date.now();
     snapshot.locked = action === 'lock';
     snapshot.published = false;
     const history = transaction.objectStore('routineHistory');
@@ -258,6 +525,7 @@ export async function saveRoutine(
     await routines.put(snapshot, snapshot.id);
     session?.assert();
     await transaction.objectStore('meta').put(snapshot.id, 'active');
+    await transaction.objectStore('meta').delete('activeRoutineSelection');
     return snapshot;
   });
 }
@@ -265,10 +533,26 @@ export async function saveRoutine(
 async function readRoutine(session: MutationSession | undefined, id?: string, revision?: number, published?: boolean): Promise<Routine | null> {
   const connection = await database(session);
   try {
-    const transaction = connection.transaction(['routines', 'routineHistory', 'meta']);
+    const transaction = connection.transaction(['routines', 'routineHistory', 'routineWorkingCopies', 'meta']);
     const selected = id ?? await transaction.objectStore('meta').get('active');
+    const exact = id === undefined && revision === undefined ? await transaction.objectStore('meta').get('activeRoutineSelection') : undefined;
+    if (exact !== undefined) {
+      const selection = checkedRoutineSelection(JSON.parse(exact));
+      const history = transaction.objectStore('routineHistory');
+      const routine = await history.get(revisionKey(selection.id, selection.revision, selection.published)) ??
+        await history.get(revisionKey(selection.id, selection.revision)) ??
+        (!selection.published ? await transaction.objectStore('routines').get(selection.id) : undefined);
+      const hidden = await transaction.objectStore('meta').get(deletedKey('routine', selection.id));
+      await transaction.done;
+      session?.assert();
+      if (routine) checkRoutine(routine);
+      return !hidden && selected === selection.id && routine?.id === selection.id && routine.revision === selection.revision &&
+        routine.published === selection.published && (published === undefined || published === selection.published) ? routine : null;
+    }
     const hidden = selected && revision === undefined && await transaction.objectStore('meta').get(deletedKey('routine', selected));
-    const current = selected && !hidden ? await transaction.objectStore('routines').get(selected) : undefined;
+    const working = id === undefined && selected && revision === undefined && !hidden ?
+      await transaction.objectStore('routineWorkingCopies').get(selected) : undefined;
+    const current = working?.envelope.routine ?? (selected && !hidden ? await transaction.objectStore('routines').get(selected) : undefined);
     const routine = selected && revision !== undefined ?
       (published !== undefined ? await transaction.objectStore('routineHistory').get(revisionKey(selected, revision, published)) : undefined) ??
       await transaction.objectStore('routineHistory').get(revisionKey(selected, revision)) ??
@@ -336,42 +620,158 @@ export async function listRoutines(): Promise<Routine[]> {
   }
 }
 
+export async function listCloudRoutines(): Promise<Routine[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['cloudRoutines', 'cloudRoutineHistory']);
+    const routines = [...await transaction.objectStore('cloudRoutines').getAll(),
+      ...await transaction.objectStore('cloudRoutineHistory').getAll()];
+    await transaction.done;
+    session?.assert();
+    const latest = new Map<string, Routine>();
+    for (const routine of routines) {
+      checkRoutine(routine);
+      const key = JSON.stringify([routine.id, routine.published]);
+      if (routine.revision > (latest.get(key)?.revision ?? 0)) latest.set(key, routine);
+    }
+    return [...latest.values()];
+  } finally { connection.close(); }
+}
+
+export async function listRoutinePublications(): Promise<Routine[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['routines', 'routineHistory', 'meta']);
+    const latest = new Map<string, Routine>();
+    for (const routine of [...await transaction.objectStore('routines').getAll(), ...await transaction.objectStore('routineHistory').getAll()]) {
+      checkRoutine(routine);
+      if (routine.published && !await transaction.objectStore('meta').get(deletedKey('routine', routine.id)) &&
+        routine.revision > (latest.get(routine.id)?.revision ?? 0)) latest.set(routine.id, routine);
+    }
+    await transaction.done;
+    session?.assert();
+    return [...latest.values()];
+  } finally { connection.close(); }
+}
+
 export async function setActiveRoutine(id: string): Promise<void> {
   const session = captureMutationSession();
-  await mutate(session, ['routines', 'meta'], async transaction => {
-    if (await transaction.objectStore('meta').get(deletedKey('routine', id)) || !await transaction.objectStore('routines').get(id)) {
+  await mutate(session, ['routines', 'routineWorkingCopies', 'meta'], async transaction => {
+    if (await transaction.objectStore('meta').get(deletedKey('routine', id)) ||
+      !await transaction.objectStore('routines').get(id) && !await transaction.objectStore('routineWorkingCopies').get(id)) {
       await transaction.done;
       throw new Error('routine_not_found');
     }
     session?.assert();
     await transaction.objectStore('meta').put(id, 'active');
+    await transaction.objectStore('meta').delete('activeRoutineSelection');
   });
 }
 
-async function deleteLocalEntity(kind: 'routine' | 'playlist' | 'class', id: string, expectedRevision: number): Promise<void> {
+function checkedRoutineSelection(selection: RevisionReference): RevisionReference {
+  if (!selection || typeof selection.id !== 'string' || !selection.id || !Number.isSafeInteger(selection.revision) ||
+    selection.revision < 1 || typeof selection.published !== 'boolean') throw new Error('routine_conflict');
+  return { id: selection.id, revision: selection.revision, published: selection.published };
+}
+
+export async function setActiveRoutineSelection(selection: RevisionReference): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = checkedRoutineSelection(selection);
+  await mutate(session, ['routines', 'routineHistory', 'meta'], async transaction => {
+    const meta = transaction.objectStore('meta');
+    const history = transaction.objectStore('routineHistory');
+    const routine = await history.get(revisionKey(snapshot.id, snapshot.revision, snapshot.published)) ??
+      await history.get(revisionKey(snapshot.id, snapshot.revision)) ??
+      (!snapshot.published ? await transaction.objectStore('routines').get(snapshot.id) : undefined);
+    if (await meta.get(deletedKey('routine', snapshot.id)) || !routine || routine.id !== snapshot.id ||
+      routine.revision !== snapshot.revision || routine.published !== snapshot.published) throw new Error('routine_not_found');
+    checkRoutine(routine);
+    await meta.put(snapshot.id, 'active');
+    await meta.put(JSON.stringify(snapshot), 'activeRoutineSelection');
+  });
+}
+
+export async function getActiveRoutineSelection(): Promise<RevisionReference | null> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['meta']);
+    const meta = transaction.objectStore('meta');
+    const stored = await meta.get('activeRoutineSelection');
+    const selection = stored === undefined ? null : checkedRoutineSelection(JSON.parse(stored));
+    const active = await meta.get('active');
+    const hidden = selection && await meta.get(deletedKey('routine', selection.id));
+    await transaction.done;
+    session?.assert();
+    return !hidden && selection?.id === active ? selection : null;
+  } finally { connection.close(); }
+}
+
+async function deleteLocalEntity(
+  kind: 'routine' | 'playlist' | 'class', id: string, expectedRevision: number | null, confirmedWorking?: { localVersion: number },
+): Promise<void> {
   const session = captureMutationSession();
   const prefix = kind === 'class' ? 'class_setup' : kind;
-  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error(`${prefix}_conflict`);
+  if (!(confirmedWorking && expectedRevision === null) &&
+    (!Number.isSafeInteger(expectedRevision) || expectedRevision === null || expectedRevision < 1) ||
+    confirmedWorking && (!Number.isSafeInteger(confirmedWorking.localVersion) || confirmedWorking.localVersion < 1)) {
+    throw new Error(`${prefix}_conflict`);
+  }
   const records = kind === 'routine' ? 'routines' : kind === 'playlist' ? 'musicPlaylists' : 'classSetups';
   const historyName = kind === 'routine' ? 'routineHistory' : kind === 'playlist' ? 'musicPlaylistHistory' : 'classSetupHistory';
-  await mutate(session, [records, historyName, 'meta'], async transaction => {
+  await mutate(session, [records, historyName, 'routineWorkingCopies', 'meta'], async transaction => {
     const previous = await transaction.objectStore(records).get(id);
     const meta = transaction.objectStore('meta');
-    if (!previous || await meta.get(deletedKey(kind, id))) throw new Error(`${prefix}_not_found`);
-    if (previous.revision !== expectedRevision) throw new Error(`${prefix}_conflict`);
-    if (previous.locked) throw new Error(`${prefix}_locked`);
+    if (!previous && !confirmedWorking || await meta.get(deletedKey(kind, id))) {
+      throw new Error(`${prefix}_${confirmedWorking ? 'conflict' : 'not_found'}`);
+    }
+    if ((previous?.revision ?? null) !== expectedRevision) throw new Error(`${prefix}_conflict`);
+    if (previous?.locked) throw new Error(`${prefix}_locked`);
+    if (confirmedWorking && previous?.published) throw new Error('routine_published');
+    let deletedRevision = (previous?.revision ?? 0) + 1;
+    if (kind === 'routine') {
+      const workingStore = transaction.objectStore('routineWorkingCopies');
+      const working = await workingStore.get(id);
+      if (confirmedWorking) {
+        if (!working || working.localVersion !== confirmedWorking.localVersion || working.cloudBaseRevision !== null) {
+          throw new Error('routine_conflict');
+        }
+        if (working.envelope.routine.locked) throw new Error('routine_locked');
+        if (working.envelope.routine.published) throw new Error('routine_published');
+        deletedRevision = (previous?.revision ?? working.envelope.routine.revision) + 1;
+        await workingStore.delete(id);
+      } else if (working && previous) {
+        if (working.pendingCloud || working.cloudAttempt || working.cloudBaseRevision !== null ||
+          working.envelope.routine.revision !== previous.revision ||
+          workingContent(working.envelope) !== workingContent({ routine: previous as Routine, media: working.envelope.media })) {
+          throw new Error('routine_conflict');
+        }
+        await workingStore.delete(id);
+      }
+    }
     const history = transaction.objectStore(historyName);
-    if (!await history.get(revisionKey(id, previous.revision))) await history.put(previous, revisionKey(id, previous.revision));
-    if (!await history.get(revisionKey(id, previous.revision, previous.published))) {
+    if (previous && !await history.get(revisionKey(id, previous.revision))) await history.put(previous, revisionKey(id, previous.revision));
+    if (previous && !await history.get(revisionKey(id, previous.revision, previous.published))) {
       await history.put(previous, revisionKey(id, previous.revision, previous.published));
     }
-    await meta.put(String(previous.revision + 1), deletedKey(kind, id));
-    if (kind === 'routine' && await meta.get('active') === id) await meta.delete('active');
+    await meta.put(String(deletedRevision), deletedKey(kind, id));
+    if (kind === 'routine' && await meta.get('active') === id) {
+      await meta.delete('active');
+      await meta.delete('activeRoutineSelection');
+    }
   });
 }
 
 export function deleteRoutine(id: string, expectedRevision: number): Promise<void> {
   return deleteLocalEntity('routine', id, expectedRevision);
+}
+
+export function deleteRoutineAndWorkingCopy(
+  id: string, expectedRoutineRevision: number | null, expectedLocalVersion: number,
+): Promise<void> {
+  return deleteLocalEntity('routine', id, expectedRoutineRevision, { localVersion: expectedLocalVersion });
 }
 
 export async function cacheCloudRoutine(routine: Routine): Promise<void> {
@@ -549,6 +949,24 @@ export async function listClassSetups(): Promise<ClassSetup[]> {
   } finally { connection.close(); }
 }
 
+export async function listCachedClassSetups(): Promise<ClassSetup[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['cloudClassSetups']);
+    const values = await transaction.objectStore('cloudClassSetups').getAll();
+    await transaction.done;
+    session?.assert();
+    const heads = new Map<string, ClassSetup>();
+    for (const value of values) {
+      const setup = checkedClassSetup(value);
+      const key = JSON.stringify([setup.id, setup.published]);
+      if (setup.revision > (heads.get(key)?.revision ?? 0)) heads.set(key, setup);
+    }
+    return [...heads.values()];
+  } finally { connection.close(); }
+}
+
 function checkedCloudPlaylist(value: CloudMusicPlaylist): CloudMusicPlaylist {
   try {
     if (!value || Object.keys(value).some(key => !['playlist', 'media'].includes(key))) throw new Error('invalid_playlist');
@@ -710,7 +1128,7 @@ export async function removeFillerRecording(id: string): Promise<void> {
 
 export async function removeTrack(id: string): Promise<void> {
   const session = captureMutationSession();
-  await mutate(session, ['tracks', 'fillerRecordings', ...classStores], async transaction => {
+  await mutate(session, ['tracks', 'fillerRecordings', 'routineWorkingCopies', 'draftRecovery', ...classStores], async transaction => {
     const routines = await transaction.objectStore('routines').getAll();
     const cloudRoutines = await transaction.objectStore('cloudRoutines').getAll();
     const historicalRoutines = await transaction.objectStore('routineHistory').getAll();
@@ -721,11 +1139,18 @@ export async function removeTrack(id: string): Promise<void> {
     const setups = [...await transaction.objectStore('classSetups').getAll(),
       ...await transaction.objectStore('classSetupHistory').getAll(), ...await transaction.objectStore('cloudClassSetups').getAll()];
     const recordings = await transaction.objectStore('fillerRecordings').getAll();
+    const working = (await transaction.objectStore('routineWorkingCopies').getAll()).map(value => value.envelope.routine);
+    const recoveries = await transaction.objectStore('draftRecovery').getAll();
+    for (const recovery of recoveries) {
+      if (recovery.kind === 'routine') working.push(recovery.value as Routine);
+      else if (recovery.kind === 'playlist') playlists.push(recovery.value as MusicPlaylist);
+      else setups.push(recovery.value as ClassSetup);
+    }
     session?.assert();
     const fillerReferences = (filler?: Filler) => filler?.sound === 'recording' && `filler-${filler.recording?.asset.id}` === id;
     if (recordings.some(recording => `filler-${recording.asset.id}` === id) ||
-      [...routines, ...cloudRoutines, ...historicalRoutines, ...historicalCloudRoutines].some(routine =>
-        routine.tracks.some(track => track.id === id) || routineFillers(routine).some(fillerReferences)) ||
+      [...routines, ...cloudRoutines, ...historicalRoutines, ...historicalCloudRoutines, ...working].some(routine =>
+        allRoutineTracks(routine).some(track => track.id === id) || allRoutineFillers(routine).some(fillerReferences)) ||
       playlists.some(playlist => playlist.tracks.some(track => track.id === id)) ||
       setups.some(setup => fillerReferences(setup.before) || fillerReferences(setup.after))) {
       await transaction.done;
@@ -739,11 +1164,11 @@ async function routineReadiness(routine: Routine, session: MutationSession | und
   const snapshot = structuredClone(routine);
   checkRoutine(snapshot);
   const missing: string[] = [];
-  for (const track of snapshot.tracks) {
+  for (const track of allRoutineTracks(snapshot)) {
     const record = await verifiedTrack(track.id, session);
     if (!record || Math.abs(record.duration - track.duration) > 0.1) missing.push(track.id);
   }
-  for (const filler of routineFillers(snapshot).filter(filler => filler.mode !== 'none' && filler.sound === 'recording')) {
+  for (const filler of allRoutineFillers(snapshot).filter(filler => filler.mode !== 'none' && filler.sound === 'recording')) {
     const recording = fillerSnapshot(filler.recording!);
     if (!await verifiedFiller(recording, session)) missing.push(`filler-${recording.asset.id}`);
   }
@@ -1369,7 +1794,7 @@ async function importTrack(file: File, session: MutationSession | undefined): Pr
   const record = await prepareTrack(file, session);
   const track: Track = {
     id: crypto.randomUUID(), title: file.name.slice(0, 300), duration: record.duration,
-    bpm: 100, firstBeat: 0, cues: [], bodyArea: '',
+    firstBeat: 0, cues: [], bodyArea: '',
   };
   await mutate(session, ['tracks'], async transaction => {
     await transaction.objectStore('tracks').put(record, track.id);
