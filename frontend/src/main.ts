@@ -7,7 +7,7 @@ import '@fontsource/barlow-condensed/600.css';
 import './styles.css';
 import { ArrowRight, Bell, BellOff, Check, Copy, Hand, Headphones, ListMusic, LockKeyhole,
   Maximize2, Mic, Minimize2, Moon, MoveHorizontal, Pause, Pencil, Play, Plus, Save, Settings2, SkipBack, SkipForward, Square, Sun, UnlockKeyhole, X,
-  CloudUpload, Download, RefreshCw, Send, Trash2, Star, Minus } from 'lucide';
+  CloudUpload, Download, RefreshCw, Send, Trash2, Star, Minus, Ellipsis, ChevronDown } from 'lucide';
 import { allRoutineTracks, cueSeconds, newRoutine, validateRoutine, type Cue, type Routine, type Track } from '../../shared/routine';
 import type { PlayerState } from '../../shared/player-contract';
 import { createPlayer } from './player';
@@ -367,8 +367,8 @@ cloudMode.addEventListener('change', () => {
   renderCloudList();
   void runCloud(refreshHousehold);
 });
-async function openCloudRoutine(id: string, published: boolean, transfer: CloudTransfer): Promise<void> {
-  if (!id || (dirty && !confirm(t('confirmSwitch', { name: draft.name })))) return;
+async function openCloudRoutine(id: string, published: boolean, transfer: CloudTransfer, confirmed = false): Promise<void> {
+  if (!id || (!confirmed && dirty && !confirm(t('confirmSwitch', { name: draft.name })))) return;
   stopEditorAudio();
   const local = !published ? await getRoutineWorkingCopy(id) : null;
   if (local?.pendingCloud) { acceptWorkingCopy(local); requestPreparation(); return; }
@@ -484,7 +484,7 @@ function syncCloudControls(): void {
   cloudUpload.hidden = !mutable || !!cloudSelection || shareMode !== 'create';
   cloudUpload.disabled = busy || !canEdit() || draft.locked || context.access !== 'online' || validationErrors.length > 0;
   for (const button of [cloudPublish, cloudDelete]) {
-    button.hidden = !mutable;
+    button.hidden = !mutable || !cloudSelection || cloudSelection.published;
     button.disabled = busy || !cloudEnvelope || !canEdit() || draft.locked || context.access !== 'online';
   }
   cloudPublish.disabled ||= dirty || !!workingCopy?.pendingCloud || !draft.tracks.length;
@@ -786,12 +786,13 @@ const classMode = createClassMode(shell, exitClass,
 });
 classToolbar.append(iconButton(t('fullscreen'), Maximize2, () => classMode.enter()));
 
-const editorHeading = element('div', 'section-heading');
-const editorTitle = element('div');
+const editorHeading = element('header', 'editor-heading');
+const editorTitle = element('div', 'editor-identity');
+const editorHeadingActions = element('div', 'editor-heading-actions');
 const editorRoutineTitle = element('h1', 'routine-title');
 editorTitle.append(editorRoutineTitle);
 const draftStatus = element('span', 'draft-status');
-editorHeading.append(editorTitle, draftStatus);
+editorHeading.append(editorTitle, editorHeadingActions);
 const routineSelect = element('select');
 routineSelect.setAttribute('aria-label', t('savedRoutines'));
 routineSelect.addEventListener('change', () => {
@@ -900,8 +901,29 @@ const localDelete = iconButton(t('localDelete'), Trash2, () => { void runEditor(
   draft = newRoutine(); draft.name = t('newName'); draft.filler.sound = 'lofi';
   persistedRevision = null; dirty = false; draftGeneration++; refreshDraft(true); notify(t('localDeleted'));
 }); });
-const routineOverflow = element('div', 'routine-overflow');
-const overflowActions = element('div', 'action-row');
+function actionMenu(label: string, icon: typeof Ellipsis, showLabel = false) {
+  const menu = element('details', 'command-menu');
+  const trigger = element('summary', `button${showLabel ? '' : ' icon-button'}`);
+  trigger.title = label; trigger.setAttribute('aria-label', label);
+  setButtonIcon(trigger, icon);
+  trigger.append(element('span', showLabel ? '' : 'visually-hidden', label));
+  trigger.addEventListener('click', event => {
+    if (trigger.getAttribute('aria-disabled') === 'true') event.preventDefault();
+  });
+  const commands = element('div', 'command-menu-items');
+  menu.append(trigger, commands);
+  const closeMenu = () => { menu.open = false; };
+  const outside = (event: Event) => { if (event.target instanceof Node && !menu.contains(event.target)) closeMenu(); };
+  document.addEventListener('pointerdown', outside);
+  menu.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); closeMenu(); trigger.focus({ preventScroll: true }); }
+  });
+  commands.addEventListener('click', event => { if ((event.target as HTMLElement).closest('button')) closeMenu(); });
+  return { element: menu, trigger, commands, close: closeMenu, dispose: () => document.removeEventListener('pointerdown', outside) };
+}
+const moreMenu = actionMenu(t('moreActions'), Ellipsis);
+const routineOverflow = moreMenu.element;
+const overflowActions = moreMenu.commands;
 const shareOptions = element('div', 'segmented');
 const shareButtons = new Map<string, HTMLButtonElement>();
 for (const mode of ['create', 'replace'] as const) {
@@ -914,12 +936,15 @@ for (const mode of ['create', 'replace'] as const) {
   }, true);
   shareButtons.set(mode, button); shareOptions.append(button);
 }
-overflowActions.append(cloudReplace, cloudOpenDraft, duplicate, cloudPublish, cloudDelete, localPublish, localDelete);
-routineOverflow.append(overflowActions);
+overflowActions.append(lock, cloudOpenDraft, duplicate, cloudPublish, localPublish, cloudDelete, localDelete);
+for (const command of [lock, duplicate, cloudPublish, cloudDelete, localPublish, localDelete]) {
+  command.classList.remove('icon-button'); command.append(element('span', '', command.title));
+}
 cloudActions.replaceChildren(cloudCancel);
 const editorPrepare = iconButton(t('retryPreparation'), RefreshCw, () => { if (preparationFailed) requestPreparation(); }, true);
 editorPrepare.hidden = true;
-editorActions.append(newDraft, importButton(), demoButton(), save, lock, routineOverflow, editorPrepare);
+const editorDemo = demoButton();
+editorActions.append(newDraft, editorDemo, save, routineOverflow, editorPrepare);
 const audioPicker = createAudioLibraryPicker({ library: cloudLibrary,
   preview: audioPreview, beforePreview: stopEditorAudio,
   hosted: hostedPilot, known: () => [{ routine: draft, media: { ...cloudEnvelope?.media, ...draftMedia } }],
@@ -927,7 +952,10 @@ const audioPicker = createAudioLibraryPicker({ library: cloudLibrary,
   identity: () => `${draft.id}:${draftGeneration}`, remaining: () => 100 - allRoutineTracks(draft).length,
   added: (tracks, media) => { draft.tracks.push(...tracks); Object.assign(draftMedia, media); dirty = true; draftGeneration++; refreshDraft(true); },
 });
-editorActions.append(audioPicker.element);
+const addTrackMenu = actionMenu(t('addTrack'), Plus, true);
+const addTrackChevron = element('span', 'menu-chevron'); setButtonIcon(addTrackChevron, ChevronDown);
+addTrackMenu.trigger.append(addTrackChevron);
+addTrackMenu.commands.append(audioPicker.element, importButton());
 const validation = element('div', 'validation');
 let validationSignature = '';
 const validationTitle = element('h2');
@@ -943,6 +971,66 @@ localSelection.hidden = true;
 cloudControls.replaceChildren(cloudRefresh, cloudSignIn);
 const routineLibrary = element('section', 'routine-library');
 routineLibrary.setAttribute('aria-label', t('routines'));
+const chooserDialog = element('dialog', 'library-dialog routine-chooser');
+chooserDialog.setAttribute('aria-label', t('openRoutineDialog'));
+const chooserFeedback = element('p', 'chooser-feedback'); chooserFeedback.setAttribute('role', 'status');
+const chooserErrors = transientText(chooserFeedback);
+const searchRoutines = element('input'); searchRoutines.type = 'search';
+searchRoutines.placeholder = t('searchRoutines'); searchRoutines.setAttribute('aria-label', t('searchRoutines'));
+searchRoutines.addEventListener('input', () => renderRoutineLibrary());
+const chooserHeader = element('div', 'chooser-heading');
+const chooserClose = iconButton(t('closeChooser'), X, () => dismissChooser());
+chooserHeader.append(element('h2', '', t('openRoutineDialog')), chooserClose);
+chooserDialog.append(chooserHeader, chooserFeedback);
+chooserDialog.addEventListener('cancel', event => { event.preventDefault(); dismissChooser(); });
+chooserDialog.addEventListener('click', event => { if (event.target === chooserDialog) dismissChooser(); });
+shell.append(chooserDialog);
+
+function dismissChooser(accepted = false): void {
+  if (!chooserDialog.open || (!accepted && (editorBusy || transportOperation.pending))) return;
+  chooserDialog.close(); chooserOpen = !routineOpen;
+  chooserErrors.dismiss();
+  document.documentElement.classList.remove('routine-chooser-open');
+  panels.edit.insertBefore(routineLibrary, editorActions);
+  syncAvailability();
+  (accepted ? editorRoutineTitle : openDifferent).focus({ preventScroll: true });
+}
+
+async function confirmRoutineSwitch(): Promise<'save' | 'discard' | null> {
+  if (!dirty) return 'discard';
+  return new Promise(resolve => {
+    const dialog = element('dialog', 'library-dialog'); dialog.setAttribute('aria-label', t('switchRoutine'));
+    const finish = (result: 'save' | 'discard' | null) => { dialog.close(); dialog.remove(); resolve(result); };
+    const saveFirst = iconButton(t('saveChanges'), Save, () => finish('save'), true);
+    saveFirst.disabled = !canEdit() || draft.locked || validationErrors.length > 0 || !!composition?.pending();
+    dialog.append(element('h2', '', t('saveBeforeSwitch', { name: draft.name })), saveFirst,
+      iconButton(t('discard'), Trash2, () => finish('discard'), true), iconButton(t('cancel'), X, () => finish(null), true));
+    dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
+    shell.append(dialog); dialog.showModal();
+  });
+}
+
+async function switchLibraryRoutine(action: (transfer: CloudTransfer) => Promise<void | false>): Promise<void> {
+  if (editorBusy || transportOperation.pending || appDisposed) return;
+  const source = draft;
+  const generation = draftGeneration;
+  const decision = await confirmRoutineSwitch();
+  if (!decision || appDisposed || source !== draft || generation !== draftGeneration || editorBusy) return;
+  const work = async (transfer: CloudTransfer = {}) => {
+    chooserErrors.dismiss();
+    try {
+      if (decision === 'save') await saveWorkingRoutine(transfer);
+      if (appDisposed) return;
+      if (await action(transfer) === false) return;
+      if (!appDisposed) {
+        if (!selectedClass) rememberClassSelection(localStorage, hostedPilot ? getCloudContext().user : null, null);
+        dismissChooser(true);
+      }
+    } catch (error) { chooserErrors.show(cloudErrorMessage(error)); throw error; }
+  };
+  if (hostedPilot) await runCloud(work);
+  else await runEditor(work);
+}
 const routineRows = element('div', 'routine-library-rows');
 const locationMenu = element('details', 'filter-menu');
 const locationSummary = element('summary', 'button', t('location')); locationMenu.append(locationSummary);
@@ -999,7 +1087,7 @@ function renderRoutineLibrary(): void {
     button.disabled = editorBusy || (playerRole && version === 'draft');
     button.checked = libraryVersions.has(version) && !(playerRole && version === 'draft');
   }
-  cloudPanel.hidden = !hostedPilot || (routineOpen && !chooserOpen);
+  cloudPanel.hidden = !hostedPilot || (routineOpen && !chooserDialog.open);
   routineRows.replaceChildren();
   type Row = { value: CloudRoutineSummary; source: 'local' | 'household'; copy?: RoutineWorkingCopy; legacy?: ClassSelection };
   const entries: Row[] = [...savedRoutines, ...localPublications].map(value => ({ value, source: 'local' }));
@@ -1013,11 +1101,14 @@ function renderRoutineLibrary(): void {
   }
   entries.push(...legacyClasses.map(legacy => ({ value: legacy.setup, source: legacy.source, legacy })));
   const key = (row: Row) => `${row.legacy ? 'class:' : ''}${row.value.id}`;
-  const matches = entries.filter(row => librarySources.has(row.source) && libraryVersions.has(row.value.published ? 'published' : 'draft')
+  const query = searchRoutines.value.trim().toLocaleLowerCase(locale);
+  const matches = entries.filter(row => row.value.name.toLocaleLowerCase(locale).includes(query)
+    && librarySources.has(row.source) && libraryVersions.has(row.value.published ? 'published' : 'draft')
     && (!playerRole || (row.source === 'household' && row.value.published)) && (!favoritesOnly.checked || libraryFavorites.has(key(row))));
   const values = [...new Map(matches.map(row => [`${key(row)}:${row.source}:${row.value.published}`, row])).values()];
   values.sort((first, second) => Number(libraryFavorites.has(key(second))) - Number(libraryFavorites.has(key(first)))
     || first.value.name.localeCompare(second.value.name));
+  if (!values.length) routineRows.append(element('p', 'chooser-empty', t('noRoutineMatches')));
   for (const rowValue of values) {
     const { value, source, copy, legacy } = rowValue;
     const row = element('div', 'routine-library-row');
@@ -1029,46 +1120,81 @@ function renderRoutineLibrary(): void {
       rememberLibrary(); renderRoutineLibrary();
     });
     favorite.setAttribute('aria-pressed', String(libraryFavorites.has(key(rowValue))));
+    const current = routineOpen && (legacy ? selectedClass?.setup.id === value.id && selectedClass.source === source
+      : !selectedClass && draft.id === value.id && draft.published === value.published
+        && draft.revision === value.revision && source === (cloudSelection ? 'household' : 'local'));
+    if (current) text.append(element('span', 'current-routine', t('currentRoutine')));
     const open = iconButton(t('openRoutine', { name: value.name }), Download, () => {
-      rememberLibrary(key(rowValue));
-      if (legacy) { void runEditor(() => openLegacyRoutine(legacy)); return; }
-      if (copy) { void runEditor(async () => {
-        if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
-        const identity = hostedPilot ? captureCloudIdentity() : () => {};
-        const current = await getRoutineWorkingCopy(value.id); if (!current) throw new Error('routine_not_found');
-        identity(); await setActiveRoutine(value.id); identity();
-        if (appDisposed) return;
-        if (current.cloudBaseRevision !== null && !current.pendingCloud && getCloudContext().access === 'online' && navigator.onLine !== false) {
-          const head = await cloudLibrary.readHead(value.id); identity();
-          await acceptCloudEnvelope(await cloudLibrary.download(head), false); return;
+      if (current && !legacy) { dismissChooser(); return; }
+      void switchLibraryRoutine(async transfer => {
+        if (legacy) {
+          if (getCloudRole() !== 'player' && !confirm(t('confirmLegacyOpen', { name: legacy.setup.name }))) return false;
+          await openLegacyRoutine(legacy, true);
+        } else if (copy) {
+          const identity = hostedPilot ? captureCloudIdentity() : () => {};
+          const current = await getRoutineWorkingCopy(value.id); if (!current) throw new Error('routine_not_found');
+          identity();
+          if (appDisposed) return;
+          if (current.cloudBaseRevision !== null && !current.pendingCloud && getCloudContext().access === 'online' && navigator.onLine !== false) {
+            const head = await cloudLibrary.readHead(value.id, transfer); identity();
+            await acceptCloudEnvelope(await cloudLibrary.download(head, transfer), false);
+          } else {
+            await setActiveRoutine(value.id); identity();
+            if (appDisposed) return;
+            clearCloudSelection(); acceptWorkingCopy(current); selectedClass = null; requestPreparation();
+          }
+        } else if (source === 'household') { await openCloudRoutine(value.id, value.published, transfer, true); }
+        else if (value.published) {
+          const identity = hostedPilot ? captureCloudIdentity() : () => {};
+          const saved = await getRoutine(value.id, value.revision, true); if (!saved) throw new Error('routine_not_found');
+          identity(); await setActiveRoutineSelection({ id: saved.id, revision: saved.revision, published: true }); identity();
+          if (appDisposed) return;
+          clearCloudSelection(); acceptSavedRoutine(saved); selectedClass = null;
+        } else {
+          const identity = hostedPilot ? captureCloudIdentity() : () => {};
+          const saved = await getRoutine(value.id); identity();
+          if (!saved) throw new Error('routine_not_found');
+          const copy = await getRoutineWorkingCopy(value.id); identity();
+          await setActiveRoutine(value.id); identity();
+          if (appDisposed) return;
+          clearCloudSelection(); selectedClass = null;
+          if (copy) { acceptWorkingCopy(copy); requestPreparation(); } else acceptSavedRoutine(saved);
         }
-        clearCloudSelection(); acceptWorkingCopy(current); selectedClass = null; requestPreparation();
-      }); return; }
-      if (source === 'household') { void runCloud(transfer => openCloudRoutine(value.id, value.published, transfer)); }
-      else if (value.published) { void runEditor(async () => {
-        if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
-        const identity = hostedPilot ? captureCloudIdentity() : () => {};
-        const saved = await getRoutine(value.id, value.revision, true); if (!saved) throw new Error('routine_not_found');
-        identity(); await setActiveRoutineSelection({ id: saved.id, revision: saved.revision, published: true }); identity();
-        if (appDisposed) return;
-        clearCloudSelection(); acceptSavedRoutine(saved); selectedClass = null;
-      }); }
-      else { routineSelect.value = value.id; routineSelect.dispatchEvent(new Event('change')); }
+        rememberLibrary(key(rowValue));
+      });
     });
     open.disabled = editorBusy || transportOperation.pending;
     row.append(text, favorite, open); routineRows.append(row);
   }
 }
 const replaceTarget = field(t('cloudReplace'), cloudSelect);
-overflowActions.insertBefore(replaceTarget, cloudReplace);
+const replaceDialog = element('dialog', 'library-dialog');
+replaceDialog.setAttribute('aria-label', t('replaceAnother'));
+const replaceAnother = iconButton(t('replaceAnother'), Copy, () => {
+  if (editorBusy || transportOperation.pending || cloudSelection) return;
+  replaceDialog.showModal(); cloudSelect.focus();
+}, true);
+const closeReplace = () => { if (!editorBusy) { replaceDialog.close(); moreMenu.trigger.focus({ preventScroll: true }); } };
+replaceDialog.addEventListener('cancel', event => { event.preventDefault(); closeReplace(); });
+replaceDialog.append(element('h2', '', t('replaceAnother')), replaceTarget, cloudReplace,
+  iconButton(t('cancel'), X, closeReplace, true));
+shell.append(replaceDialog); overflowActions.insertBefore(replaceAnother, cloudDelete);
 const libraryToolbar = element('div', 'library-toolbar');
 libraryToolbar.append(locationMenu, statusMenu, field(t('favoritesOnly'), favoritesOnly), cloudRefresh);
 cloudRefresh.hidden = !hostedPilot;
-routineLibrary.append(libraryToolbar, cloudPanel, routineRows);
-panels.edit.append(editorHeading, draftIdentity, routineLibrary, editorActions, validation, editor);
-editorHeading.append(exportPanel.element);
-const openDifferent = iconButton(t('openDifferent'), ListMusic, () => { chooserOpen = true; renderRoutineLibrary(); syncAvailability(); }, true);
-editorHeading.append(openDifferent);
+routineLibrary.append(searchRoutines, libraryToolbar, cloudPanel, routineRows);
+editorTitle.append(draftIdentity);
+panels.edit.append(editorHeading, routineLibrary, editorActions, validation, editor);
+editorHeadingActions.append(exportPanel.element);
+const openDifferent = iconButton(t('openDifferent'), ListMusic, () => {
+  if (editorBusy || transportOperation.pending || chooserDialog.open) return;
+  chooserOpen = true; chooserErrors.dismiss();
+  chooserDialog.append(routineLibrary); chooserDialog.showModal();
+  document.documentElement.classList.add('routine-chooser-open');
+  renderRoutineLibrary(); syncAvailability(); searchRoutines.focus({ preventScroll: true });
+}, true);
+editorRoutineTitle.tabIndex = -1;
+editorHeadingActions.append(openDifferent);
 const close = iconButton(t('closeRoutine'), X, () => closeRoutine(), true);
 const editorFooter = element('footer', 'editor-footer'); editorFooter.append(close); panels.edit.append(editorFooter);
 
@@ -1105,8 +1231,8 @@ async function independentRoutine(source: Routine, name: string, media: CloudRou
   return { routine: copy, media: copiedMedia };
 }
 
-async function openLegacyRoutine(selection: ClassSelection): Promise<void> {
-  if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
+async function openLegacyRoutine(selection: ClassSelection, confirmed = false): Promise<void> {
+  if (!confirmed && dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
   const identity = hostedPilot ? captureCloudIdentity() : () => {};
   const resolved = await classLibrary.legacy(selection).catch(error => { throw new Error(cloudErrorMessage(error)); });
   identity(); if (appDisposed) return;
@@ -1171,7 +1297,8 @@ const protection = createDraftProtection({
     dirty = true; draftGeneration++; refreshDraft(true);
   },
 });
-editorHeading.append(protection.element);
+editorActions.insertBefore(draftStatus, editorActions.firstChild);
+editorActions.insertBefore(protection.element, draftStatus);
 const recoveries = createRecoveryPanel({
   allowed: () => !appDisposed && !editorBusy && !transportOperation.pending && !shell.classList.contains('class-mode')
     && (!hostedPilot || ['owner', 'editor'].includes(getCloudRole() ?? '')),
@@ -1648,6 +1775,7 @@ function refreshDraft(structural: boolean, grouped = !structural): void {
       preview: audioPreview, detectBpm: detectTrackBpm, analyzeLoudness: analyzeTrackLoudness,
       fillerRecordings: fillerLibrary.choices, previewFiller: fillerLibrary.audition,
       beforeTracks: composition?.beforeTracks, afterTracks: composition?.afterTracks,
+      trackActions: addTrackMenu.element,
       isBusy: () => editorBusy || transportOperation.pending || shell.classList.contains('class-mode'), canEdit,
       isCurrent: () => !appDisposed && draft === editingDraft && activeTab === 'edit',
     });
@@ -1676,9 +1804,16 @@ function refreshDraft(structural: boolean, grouped = !structural): void {
     : t(draft.tracks.length ? 'preparePrompt' : 'notPrepared');
   draftStatus.textContent = t('draftState', { lock: t(draft.locked ? 'locked' : 'unlocked'),
     save: t(dirty || persistedRevision === null ? 'unsaved' : cloudSelection?.cached ? 'cloudCached' : cloudSelection ? 'cloudSavedStatus' : 'saved') });
-  draftIdentity.textContent = routineOpen ? t('routineMetadata', { id: draft.id, revision: persistedRevision ?? t('unknownValue'),
-    time: draft.savedAt === undefined ? t('unknownValue') : new Date(draft.savedAt).toLocaleString(locale),
-    status: t(draft.published ? 'exportPublished' : 'draft'), pending: workingCopy?.pendingCloud ? t('savedPending') : dirty ? t('unsaved') : '' }) : '';
+  draftIdentity.replaceChildren();
+  if (routineOpen) {
+    for (const value of [t('lastSaved', { time: draft.savedAt === undefined ? t('unknownValue') : new Date(draft.savedAt).toLocaleString(locale) }),
+      t('revisionValue', { revision: persistedRevision ?? t('unknownValue') }), t(draft.published ? 'exportPublished' : 'draft')]) {
+      draftIdentity.append(element('span', 'identity-value', value));
+    }
+    draftIdentity.append(element('span', 'identity-id', `ID ${draft.id}`));
+  }
+  draftStatus.textContent = workingCopy?.pendingCloud ? t('savedPending') : dirty ? t('unsaved')
+    : cloudSelection?.cached ? t('cloudCached') : cloudSelection ? t('cloudSavedStatus') : t('saved');
   empty.hidden = !!(loaded ?? draft).tracks.length;
   rehearsal.hidden = !(loaded ?? draft).tracks.length;
   if (!loaded) { displayedTrack = ''; renderPlayback(); }
@@ -1691,7 +1826,8 @@ function syncAvailability(): void {
   audioPicker.sync();
   exportPanel.syncAvailability();
   const busy = editorBusy || transportOperation.pending;
-  openDifferent.hidden = !routineOpen || chooserOpen; openDifferent.disabled = busy;
+  openDifferent.hidden = !routineOpen; openDifferent.disabled = busy;
+  chooserClose.disabled = busy;
   editorFooter.hidden = !routineOpen; close.disabled = busy;
   fileInput.hidden = hostedPilot && getCloudRole() === 'player';
   fileInput.disabled = busy || draft.locked || !canEdit();
@@ -1708,25 +1844,32 @@ function syncAvailability(): void {
   }
   editorSession?.syncAvailability();
   save.disabled = busy || !canEdit() || draft.locked || validationErrors.length > 0 || cueTimeInvalid || !!composition?.pending() || !!composition?.working();
-  save.title = t(hostedPilot ? 'cloudSave' : 'save');
+  save.title = t('saveChanges');
   saveLabel.textContent = save.title;
   save.setAttribute('aria-label', save.title);
   const author = !hostedPilot || ['owner', 'editor'].includes(getCloudRole() ?? '');
   for (const button of [save, lock, duplicate]) button.hidden = !author || !routineOpen;
   localSelection.hidden = true;
   newDraft.hidden = !author || routineOpen; newDraft.disabled = busy;
-  routineLibrary.hidden = routineOpen && !chooserOpen;
-  cloudPanel.hidden ||= routineOpen && !chooserOpen;
+  editorDemo.hidden ||= routineOpen;
+  addTrackMenu.element.hidden = !author || !routineOpen;
+  addTrackMenu.trigger.setAttribute('aria-disabled', String(busy || draft.locked || !canEdit()));
+  if (busy || draft.locked || !canEdit()) addTrackMenu.close();
+  lock.querySelector('span')!.textContent = t(draft.locked ? 'unlock' : 'lock');
+  routineLibrary.hidden = routineOpen && !chooserOpen && !chooserDialog.open;
+  cloudPanel.hidden = !hostedPilot || (routineOpen && !chooserDialog.open);
   editor.hidden = !routineOpen; draftIdentity.hidden = !routineOpen;
   exportPanel.element.hidden = !routineOpen; protection.element.hidden = !routineOpen;
   if (composition) composition.controls.hidden = !routineOpen;
   routineOverflow.hidden = !author || !routineOpen;
   for (const button of [localPublish, localDelete]) {
-    button.hidden = !author || !!cloudSelection;
+    button.hidden = !author || !!cloudSelection || (button === localPublish && hostedPilot);
     button.disabled = busy || !canEdit() || draft.locked || persistedRevision === null;
   }
   localPublish.disabled ||= dirty || !draft.tracks.length || validationErrors.length > 0;
   replaceTarget.hidden = !hostedPilot || !!cloudSelection || shareMode !== 'replace';
+  replaceAnother.hidden = !hostedPilot || !!cloudSelection;
+  replaceAnother.disabled = busy || !canEdit() || draft.locked || getCloudContext().access !== 'online';
   shareOptions.hidden = !hostedPilot || !!cloudSelection;
   for (const [mode, button] of shareButtons) { button.disabled = busy; button.setAttribute('aria-pressed', String(mode === shareMode)); }
   if (!hostedPilot) for (const button of [cloudUpload, cloudReplace, cloudOpenDraft, cloudPublish, cloudDelete]) button.hidden = true;
@@ -2167,7 +2310,7 @@ void (async () => {
       empty.querySelector('p')!.textContent = '';
     }
     const classReference = recalledClassSelection(localStorage, owner);
-    if (classReference) {
+    if (classReference && !routineOpen && getCloudRole() === 'player') {
       const setup = classReference.source === 'household'
         ? await getCachedClassSetup(classReference.id, classReference.revision, classReference.published)
         : (await getPreparedClass(classReference.id, classReference.revision, 'local', classReference.published))?.setup;
@@ -2215,6 +2358,10 @@ function disposeApp(): void {
   fillerLibrary.dispose();
   audioPicker.dispose();
   exportPanel.dispose();
+  moreMenu.dispose(); addTrackMenu.dispose();
+  chooserErrors.dispose();
+  if (chooserDialog.open) chooserDialog.close();
+  document.documentElement.classList.remove('routine-chooser-open');
   cloudController?.abort();
   unsubscribeCloud();
   classMode.dispose();

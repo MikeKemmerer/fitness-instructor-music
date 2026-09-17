@@ -21,21 +21,30 @@ The cloud workflow is deployed on Azure Static Web Apps Free with managed Node 2
 Choose routines on **Routines** (the Edit workspace); **Teach** contains playback,
 not library selection. Location and Status checkbox menus support multiple selections,
 with Favorites only and Refresh cloud in one toolbar. Successful Open hides the chooser and its
-filters; Open different routine reveals it. The selected title has Last saved,
+filters; Open different routine opens a searchable modal without moving the editor.
+Cancel or Escape keeps the current routine; switching with unsaved edits offers
+Save, Discard changes or Cancel. The selected title has Last saved,
 revision, Draft/Published and ID metadata; unavailable historical timestamps say
 Unknown. Recoverable drafts sits directly below that metadata. Routine/playlist
 choices and notices omit revision numbers; internal revision checks remain.
-New routine is available only with no routine open; Duplicate to New Routine
+New routine is available only with no routine open; More actions > Duplicate to new routine
 creates an independently named complete copy with fresh entry/cue IDs.
+
+The aligned editor toolbar contains Undo/Redo, save status, one Save button and
+More actions. Lock/unlock, publication and deletion are contextual commands in
+More actions. Cross-routine replacement has its own explicit dialog, not a second
+Save control. Track order > Add track offers From audio library and Import audio.
+Share beside the title opens the existing Excel/PDF exports. These layout changes
+await remote screenshot review; no local preview is started on this workstation.
 
 One Routine contains walk-in songs, pre-routine filler, set list/cues/per-gap filler,
 post-routine filler, walk-out songs, levels and crossfades. The single hosted
-**Save to Cloud** first saves that full value durably on this device, then attempts
-Cloud synchronization. **Saved on this device / Pending Cloud** survives close/
+**Save** first saves that full value durably on this device, then attempts
+Cloud synchronization. **Saved on this device / Cloud sync pending** survives close/
 reload and may finish on reconnect once the same user/role is revalidated. Later
 unsaved edits are not implicitly uploaded. Failed/conflicted Cloud writes retain
-the local copy; no forced overwrite. The standalone build uses **Save on this
-device** in the same slot and never contacts Cloud. Import alone does not upload.
+the local copy; no forced overwrite. The standalone build uses **Save** in the
+same slot and never contacts Cloud. Import alone does not upload.
 
 Publish remains a separate explicit action creating an immutable revision; it
 does not change an already-prepared class. Locks and stale-revision checks still

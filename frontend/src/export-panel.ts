@@ -1,9 +1,9 @@
-import { CheckCheck, Download, FileText, RotateCcw, Sheet, Square, X } from 'lucide';
+import { CheckCheck, Download, FileText, RotateCcw, Share2, Sheet, Square, X } from 'lucide';
 import type { Routine } from '../../shared/routine';
 import { createExcelBlob, createExportSnapshot, createPdfBlob, defaultExportColumns, defaultPdfColumns, downloadExport,
   exportColumns, exportFilename, type ExportSnapshot } from './exports';
 import { errorMessage, t } from './i18n';
-import { element, field, iconButton, transientText } from './ui';
+import { element, field, iconButton, setButtonIcon, transientText } from './ui';
 
 interface ExportPanelState { routine: Routine; unsaved: boolean; busy: boolean }
 interface ExportActions {
@@ -15,14 +15,26 @@ interface ExportActions {
 export function createExportPanel(readState: () => ExportPanelState, actions: ExportActions = {
   excel: createExcelBlob, pdf: (snapshot, selected) => createPdfBlob(snapshot, undefined, selected), download: downloadExport,
 }) {
-  const root = element('details', 'export-section');
+  const root = element('details', 'export-section command-menu');
   root.open = false;
-  root.append(element('summary', '', t('share')));
+  const trigger = element('summary', 'button icon-button');
+  trigger.title = t('share'); trigger.setAttribute('aria-label', t('share'));
+  setButtonIcon(trigger, Share2);
+  trigger.append(element('span', 'visually-hidden', t('share')));
+  root.append(trigger);
   const snapshotLabel = element('p', 'muted export-snapshot');
-  const downloads = element('div', 'action-row');
+  const downloads = element('div', 'command-menu-items');
   const refreshers: (() => void)[] = [];
   const cancelers: (() => void)[] = [];
   let disposed = false;
+  const outside = (event: Event) => { if (event.target && !root.contains(event.target as Node)) root.open = false; };
+  document.addEventListener('pointerdown', outside);
+  trigger.addEventListener('click', event => { if (disposed || readState().busy) event.preventDefault(); });
+  root.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !(event.target as HTMLElement).closest('dialog')) {
+      event.preventDefault(); root.open = false; trigger.focus({ preventScroll: true });
+    }
+  });
   for (const format of ['xlsx', 'pdf'] as const) {
     const label = t(format === 'xlsx' ? 'exportExcel' : 'exportPdf');
     const defaults = () => format === 'xlsx' ? defaultExportColumns() : defaultPdfColumns();
@@ -130,6 +142,8 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
   root.append(downloads);
   const syncAvailability = () => {
     const state = readState();
+    trigger.setAttribute('aria-disabled', String(disposed || state.busy));
+    if (disposed || state.busy) root.open = false;
     snapshotLabel.textContent = t('exportSnapshot', { name: state.routine.name, revision: state.routine.revision,
       status: t(state.unsaved ? 'exportUnsaved' : 'exportSaved') });
     for (const refresh of refreshers) refresh();
@@ -138,6 +152,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    document.removeEventListener('pointerdown', outside);
     for (const cancel of cancelers) cancel();
   };
   return { element: root, syncAvailability, dispose };

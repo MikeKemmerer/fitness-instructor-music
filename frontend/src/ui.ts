@@ -162,7 +162,7 @@ export function iconButton(label: string, icon: IconNode, action: () => void, sh
   return button;
 }
 
-export function setButtonIcon(button: HTMLButtonElement, icon: IconNode): void {
+export function setButtonIcon(button: HTMLElement, icon: IconNode): void {
   button.querySelector('svg')?.remove();
   button.prepend(createElement(icon, { width: 22, height: 22, 'aria-hidden': 'true', 'stroke-width': 1.8 }));
 }

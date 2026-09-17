@@ -19,6 +19,7 @@ interface EditorContext {
   previewFiller?: (filler: Filler) => Promise<void>;
   beforeTracks?: HTMLElement;
   afterTracks?: HTMLElement;
+  trackActions?: HTMLElement;
 }
 
 export interface EditorSession {
@@ -119,7 +120,10 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
   nameFields.append(nameField);
   form.append(nameFields);
   const tracks = element('section', 'editor-section');
-  tracks.append(element('h2', '', t('playlist')));
+  const trackHeading = element('div', 'track-section-heading');
+  trackHeading.append(element('h2', '', t('playlist')));
+  if (context.trackActions) trackHeading.append(context.trackActions);
+  tracks.append(trackHeading);
   if (!routine.tracks.length) tracks.append(element('p', 'muted', t('emptyTracks')));
   const trackList = element('div', 'track-list');
   tracks.append(trackList);
