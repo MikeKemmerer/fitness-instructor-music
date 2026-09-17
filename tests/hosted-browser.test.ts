@@ -1187,6 +1187,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       && new URL(call.path, origin).searchParams.get('revision') === String(publication.revision))).toBe(true);
     expect(calls.slice(playerStart)).toContainEqual(expect.objectContaining({ path: `/api/routines/${publicationId}?published=true`, method: 'GET', status: 200 }));
     expect(calls.slice(playerStart).some(call => call.path.startsWith('/api/fillers'))).toBe(false);
+    await automaticReady(player);
     await player.evaluate(async id => new Promise<void>((accept, reject) => {
       const request = indexedDB.open('fitness-rehearsal');
       request.onerror = () => reject(request.error);
@@ -1199,11 +1200,15 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       };
     }), recording.asset.id);
     const prepareStart = calls.length;
+    await player.reload();
     await play(player);
-    expect(calls.slice(prepareStart)).toEqual([
+    const coldRequests = calls.slice(prepareStart);
+    expect(coldRequests.filter(call => call.path.startsWith('/api/media/'))).toEqual([
       { path: `/api/media/${recording.asset.id}?routineId=${publicationId}&revision=${publication.revision}`, method: 'GET', status: 200 },
       { path: `/api/media/${recording.asset.id}/chunks/0?routineId=${publicationId}&revision=${publication.revision}`, method: 'GET', status: 200 },
     ]);
+    expect(coldRequests.every(call => call.method === 'GET')).toBe(true);
+    expect(coldRequests.some(call => call.path.startsWith('/api/fillers'))).toBe(false);
     await ready(player); await device.setOffline(true); await player.reload();
     await browserExpect(player.locator('.cloud-status')).toContainText('Cloud offline');
     const offlineRequests: string[] = [];
