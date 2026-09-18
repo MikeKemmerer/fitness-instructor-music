@@ -344,20 +344,24 @@ export function createMediaLibrary(context: MediaLibraryContext) {
         && metadata.artist === desired.artist && metadata.bpm === undefined;
       if (entry.phase === 'asset') {
         if (entry.kind === 'song') {
-          entry.track ??= await offline.storeTrack(entry.file); assert();
-          try { validateLibraryIntakeDuration(entry.kind, entry.track.duration); }
+          try {
+            entry.track ??= await offline.storeTrack(entry.file); assert();
+            validateLibraryIntakeDuration(entry.kind, entry.track.duration);
+          }
           catch (error) {
-            try { await offline.removeTrack(entry.track.id); } catch {}
+            if (entry.track) try { await offline.removeTrack(entry.track.id); } catch {}
             batch = []; files.value = ''; throw error;
           }
           const blob = await offline.getTrackBlob(entry.track.id); assert(); if (!blob) throw new Error('missing_audio');
           const asset = await context.cloud.uploadAsset(blob, transfer); assert();
           entry.committed = { id: asset.id, kind: 'song', asset, metadata: { revision: 0, title: '', artist: '' } };
         } else {
-          entry.recording ??= await offline.addFillerRecording(entry.file, filename.replace(/\.[^.]+$/, '').slice(0, 160)); assert();
-          try { validateLibraryIntakeDuration(entry.kind, entry.recording.duration); }
+          try {
+            entry.recording ??= await offline.addFillerRecording(entry.file, filename.replace(/\.[^.]+$/, '').slice(0, 160)); assert();
+            validateLibraryIntakeDuration(entry.kind, entry.recording.duration);
+          }
           catch (error) {
-            try { await offline.removeFillerRecording(entry.recording.id); } catch {}
+            if (entry.recording) try { await offline.removeFillerRecording(entry.recording.id); } catch {}
             batch = []; files.value = ''; throw error;
           }
           const blob = await offline.getFillerRecordingBlob(entry.recording); assert(); if (!blob) throw new Error('missing_audio');

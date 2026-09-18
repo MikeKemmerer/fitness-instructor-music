@@ -878,6 +878,34 @@ describe('uploaded audio manager', () => {
     setup.manager.dispose();
   });
 
+  it.each(['song', 'filler'] as const)('clears a rejected local %s staging attempt so another batch can upload', async kind => {
+    const setup = await harness();
+    if (kind === 'song') {
+      mocks.storeTrack.mockRejectedValueOnce(new Error('invalid_audio'));
+      mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'valid', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
+      mocks.getTrackBlob.mockResolvedValue(setup.blob);
+    } else {
+      setup.root.querySelectorAll('button').find(node => node.textContent === t('managedFillers'))!.click();
+      await setup.idle();
+      const recording: FillerRecording = { id: 'local-filler', name: 'valid', duration: 20, asset: setup.item.asset };
+      mocks.addFillerRecording.mockRejectedValueOnce(new Error('invalid_audio'));
+      mocks.addFillerRecording.mockResolvedValue(recording);
+      mocks.getFillerRecordingBlob.mockResolvedValue(setup.blob);
+      setup.cloud.addFiller.mockResolvedValue(recording);
+    }
+    const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    files.files = [new File([setup.blob], 'broken.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(kind === 'song' ? t('uploadAudio') : t('uploadFillers')).click(); await setup.idle();
+    expect(setup.button(t('resumeAudioUpload')).hidden).toBe(true);
+    expect(files.disabled).toBe(false);
+
+    files.files = [new File([setup.blob], 'valid.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(kind === 'song' ? t('uploadAudio') : t('uploadFillers')).click(); await setup.idle();
+    expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioBatchDone'));
+    expect(kind === 'song' ? mocks.storeTrack : mocks.addFillerRecording).toHaveBeenCalledTimes(2);
+    setup.manager.dispose();
+  });
+
   it('does not overwrite authoritative metadata changed after a lost metadata response', async () => {
     const setup = await harness();
     mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'original', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
