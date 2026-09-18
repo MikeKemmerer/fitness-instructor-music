@@ -790,12 +790,15 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     if (metadata.revision !== revision + 1) throw new Error('cloud_invalid_response');
     return metadata;
   };
-  const recordLibraryIntake = async (kind: ManagedAudioItem['kind'], id: string, filename: string, duration: number, transfer: CloudTransfer = {}): Promise<void> => {
+  const recordLibraryIntake = async (kind: ManagedAudioItem['kind'], id: string, filename: string, duration: number, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {
     const assert = operation(transfer, true);
     if (!filename || filename.length > 300 || /[/\\]/.test(filename) || !Number.isFinite(duration) || duration <= 0 || duration > (kind === 'song' ? 1200 : 360)) throw new Error('invalid_audio');
-    await client.request(`${libraryPath(kind, id)}/intake`, { method: 'PUT',
+    const result = await client.request<{ metadata: LibraryMetadata }>(`${libraryPath(kind, id)}/intake`, { method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'If-Match': '"0"' }, body: JSON.stringify({ filename, duration }), signal: transfer.signal });
     assert();
+    const metadata = metadataValue(result.metadata);
+    if (metadata.revision !== 1 || metadata.filename !== filename || metadata.duration !== duration) throw new Error('cloud_invalid_response');
+    return metadata;
   };
   const libraryUsage = async (kind: ManagedAudioItem['kind'], id: string, cursor?: string, transfer: CloudTransfer = {}): Promise<LibraryUsagePage> => {
     const assert = operation(transfer, true);

@@ -170,12 +170,14 @@ describe('uploaded audio manager adapters', () => {
 
   it('writes only editable metadata with quoted independent revision and exact intake once', async () => {
     const harness = libraryHarness(); const value = { title: 'House practice', artist: '', bpm: 124 };
-    harness.fetcher.mockImplementation(async input => json(String(input).endsWith('/metadata') ? { metadata: { ...value, revision: 1 } } : { accepted: true }));
-    await harness.library.recordLibraryIntake('song', 'asset-a', 'source.wav', 30);
-    await harness.library.putLibraryMetadata('song', 'asset-a', 0, value);
+    const intakeMetadata = { revision: 1, title: '', artist: '', filename: 'source.wav', duration: 30 };
+    harness.fetcher.mockImplementation(async input => json(String(input).endsWith('/metadata')
+      ? { metadata: { ...intakeMetadata, ...value, revision: 2 } } : { metadata: intakeMetadata }));
+    expect(await harness.library.recordLibraryIntake('song', 'asset-a', 'source.wav', 30)).toEqual(intakeMetadata);
+    await harness.library.putLibraryMetadata('song', 'asset-a', intakeMetadata.revision, value);
     const intake = harness.fetcher.mock.calls[0]![1]!; const edit = harness.fetcher.mock.calls[1]![1]!;
     expect(new Headers(intake.headers).get('If-Match')).toBe('"0"'); expect(JSON.parse(String(intake.body))).toEqual({ filename: 'source.wav', duration: 30 });
-    expect(new Headers(edit.headers).get('If-Match')).toBe('"0"'); expect(JSON.parse(String(edit.body))).toEqual(value);
+    expect(new Headers(edit.headers).get('If-Match')).toBe('"1"'); expect(JSON.parse(String(edit.body))).toEqual(value);
     await expect(harness.library.recordLibraryIntake('filler', 'asset-a', '../source.wav', 30)).rejects.toThrow();
     await expect(harness.library.putLibraryMetadata('song', 'asset-a', 1, { title: '', artist: '', bpm: 221 })).rejects.toThrow();
     expect(harness.fetcher).toHaveBeenCalledTimes(2);
@@ -2127,7 +2129,8 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
       asset: recording.asset, recording, metadata: server.metadata.get(recording.id) ?? { revision: 0, title: '', artist: '' } })) });
     if (/^\/api\/library\/fillers\/[^/]+\/intake$/.test(path)) {
       const id = path.split('/')[4]!; const facts = JSON.parse(String(init?.body));
-      server.metadata.set(id, { revision: 0, title: '', artist: '', ...facts }); return json({ accepted: true });
+      const metadata = { revision: 1, title: '', artist: '', ...facts };
+      server.metadata.set(id, metadata); return json({ metadata });
     }
     if (/^\/api\/library\/fillers\/[^/]+\/metadata$/.test(path)) {
       const id = path.split('/')[4]!; const previous = server.metadata.get(id) ?? { revision: 0, title: '', artist: '' };

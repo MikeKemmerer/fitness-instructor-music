@@ -213,7 +213,10 @@ export function createMediaLibrary(context: MediaLibraryContext) {
       void run(async (transfer, assert) => {
         const metadata = await context.cloud.libraryMetadata(item.kind, item.id, transfer); assert();
         if (!current()) return;
-        revision = metadata.revision; conflict = false; save.disabled = false; reload.hidden = true;
+        item.metadata = metadata; revision = metadata.revision; conflict = false;
+        title.value = metadata.title; artist.value = metadata.artist; bpm.value = metadata.bpm?.toString() ?? '';
+        context.catalog?.(items);
+        save.disabled = false; reload.hidden = true;
         feedback.textContent = `${metadata.title} / ${metadata.artist} / ${metadata.bpm ?? t('unknownValue')}`;
       });
     }, true); reload.hidden = true;
@@ -338,8 +341,8 @@ export function createMediaLibrary(context: MediaLibraryContext) {
       const item = entry.committed;
       entry.done = true;
       try {
-        await context.cloud.recordLibraryIntake(item.kind, item.id, filename, entry.track?.duration ?? entry.recording!.duration, transfer); assert();
-        item.metadata = await context.cloud.putLibraryMetadata(item.kind, item.id, 0, { title: filename.replace(/\.[^.]+$/, ''), artist: '' }, transfer); assert();
+        const metadata = await context.cloud.recordLibraryIntake(item.kind, item.id, filename, entry.track?.duration ?? entry.recording!.duration, transfer); assert();
+        item.metadata = await context.cloud.putLibraryMetadata(item.kind, item.id, metadata.revision, { title: filename.replace(/\.[^.]+$/, ''), artist: '' }, transfer); assert();
       } catch (error) {
         files.value = '';
         if (!transfer.signal?.aborted) {

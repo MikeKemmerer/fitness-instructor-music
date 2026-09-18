@@ -648,12 +648,15 @@ describe('uploaded audio manager', () => {
     type Transfer = { signal?: AbortSignal };
     const cloud = {
       managedPage: vi.fn(async (_kind: 'song' | 'filler', _cursor?: string, _transfer?: Transfer): Promise<ManagedAudioPage> => ({ items: [structuredClone(item)] })),
-      libraryMetadata: vi.fn(async (): Promise<LibraryMetadata> => ({ ...item.metadata, revision: 3 })),
+      libraryMetadata: vi.fn(async (): Promise<LibraryMetadata> => ({ revision: 3, title: '<Accepted title>', artist: 'Accepted artist', bpm: 132 })),
       putLibraryMetadata: vi.fn(async (_kind: string, _id: string, revision: number, value: Pick<LibraryMetadata, 'title' | 'artist' | 'bpm'>) => ({ ...value, revision: revision + 1 })),
       libraryUsage: vi.fn(async () => ({ references: [] as import('../shared/cloud-contract').LibraryUsagePage['references'], complete: true })),
       deleteLibraryItem: vi.fn(async (): Promise<import('../shared/cloud-contract').LibraryDeleteResult> => ({ deleted: true, bytesRetained: true })),
       downloadTracks: vi.fn(async (_tracks: Track[], _media: CloudRoutine['media'], _transfer: Transfer) => {}),
-      uploadAsset: vi.fn(async () => item.asset), recordLibraryIntake: vi.fn(async () => {}), addFiller: vi.fn(), ensureFiller: vi.fn(),
+      uploadAsset: vi.fn(async () => item.asset),
+      recordLibraryIntake: vi.fn(async (_kind: string, _id: string, filename: string, duration: number): Promise<LibraryMetadata> =>
+        ({ revision: 1, title: '', artist: '', filename, duration })),
+      addFiller: vi.fn(), ensureFiller: vi.fn(),
     };
     let state: PreviewState = { kind: 'idle', trackId: null, playing: false, loading: false, elapsed: 0, duration: 0, error: null };
     const listeners = new Set<(value: PreviewState) => void>();
@@ -664,9 +667,9 @@ describe('uploaded audio manager', () => {
       subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); } };
     let busy = false;
     const localUsage = vi.fn(async () => ({ references: [] as import('../shared/cloud-contract').LibraryUsagePage['references'], complete: true }));
-    const beforePreview = vi.fn(); const changed = vi.fn();
+    const beforePreview = vi.fn(); const changed = vi.fn(); const catalog = vi.fn();
     const manager = createMediaLibrary({ hosted: true, cloud: cloud as unknown as ReturnType<typeof createCloudLibrary>, preview,
-      known: () => [], busy: () => busy, working: value => { busy = value; }, visible: () => true, beforePreview, changed, localUsage });
+      known: () => [], busy: () => busy, working: value => { busy = value; }, visible: () => true, beforePreview, changed, catalog, localUsage });
     const root = manager.element as unknown as TestElement;
     root.open = true; root.dispatchEvent(new Event('toggle'));
     await vi.waitFor(() => expect(root.querySelectorAll('.media-row')).toHaveLength(2));
@@ -674,7 +677,7 @@ describe('uploaded audio manager', () => {
     const button = (label: string, within = root) => within.querySelectorAll('button').find(node => node.title === label)!;
     const dialog = () => root.querySelector('dialog')!;
     const input = (label: string) => dialog().querySelectorAll('label').find(node => node.textContent === label)!.querySelector('input')!;
-    return { manager, root, cloud, item, blob, preview, emit, beforePreview, changed, localUsage, button, dialog, input, idle: () => vi.waitFor(() => expect(busy).toBe(false)) };
+    return { manager, root, cloud, item, blob, preview, emit, beforePreview, changed, catalog, localUsage, button, dialog, input, idle: () => vi.waitFor(() => expect(busy).toBe(false)) };
   }
 
   it('browses text-only metadata and unknown intake without downloading, and searches loaded rows', async () => {
@@ -699,10 +702,13 @@ describe('uploaded audio manager', () => {
     expect(setup.button(t('saveChanges'), setup.dialog()).disabled).toBe(true);
     expect(setup.dialog().querySelectorAll('p').some(node => node.textContent === t('audioMetadataConflict'))).toBe(true);
     setup.button(t('audioReloadRevision'), setup.dialog()).click(); await setup.idle();
-    expect(setup.input(t('audioTitle')).value).toBe('<Revised title>');
+    expect(setup.input(t('audioTitle')).value).toBe('<Accepted title>');
+    expect(setup.input(t('audioArtist')).value).toBe('Accepted artist');
+    expect(setup.input(t('audioBpm')).value).toBe('132');
+    expect(setup.catalog.mock.calls.at(-1)![0][0].metadata).toEqual({ revision: 3, title: '<Accepted title>', artist: 'Accepted artist', bpm: 132 });
     setup.button(t('saveChanges'), setup.dialog()).click(); await setup.idle();
     expect(setup.cloud.putLibraryMetadata.mock.calls.map(call => call[2])).toEqual([0, 3]);
-    expect(setup.cloud.putLibraryMetadata.mock.lastCall![3]).toEqual({ title: '<Revised title>', artist: 'Artist', bpm: 128 });
+    expect(setup.cloud.putLibraryMetadata.mock.lastCall![3]).toEqual({ title: '<Accepted title>', artist: 'Accepted artist', bpm: 132 });
     expect(setup.root.querySelector('dialog')).toBeNull(); expect(setup.cloud.uploadAsset).not.toHaveBeenCalled(); setup.manager.dispose();
   });
 
@@ -756,6 +762,19 @@ describe('uploaded audio manager', () => {
     expect(setup.cloud.uploadAsset).toHaveBeenCalledOnce(); expect(mocks.storeTrack).toHaveBeenCalledOnce();
     expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioUploadMetadataFailed'));
     expect(setup.button(t('resumeAudioUpload')).hidden).toBe(true); expect(setup.cloud.managedPage).toHaveBeenCalledTimes(2);
+    setup.manager.dispose();
+  });
+
+  it('uses the intake response revision for uploaded editable metadata', async () => {
+    const setup = await harness();
+    mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'original', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
+    mocks.getTrackBlob.mockResolvedValue(setup.blob);
+    const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    files.files = [new File([setup.blob], 'original.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(t('uploadAudio')).click(); await setup.idle();
+    expect(setup.cloud.recordLibraryIntake).toHaveBeenCalledWith('song', 'asset-manager', 'original.wav', 20, expect.any(Object));
+    expect(setup.cloud.putLibraryMetadata).toHaveBeenCalledWith('song', 'asset-manager', 1, { title: 'original', artist: '' }, expect.any(Object));
+    expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioBatchDone'));
     setup.manager.dispose();
   });
 
