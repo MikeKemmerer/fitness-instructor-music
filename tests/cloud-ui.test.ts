@@ -6,7 +6,7 @@ import { canEditCloudDraft, cloudErrorMessage, confirmCloudNavigation, recalledC
 import { hostedCloudSelectionKey, hostedIdentityMarker, hostedUserKey } from '../frontend/src/hosted-session';
 import { t } from '../frontend/src/i18n';
 import { newRoutine, reorderTrack, type FillerRecording, type Routine } from '../shared/routine';
-import type { CloudAsset, CloudRoutine, CloudSession, FillerAnalysis } from '../shared/cloud-contract';
+import type { CloudAsset, CloudRoutine, CloudSession, FillerAnalysis, LibraryMetadata } from '../shared/cloud-contract';
 import type { PlayerState } from '../shared/player-contract';
 import { createClassLibrary, parseCloudPlaylist } from '../frontend/src/class-library';
 import type { ClassSetup, CloudMusicPlaylist } from '../shared/class-plan';
@@ -25,6 +25,7 @@ const appMocks = vi.hoisted(() => ({
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
   cacheFillerRecording: vi.fn(), getFillerRecordingBlob: vi.fn(),
   listMusicPlaylists: vi.fn(), getMusicPlaylist: vi.fn(), saveMusicPlaylist: vi.fn(), cacheMusicPlaylist: vi.fn(),
+  listPlaylistWorkingCopies: vi.fn(async () => []), listMusicPlaylistPublications: vi.fn(async () => []), listCachedMusicPlaylists: vi.fn(async () => []),
   listClassSetups: vi.fn(), getClassSetup: vi.fn(), saveClassSetup: vi.fn(), cacheClassSetup: vi.fn(),
   getCachedClassSetup: vi.fn(), getCachedMusicPlaylist: vi.fn(), getPreparedClass: vi.fn(),
   deleteRoutine: vi.fn(), deleteRoutineAndWorkingCopy: vi.fn(), publishRoutine: vi.fn(), deleteMusicPlaylist: vi.fn(), deleteClassSetup: vi.fn(),
@@ -46,10 +47,11 @@ vi.mock('../frontend/src/loudness', () => ({ analyzeTrackLoudness: vi.fn() }));
 vi.mock('../frontend/src/filler-audio', async original => ({ ...await original<typeof import('../frontend/src/filler-audio')>(), getFillerBuffer: appMocks.filler }));
 vi.mock('../frontend/src/editor', async original => ({
   ...await original<typeof import('../frontend/src/editor')>(),
-  renderEditor: (_host: unknown, routine: Routine, changed: (structural?: boolean) => void, context: { canEdit: () => boolean }) => {
+  renderEditor: (host: AppNode, routine: Routine, changed: (structural?: boolean) => void, context: { canEdit: () => boolean; trackActions?: AppNode }) => {
     appMocks.editor.routine = routine;
     appMocks.editor.changed = changed;
     appMocks.editor.canEdit = context.canEdit;
+    host.replaceChildren(...(context.trackActions ? [context.trackActions] : []));
     return { syncAvailability: vi.fn(), cancelJobs: vi.fn(), refreshFillers: vi.fn(), dispose: vi.fn() };
   },
 }));
@@ -151,6 +153,54 @@ async function uploadHarness(bytes = 128) {
 afterEach(() => {
   if (typeof window !== 'undefined') window.dispatchEvent?.(new Event('pagehide'));
   vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
+});
+
+describe('uploaded audio manager adapters', () => {
+  it('reads bounded metadata without fetching audio and preserves unknown intake', async () => {
+    const { asset } = await fixture(); const harness = libraryHarness();
+    const metadata = { revision: 0, title: '<Title>', artist: '' };
+    harness.fetcher.mockImplementation(async () => json({ items: [{ id: asset.id, kind: 'song', asset, metadata }], cursor: 'next' }));
+    const result = await harness.library.managedPage('song');
+    expect(result.items[0]!.metadata).toEqual(metadata); expect(result.items[0]!.metadata.duration).toBeUndefined();
+    expect(harness.getTrackBlob).not.toHaveBeenCalled(); expect(harness.cacheTrack).not.toHaveBeenCalled();
+    await harness.library.managedPage('song', result.cursor);
+    expect(harness.fetcher.mock.calls.map(call => String(call[0]))).toEqual(['/api/library/songs', '/api/library/songs?cursor=next']);
+    expect(harness.fetcher.mock.calls.every(call => call[1]?.cache === 'no-store')).toBe(true);
+  });
+
+  it('writes only editable metadata with quoted independent revision and exact intake once', async () => {
+    const harness = libraryHarness(); const value = { title: 'House practice', artist: '', bpm: 124 };
+    harness.fetcher.mockImplementation(async input => json(String(input).endsWith('/metadata') ? { metadata: { ...value, revision: 1 } } : { accepted: true }));
+    await harness.library.recordLibraryIntake('song', 'asset-a', 'source.wav', 30);
+    await harness.library.putLibraryMetadata('song', 'asset-a', 0, value);
+    const intake = harness.fetcher.mock.calls[0]![1]!; const edit = harness.fetcher.mock.calls[1]![1]!;
+    expect(new Headers(intake.headers).get('If-Match')).toBe('"0"'); expect(JSON.parse(String(intake.body))).toEqual({ filename: 'source.wav', duration: 30 });
+    expect(new Headers(edit.headers).get('If-Match')).toBe('"0"'); expect(JSON.parse(String(edit.body))).toEqual(value);
+    await expect(harness.library.recordLibraryIntake('filler', 'asset-a', '../source.wav', 30)).rejects.toThrow();
+    await expect(harness.library.putLibraryMetadata('song', 'asset-a', 1, { title: '', artist: '', bpm: 221 })).rejects.toThrow();
+    expect(harness.fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('makes one delete request per explicit continuation and preserves reference conflicts', async () => {
+    const harness = libraryHarness();
+    harness.fetcher.mockResolvedValueOnce(json({ pending: true }, 202)).mockResolvedValueOnce(json({ deleted: true, bytesRetained: true }))
+      .mockResolvedValueOnce(json({ error: 'media_in_use' }, 409));
+    expect(await harness.library.deleteLibraryItem('song', 'asset-a', 2)).toEqual({ pending: true });
+    expect(harness.fetcher).toHaveBeenCalledOnce();
+    expect(await harness.library.deleteLibraryItem('song', 'asset-a', 2)).toEqual({ deleted: true, bytesRetained: true });
+    const options = harness.fetcher.mock.calls[0]![1]!;
+    expect(options.method).toBe('DELETE'); expect(options.body).toBeUndefined(); expect(new Headers(options.headers).get('If-Match')).toBe('"2"');
+    await expect(harness.library.deleteLibraryItem('song', 'asset-a', 2)).rejects.toMatchObject({ status: 409, serverCode: 'media_in_use' });
+    expect(harness.fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('denies player management and rejects responses crossing an identity change', async () => {
+    const denied = libraryHarness('player'); await expect(denied.library.managedPage('song')).rejects.toThrow();
+    await expect(denied.library.deleteLibraryItem('filler', 'recording-a', 0)).rejects.toThrow(); expect(denied.fetcher).not.toHaveBeenCalled();
+    const harness = libraryHarness(); const response = pending<Response>(); harness.fetcher.mockReturnValue(response.promise);
+    const reading = harness.library.managedPage('song'); harness.client.admitSession(session('editor', 'other'));
+    response.resolve(json({ items: [] })); await expect(reading).rejects.toThrow();
+  });
 });
 
 describe('unified catalog client', () => {
@@ -380,6 +430,36 @@ describe('independent class and playlist client', () => {
 });
 
 describe('shared filler cloud client', () => {
+  it('reconciles a lost recording response without allocating another filler or reuploading bytes', async () => {
+    const harness = await uploadHarness();
+    const local = { id: 'local-recording', name: 'Dance loop', duration: 8, asset: harness.asset };
+    const committed = { ...local, id: 'committed-recording' };
+    const handler = harness.fetcher.getMockImplementation()!;
+    harness.fetcher.mockImplementation(async (input, init) => {
+      if (input === '/api/fillers' && init?.method === 'POST') return json({ error: 'storage_unavailable' }, 503);
+      if (input === '/api/fillers') return json({ fillers: [committed] });
+      return handler(input, init);
+    });
+    await expect(harness.library.addFiller(local, harness.blob)).rejects.toThrow();
+    expect(await harness.library.addFiller(local, harness.blob)).toEqual(committed);
+    expect(harness.start).toHaveBeenCalledOnce();
+    expect(harness.fetcher.mock.calls.filter(([path, init]) => path === '/api/fillers' && init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('fails closed after ambiguous recording creation when reconciliation cannot prove its identity', async () => {
+    const harness = await uploadHarness();
+    const local = { id: 'local-recording', name: 'Dance loop', duration: 8, asset: harness.asset };
+    const handler = harness.fetcher.getMockImplementation()!;
+    harness.fetcher.mockImplementation(async (input, init) => {
+      if (input === '/api/fillers' && init?.method === 'POST') return json({ error: 'storage_unavailable' }, 503);
+      if (input === '/api/fillers') return json({ fillers: [] });
+      return handler(input, init);
+    });
+    await expect(harness.library.addFiller(local, harness.blob)).rejects.toThrow();
+    await expect(harness.library.addFiller(local, harness.blob)).rejects.toThrow('cloud_head_required');
+    expect(harness.fetcher.mock.calls.filter(([path, init]) => path === '/api/fillers' && init?.method === 'POST')).toHaveLength(1);
+  });
+
   it('prepares every gap recording, including a retained final rule, before caching the routine', async () => {
     const { envelope, asset, blob } = await fixture();
     const recording = { id: 'gap-a', name: 'Retained gap', duration: 8, asset };
@@ -2038,10 +2118,23 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   appMocks.player.play.mockImplementation(async () => { state = { ...state, status: 'playing' }; emit(state); });
   appMocks.player.pause.mockImplementation(() => { state = { ...state, status: 'paused' }; emit(state); });
   const server = { envelope: data.envelope, authStatus: 200, writeStatus: 200, fillers: [] as FillerRecording[], classes: [] as ClassSetup[],
-    analyses: new Map<string, FillerAnalysis>() };
+    analyses: new Map<string, FillerAnalysis>(), metadata: new Map<string, LibraryMetadata>() };
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
     const path = String(input);
     if (path === '/api/auth/session') return server.authStatus === 200 ? json(account) : json({ error: 'signin_required' }, server.authStatus);
+    if (path === '/api/library/songs') return json({ items: [] });
+    if (path === '/api/library/fillers') return json({ items: server.fillers.map(recording => ({ id: recording.id, kind: 'filler',
+      asset: recording.asset, recording, metadata: server.metadata.get(recording.id) ?? { revision: 0, title: '', artist: '' } })) });
+    if (/^\/api\/library\/fillers\/[^/]+\/intake$/.test(path)) {
+      const id = path.split('/')[4]!; const facts = JSON.parse(String(init?.body));
+      server.metadata.set(id, { revision: 0, title: '', artist: '', ...facts }); return json({ accepted: true });
+    }
+    if (/^\/api\/library\/fillers\/[^/]+\/metadata$/.test(path)) {
+      const id = path.split('/')[4]!; const previous = server.metadata.get(id) ?? { revision: 0, title: '', artist: '' };
+      if (init?.method === 'PUT') server.metadata.set(id, { ...previous, ...JSON.parse(String(init.body)), revision: previous.revision + 1 });
+      return json({ metadata: server.metadata.get(id) ?? previous });
+    }
+    if (/^\/api\/library\/fillers\/[^/]+\/usage$/.test(path)) return json({ references: [], complete: true });
     if (path === '/api/fillers' && init?.method === 'POST') {
       if (server.writeStatus !== 200) return json({ error: 'storage_unavailable' }, server.writeStatus);
       const recording = { ...JSON.parse(String(init.body)), id: 'household-filler' } as FillerRecording;
@@ -2092,12 +2185,19 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   await import('../frontend/src/main');
   if (options.earlyEdit) { button(t('edit')).click(); localStartup.resolve(null); }
   await new Promise<void>(resolve => setImmediate(resolve));
-  if (!options.readinessDeferred && !options.syncDeferred) await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+  if (!options.readinessDeferred && !options.syncDeferred) {
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+  }
   return { server, fetcher, data, store, navigate, cached, platform, working };
 }
 
 function button(title: string): AppNode {
-  const node = appNodes.find(item => item.tag === 'button' && item.title === title && !item.hidden)
+  const routine = appNodes.find(item => item.className === 'edit-panel');
+  const node = routine?.querySelectorAll('button').find(item => item.title === title && !item.hidden)
+    ?? routine?.querySelectorAll('button').find(item => item.title === title)
+    ?? appNodes.find(item => item.tag === 'button' && item.title === title && !item.hidden)
     ?? appNodes.find(item => item.tag === 'button' && item.title === title);
   if (!node) throw new Error(`Missing button: ${title}`);
   return node;
@@ -2105,8 +2205,10 @@ function button(title: string): AppNode {
 
 async function cloudClick(title: string): Promise<void> {
   const target = button(title);
-  expect(target.disabled).toBe(false);
+  await vi.waitFor(() => expect(target.disabled).toBe(false));
   target.click();
+  await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+  await new Promise<void>(resolve => setImmediate(resolve));
   await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
 }
 
@@ -2126,7 +2228,54 @@ async function openCloudRoutine(): Promise<void> {
   await cloudClick(t('cloudOpen'));
 }
 
+async function openManagedFillers(): Promise<AppNode> {
+  button(t('settings')).click();
+  await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+  const manager = appNodes.find(node => node.classList.contains('media-library'))!;
+  manager.open = true; manager.dispatchEvent(new Event('toggle'));
+  await vi.waitFor(() => expect(button(t('refreshAudio')).disabled).toBe(false));
+  manager.querySelectorAll('button').find(node => node.textContent === t('managedFillers'))!.click();
+  await vi.waitFor(() => expect(button(t('refreshAudio')).disabled).toBe(false));
+  return manager;
+}
+
 describe('main hosted orchestration with synthetic DOM and player', () => {
+  it('deletes another cloud chooser row by exact ID with head proof while preserving a same-name local draft', async () => {
+    const app = await bootCloudApp({ local: true });
+    const draft = structuredClone(appMocks.editor.routine); const loadCount = appMocks.player.load.mock.calls.length;
+    const other = structuredClone(app.data.envelope); other.routine.id = 'other-routine'; other.routine.revision = 5;
+    const handler = app.fetcher.getMockImplementation()!;
+    app.fetcher.mockImplementation(async (input, init) => {
+      if (input === '/api/routines') return json({ routines: [other.routine] });
+      if (input === '/api/routines/other-routine') return json({ ...other, routine: { ...other.routine, revision: init?.method === 'DELETE' ? 6 : 5 } });
+      return handler(input, init);
+    });
+    appMocks.getRoutine.mockImplementation(async id => id === other.routine.id ? null : app.data.envelope.routine);
+    await cloudClick(t('cloudRefresh')); button(t('openDifferent')).click();
+    const chooser = appNodes.find(node => node.classList.contains('routine-chooser'))!;
+    const target = chooser.querySelectorAll('.routine-library-row').find(row => row.querySelectorAll('button').some(node => node.dataset.cloudRoutineDelete === 'true'))!;
+    const remove = target.querySelectorAll('button').find(node => node.title === t('deleteRoutine'))!;
+    vi.mocked(confirm).mockReturnValueOnce(false); remove.click();
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    expect(app.fetcher.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+    remove.click(); await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    const deletes = app.fetcher.mock.calls.filter(([, init]) => init?.method === 'DELETE');
+    expect(deletes).toHaveLength(1); expect(deletes[0]![0]).toBe('/api/routines/other-routine');
+    expect(new Headers(deletes[0]![1]?.headers).get('If-Match')).toBe('"5"');
+    expect(appMocks.editor.routine).toEqual(draft); expect(appMocks.player.load).toHaveBeenCalledTimes(loadCount);
+    expect(appMocks.clearActiveRoutine).not.toHaveBeenCalled(); expect(appMocks.player.stop).not.toHaveBeenCalled();
+  });
+
+  it.each(['player', 'offline', 'signin-required'] as const)('does not expose an actionable cloud chooser delete for %s', async access => {
+    const app = await bootCloudApp(access === 'player' ? { role: 'player' } : { local: true, access, cachedRoutines: [(await fixture()).envelope.routine] });
+    if (access === 'player') button(t('edit')).click(); else button(t('openDifferent')).click();
+    const rows = appNodes.find(node => node.className === 'routine-library-rows')!;
+    const deletes = rows.querySelectorAll('button').filter(node => node.dataset.cloudRoutineDelete === 'true');
+    expect(deletes.every(node => node.disabled)).toBe(true);
+    for (const node of deletes) node.click();
+    expect(app.fetcher.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+  });
+
   it('opens a single modal chooser and closes it without changing the draft or prepared audio', async () => {
     await bootCloudApp(); await openCloudRoutine(); await enterTeach();
     const routine = structuredClone(appMocks.editor.routine);
@@ -2171,7 +2320,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(button(t('cloudDelete')).hidden).toBe(true);
     expect(button(t('cloudPublish')).hidden).toBe(true);
     expect(button(t('localDelete')).hidden).toBe(false);
-    const trigger = appNodes.find(node => node.tag === 'summary' && node.attributes.get('aria-label') === t('addTrack'))!;
+    const trigger = appNodes.find(node => node.className === 'edit-panel')!.querySelectorAll('summary')
+      .find(node => node.attributes.get('aria-label') === t('addTrack'))!;
     appMocks.editor.routine!.locked = true; appMocks.editor.changed!();
     expect(trigger.attributes.get('aria-disabled')).toBe('true');
     const event = new Event('click', { cancelable: true }); trigger.dispatchEvent(event);
@@ -2244,7 +2394,8 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     const availability = { status: 200 };
     const handler = app.fetcher.getMockImplementation()!;
     app.fetcher.mockImplementation((input, init) => {
-      if (String(input) === '/api/media/library') return Promise.resolve(json({ items: [{ asset, title: 'Catalog song', duration: 30 }] }));
+      if (String(input) === '/api/library/songs') return Promise.resolve(json({ items: [{ id: asset.id, kind: 'song', asset,
+        metadata: { revision: 0, title: 'Catalog song', artist: '', duration: 30 } }] }));
       if (String(input) === '/api/media/catalog-track') return Promise.resolve(availability.status === 404
         ? json({ error: 'asset_not_found' }, 404) : json({ asset, chunkBytes: CLOUD_CHUNK_BYTES, chunkCount: 1 }));
       return handler(input, init);
@@ -2528,6 +2679,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.player.load).not.toHaveBeenCalled();
     expect(appMocks.cacheCloudTrack).not.toHaveBeenCalled();
     button(t('edit')).click();
+    await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
     expect(app.fetcher.mock.calls.filter(([url]) => url === path)).toHaveLength(1);
     const checkbox = (label: string) => appNodes.find(node => node.tag === 'label' && node.textContent === label)!.children[0]!;
     expect(checkbox(t('householdFilter')).disabled).toBe(false);
@@ -2594,26 +2746,27 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it('retries in-flight preparation for the newer saved generation returned by sync', async () => {
+  it('serializes pending sync after preparation then prepares the newer saved generation', async () => {
     const readinessDeferred = pending<{ ready: boolean; missing: string[] }>();
     const syncDeferred = pending<void>();
     const app = await bootCloudApp({ cached: true, access: 'offline', pendingWorkingCopy: true, readinessDeferred, syncDeferred });
     await vi.waitFor(() => expect(appMocks.getReadiness).toHaveBeenCalledOnce());
     const { cloudClient } = await import('../frontend/src/cloud-client');
     cloudClient.admitSession(session());
+    expect(appMocks.recordRoutineSyncAttempt).not.toHaveBeenCalled();
+    readinessDeferred.resolve({ ready: true, missing: [] });
     await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
     const newer = app.working.get('routine-a')!;
     newer.localVersion++;
     newer.envelope.routine.name = 'Newer saved class';
     syncDeferred.resolve();
     await vi.waitFor(() => expect(appMocks.editor.routine!.name).toBe('Newer saved class'));
-    readinessDeferred.resolve({ ready: true, missing: [] });
     await vi.waitFor(() => {
-      expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(1);
+      expect(appMocks.player.load.mock.settledResults.filter(result => result.type === 'fulfilled')).toHaveLength(2);
       expect(button(t('startClass')).disabled).toBe(false);
     });
     expect(appMocks.getReadiness).toHaveBeenCalledTimes(2);
-    expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.working.get('routine-a')!.envelope.routine);
+    expect(appMocks.player.load).toHaveBeenLastCalledWith(app.working.get('routine-a')!.envelope.routine);
     expect(app.working.get('routine-a')).toMatchObject({ localVersion: 2, pendingCloud: false });
     expect(appMocks.acknowledgeRoutineWorkingCopy).toHaveBeenCalledTimes(2);
     expect(button(t('retryPreparation')).hidden).toBe(true);
@@ -2644,28 +2797,32 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it.each(['close', 'reopen'] as const)('does not apply a late sync result after an explicit %s of the routine', async action => {
+  it.each(['close', 'reopen'] as const)('blocks %s during shared sync and preserves the acknowledged generation afterward', async action => {
     const syncDeferred = pending<void>();
     const app = await bootCloudApp({ cached: true, pendingWorkingCopy: true, syncDeferred });
     await vi.waitFor(() => expect(appMocks.recordRoutineSyncAttempt).toHaveBeenCalledOnce());
+    expect(button(t('cloudRefresh')).disabled).toBe(true);
+    expect(button(t('closeRoutine')).disabled).toBe(true);
+    const newer = app.working.get('routine-a')!;
+    newer.localVersion++;
+    newer.envelope.routine.name = 'Separately saved generation';
+    syncDeferred.resolve();
+    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
     await vi.waitFor(() => expect(button(t('cloudRefresh')).disabled).toBe(false));
+    await enterTeach();
     const original = structuredClone(appMocks.editor.routine!);
+    expect(original.name).toBe('Separately saved generation');
     if (action === 'close') {
       button(t('closeRoutine')).click();
       const dialog = appNodes.filter(node => node.tag === 'dialog' && node.open).at(-1)!;
       dialog.querySelectorAll('button').find(node => node.title === t('discard'))!.click();
       await vi.waitFor(() => expect(dialog.open).toBe(false));
     } else await cloudClick(t('cloudOpenDraft'));
-    const newer = app.working.get('routine-a')!;
-    newer.localVersion++;
-    newer.envelope.routine.name = 'Separately saved generation';
-    syncDeferred.resolve();
-    await vi.waitFor(() => expect(app.working.get('routine-a')!.pendingCloud).toBe(false));
     await new Promise<void>(resolve => setImmediate(resolve));
     if (action === 'close') {
       expect(button(t('newRoutine')).hidden).toBe(false);
       expect(button(t('startClass')).disabled).toBe(true);
-      expect(appMocks.player.load).not.toHaveBeenCalled();
+      expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(original);
     } else {
       await vi.waitFor(() => expect(button(t('startClass')).disabled).toBe(false));
       expect(appMocks.editor.routine).toEqual(original);
@@ -2713,7 +2870,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!.hidden).toBe(access !== 'signin-required');
   });
 
-  it.each(['owner', 'editor'] as const)('manages the household filler catalog as %s only in Settings, with explicit consent and retained class audio', async role => {
+  it.each(['owner', 'editor'] as const)('manages uploaded fillers as %s only in Settings, with explicit upload and retained class audio', async role => {
     const app = await bootCloudApp({ role, local: true });
     expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);
     appMocks.player.load.mockClear();
@@ -2725,52 +2882,50 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     button(t('play')).click();
     await vi.waitFor(() => expect(appMocks.player.play).toHaveBeenCalledOnce());
     const snapshot = structuredClone(appMocks.editor.routine!);
-    button(t('settings')).click();
-    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    const manager = await openManagedFillers();
     const panel = appNodes.find(node => node.classList.contains('filler-library'))!;
     const settings = appNodes.find(node => node.className === 'settings-panel')!;
-    expect(settings.children).toContain(panel);
+    expect(settings.children).toContain(manager); expect(manager.children).toContain(panel);
     expect(appNodes.find(node => node.className === 'edit-panel')!.children).not.toContain(panel);
     expect(panel.hidden).toBe(false);
-    const picker = panel.querySelectorAll('label').find(node => node.textContent === t('fillerFile'))!.children[0]!;
+    const picker = manager.querySelectorAll('input').find(node => node.attributes.get('aria-label') === t('audioChooseFiles'))!;
     picker.files = [new File([app.data.blob], 'My_loop.wav', { type: 'audio/wav' })];
     picker.dispatchEvent(new Event('change'));
     const importing = pending<FillerRecording>();
     const reading = pending<Blob>();
     appMocks.addFillerRecording.mockReturnValueOnce(importing.promise);
     appMocks.getFillerRecordingBlob.mockReturnValueOnce(reading.promise);
-    vi.mocked(confirm).mockReturnValue(false);
-    button(t('uploadFiller')).click();
     expect(appMocks.addFillerRecording).not.toHaveBeenCalled();
-    vi.mocked(confirm).mockReturnValue(true);
-    button(t('uploadFiller')).click();
-    const feedback = panel.querySelector('.filler-library-feedback')!;
-    expect(feedback.textContent).toBe(t('preparingAudio', { name: picker.files[0]!.name }));
-    expect(panel.querySelectorAll('progress')[0]!.hidden).toBe(true);
+    button(t('uploadFillers')).click();
+    const feedback = manager.querySelector('.media-status')!;
+    expect(feedback.textContent).toBe(t('audioBatchProgress', { current: 1, total: 1, name: picker.files[0]!.name }));
+    expect(manager.querySelectorAll('progress')[0]!.hidden).toBe(true);
     expect(app.server.fillers).toHaveLength(0);
     expect(app.fetcher.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
     expect(appMocks.editor.routine).toEqual(snapshot);
     importing.resolve(local);
-    await vi.waitFor(() => expect(feedback.textContent).toBe(t('cloudWorking')));
+    await vi.waitFor(() => expect(appMocks.getFillerRecordingBlob).toHaveBeenCalled());
     expect(app.server.fillers).toHaveLength(0);
     reading.resolve(app.data.blob);
-    await vi.waitFor(() => expect(appMocks.removeFillerRecording).toHaveBeenCalledWith(local.id));
+    await vi.waitFor(() => expect(feedback.textContent).toBe(t('audioBatchDone')));
     await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
-    expect(feedback.textContent).toBe(t('fillerUploaded'));
-    expect(appMocks.addFillerRecording).toHaveBeenCalledWith(picker.files[0], 'My loop');
+    expect(appMocks.addFillerRecording).toHaveBeenCalledWith(expect.any(File), 'My_loop');
+    expect(appMocks.removeFillerRecording).not.toHaveBeenCalled();
     const authoritative = app.server.fillers[0]!;
     expect(authoritative.id).toBe('household-filler');
     expect(appMocks.cacheFillerRecording).toHaveBeenCalledWith(authoritative, app.data.blob);
     const writes = app.fetcher.mock.calls.filter(([, init]) => init?.method === 'POST').map(([path]) => path);
     expect(writes).toContain('/api/fillers');
     expect(writes).not.toContain('/api/routines');
-    const remove = panel.querySelectorAll('button').find(node => node.title === t('removeFiller'))!;
+    const remove = manager.querySelectorAll('button').find(node => node.title === t('deleteAudio'))!;
     const previewStops = appMocks.preview.stop.mock.calls.length;
-    vi.mocked(confirm).mockReturnValue(false); remove.click();
+    remove.click();
+    await vi.waitFor(() => expect(button(t('refreshAudio')).disabled).toBe(false));
+    const dialog = manager.querySelector('dialog')!;
+    expect(dialog.querySelectorAll('button').find(node => node.title === t('deleteAudio'))!.disabled).toBe(true);
+    dialog.querySelectorAll('button').find(node => node.title === t('cancel'))!.click();
     expect(app.server.fillers).toHaveLength(1);
-    vi.mocked(confirm).mockReturnValue(true); remove.click();
-    await vi.waitFor(() => expect(app.server.fillers).toHaveLength(0));
-    expect(confirm).toHaveBeenLastCalledWith(t('confirmRemoveFiller', { name: local.name }));
+    expect(app.fetcher.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
     expect(appMocks.editor.routine).toEqual(snapshot);
     expect(appMocks.player.load).toHaveBeenCalledOnce();
     expect(appMocks.player.stop).not.toHaveBeenCalled();
@@ -2783,21 +2938,19 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     const app = await bootCloudApp();
     appMocks.editor.routine!.filler.gain = 0.5;
     const draft = structuredClone(appMocks.editor.routine);
-    button(t('settings')).click();
-    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
-    const panel = appNodes.find(node => node.classList.contains('filler-library'))!;
-    const picker = panel.querySelectorAll('label').find(node => node.textContent === t('fillerFile'))!.children[0]!;
+    const panel = await openManagedFillers();
+    const picker = panel.querySelectorAll('input').find(node => node.attributes.get('aria-label') === t('audioChooseFiles'))!;
     picker.files = [new File([app.data.blob], 'Loop.wav', { type: 'audio/wav' })];
     picker.dispatchEvent(new Event('change'));
     appMocks.addFillerRecording.mockResolvedValue({ id: 'local-filler', name: 'Loop', duration: 8, asset: app.data.asset });
     appMocks.getFillerRecordingBlob.mockResolvedValue(app.data.blob);
     app.server.writeStatus = 503;
-    button(t('uploadFiller')).click();
+    button(t('uploadFillers')).click();
     await vi.waitFor(() => expect(app.fetcher.mock.calls.some(([path, init]) => path === '/api/fillers' && init?.method === 'POST')).toBe(true));
-    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    await vi.waitFor(() => expect(panel.getAttribute('aria-busy')).toBe('false'));
     expect(appMocks.removeFillerRecording).not.toHaveBeenCalled();
     expect(appMocks.cacheFillerRecording).not.toHaveBeenCalled();
-    expect(panel.querySelector('.filler-library-feedback')!.textContent).not.toBe(t('fillerUploaded'));
+    expect(panel.querySelector('.media-status')!.textContent).not.toBe(t('audioBatchDone'));
     expect(app.server.fillers).toEqual([]);
     expect(appMocks.editor.routine).toEqual(draft);
   });
@@ -2849,39 +3002,34 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appMocks.listFillerRecordings).not.toHaveBeenCalled();
   });
 
-  it.each(['cancel', 'leave', 'identity'] as const)('fences a late filler import after %s and archives only the original pending import', async interruption => {
+  it.each(['cancel', 'leave', 'identity'] as const)('fences a late manager filler import after %s without uploading or deleting private media', async interruption => {
     const app = await bootCloudApp();
     appMocks.editor.routine!.filler.gain = 0.5;
     const draft = structuredClone(appMocks.editor.routine);
-    button(t('settings')).click();
-    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
-    const panel = appNodes.find(node => node.classList.contains('filler-library'))!;
-    const picker = panel.querySelectorAll('label').find(node => node.textContent === t('fillerFile'))!.children[0]!;
+    const panel = await openManagedFillers();
+    const picker = panel.querySelectorAll('input').find(node => node.attributes.get('aria-label') === t('audioChooseFiles'))!;
     picker.files = [new File([app.data.blob], 'Loop.wav', { type: 'audio/wav' })];
     picker.dispatchEvent(new Event('change'));
     const importing = pending<FillerRecording>();
     appMocks.addFillerRecording.mockReturnValue(importing.promise);
-    button(t('uploadFiller')).click();
+    button(t('uploadFillers')).click();
     await vi.waitFor(() => expect(appMocks.addFillerRecording).toHaveBeenCalledOnce());
-    const feedback = panel.querySelector('.filler-library-feedback')!;
-    expect(feedback.textContent).toBe(t('preparingAudio', { name: picker.files[0]!.name }));
+    const feedback = panel.querySelector('.media-status')!;
+    expect(feedback.textContent).toBe(t('audioBatchProgress', { current: 1, total: 1, name: picker.files[0]!.name }));
     expect(panel.querySelectorAll('progress')[0]!.hidden).toBe(true);
     expect(appMocks.editor.routine).toEqual(draft);
     if (interruption === 'cancel') {
-      button(t('cancelFillerOperation')).click();
-      expect(feedback.textContent).toBe(t('cloudCancelling'));
+      panel.querySelectorAll('button').find(node => node.title === t('cancel'))!.click();
+      expect(feedback.textContent).toBe(t('audioBatchCancelled'));
     }
     else if (interruption === 'leave') button(t('teach')).click();
     else (await import('../frontend/src/cloud-client')).cloudClient.admitSession(session('editor', 'other'));
     importing.resolve({ id: 'local-filler', name: 'Loop', duration: 8, asset: app.data.asset });
-    if (interruption === 'leave') {
-      await vi.waitFor(() => expect(appMocks.removeFillerRecording).toHaveBeenCalledWith('local-filler'));
-      button(t('settings')).click();
-    }
-    await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (interruption === 'leave') button(t('settings')).click();
+    await vi.waitFor(() => expect(panel.getAttribute('aria-busy')).toBe('false'));
     expect(app.fetcher.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
-    if (interruption === 'identity') expect(appMocks.removeFillerRecording).not.toHaveBeenCalled();
-    else expect(appMocks.removeFillerRecording).toHaveBeenCalledExactlyOnceWith('local-filler');
+    expect(appMocks.removeFillerRecording).not.toHaveBeenCalled();
     expect(appMocks.cacheFillerRecording).not.toHaveBeenCalled();
     expect(panel.querySelectorAll('option').some(option => option.value === 'local-filler')).toBe(false);
     expect(appMocks.player.dispose).not.toHaveBeenCalled();

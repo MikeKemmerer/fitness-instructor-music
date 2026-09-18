@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CloudAsset } from '../../../shared/cloud-contract';
 import { strictRecord } from '../validation';
+import { AssetAdmission } from './admission';
 import { CloudAuth, type Authenticated } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
 import { validateAdts, validateMp4, validateWebm } from './media-signatures';
@@ -189,6 +190,7 @@ export class CloudMedia {
 
   async publishCompleted(headers: Headers, id: string, upload: Upload): Promise<CloudAsset> {
     if (upload.state !== 'complete') throw new ApiError(503, 'storage_unavailable');
+    await new AssetAdmission(this.store).available(id);
     if (upload.finalization) {
       this.checkedCursor(upload);
       await this.auth.authenticate(headers, true, true);

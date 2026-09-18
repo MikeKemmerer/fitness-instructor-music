@@ -9,7 +9,7 @@ import { cacheCloudTrack, getTrackBlob, listCloudRoutines, listRoutines, listRou
 import { formatNumber, t } from './i18n';
 import { element, field, iconButton, transientText } from './ui';
 
-async function audioDuration(blob: Blob, signal: AbortSignal): Promise<number> {
+export async function audioDuration(blob: Blob, signal: AbortSignal): Promise<number> {
   const audio = document.createElement('audio');
   const url = URL.createObjectURL(blob);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -116,8 +116,10 @@ export function createAudioLibraryPicker(context: {
         }
         cursor = undefined; return;
       }
-      const page = await context.library.audioPage(cursor, { signal }); current();
-      for (const item of page.items) items.set(item.asset.id, item);
+      const page = await context.library.managedPage('song', cursor, { signal }); current();
+      for (const item of page.items) items.set(item.asset.id, { asset: item.asset, title: item.metadata.title,
+        ...(item.metadata.duration === undefined ? {} : { duration: item.metadata.duration }),
+        ...(item.metadata.bpm === undefined ? {} : { bpm: item.metadata.bpm }) });
       cursor = page.cursor;
     });
     const more = iconButton(t('moreAudio'), RefreshCw, () => { if (cursor) void load(); }, true);
@@ -226,6 +228,7 @@ export function createAudioLibraryPicker(context: {
     document.body.append(root); root.showModal(); void load();
   }
   return { element: command,
+    leave() { dismiss?.(); },
     sync() { command.hidden = !author(); command.disabled = !context.available(); checkCurrent?.(); },
     dispose() { disposed = true; dismiss?.(); },
   };

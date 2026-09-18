@@ -167,6 +167,33 @@ export function setButtonIcon(button: HTMLElement, icon: IconNode): void {
   button.prepend(createElement(icon, { width: 22, height: 22, 'aria-hidden': 'true', 'stroke-width': 1.8 }));
 }
 
+export function actionMenu(label: string, icon: IconNode, showLabel = false) {
+  const menu = element('details', 'command-menu');
+  const trigger = element('summary', `button${showLabel ? '' : ' icon-button'}`);
+  trigger.title = label; trigger.setAttribute('aria-label', label);
+  if (typeof document.createElementNS === 'function') setButtonIcon(trigger, icon);
+  trigger.append(element('span', showLabel ? '' : 'visually-hidden', label));
+  trigger.addEventListener('click', event => {
+    if (trigger.getAttribute('aria-disabled') === 'true') event.preventDefault();
+  });
+  const commands = element('div', 'command-menu-items');
+  menu.append(trigger, commands);
+  const closeMenu = () => { menu.open = false; };
+  const outside = (event: Event) => {
+    if (typeof Node !== 'undefined' && event.target instanceof Node && !menu.contains(event.target)) closeMenu();
+  };
+  document.addEventListener('pointerdown', outside);
+  menu.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); closeMenu(); trigger.focus({ preventScroll: true }); }
+  });
+  commands.addEventListener('click', event => {
+    if (!(event.target as HTMLElement)?.closest?.('button')) return;
+    closeMenu();
+    if (document.activeElement && commands.contains(document.activeElement)) trigger.focus({ preventScroll: true });
+  });
+  return { element: menu, trigger, commands, close: closeMenu, dispose: () => document.removeEventListener('pointerdown', outside) };
+}
+
 export function field(label: string, control: HTMLElement): HTMLLabelElement {
   const wrapper = element('label', 'field');
   wrapper.append(element('span', 'field-label', label), control);

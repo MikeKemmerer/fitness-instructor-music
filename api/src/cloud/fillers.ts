@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FillerAnalysis } from '../../../shared/cloud-contract';
 import type { FillerRecording } from '../../../shared/routine';
 import { parseFillerRecording, strictRecord } from '../validation';
+import { admitted, type ReferenceClaims } from './admission';
 import { CloudAuth } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
 import { CloudMedia, parseAsset } from './media';
@@ -43,8 +44,10 @@ export class CloudFillers {
     } catch { throw new ApiError(503, 'storage_unavailable'); }
   }
 
-  async resolve(input: unknown): Promise<FillerRecording> {
+  async resolve(input: unknown, claims?: ReferenceClaims): Promise<FillerRecording> {
     const claimed = parseFillerRecording(input);
+    await claims?.add(claimed.asset.id);
+    if (claims && await this.deleted(claimed.id)) throw new ApiError(409, 'media_deleted');
     const { recording } = (await this.record(claimed.id)).value;
     if (claimed.id !== recording.id || claimed.name !== recording.name || claimed.duration !== recording.duration ||
         claimed.asset.id !== recording.asset.id || claimed.asset.bytes !== recording.asset.bytes ||
@@ -52,6 +55,17 @@ export class CloudFillers {
       throw new ApiError(400, 'invalid_filler');
     }
     return recording;
+  }
+
+  async deleted(id: string): Promise<boolean> {
+    const stored = await readJson(this.store, `library/deleted-fillers/${id}`, RECORD_BYTES);
+    if (!stored) return false;
+    try {
+      const value = strictRecord(stored.value, ['deleted', 'revision']);
+      if (value.deleted !== true || typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision)
+        || value.revision < 0) throw new Error();
+      return true;
+    } catch { throw new ApiError(503, 'storage_unavailable'); }
   }
 
   async get(headers: Headers, id: string): Promise<FillerRecording> {
@@ -108,7 +122,7 @@ export class CloudFillers {
         let stored;
         try { stored = await this.record(key.slice(INDEX_PREFIX.length)); }
         catch (error) { if (error instanceof ApiError && error.code === 'filler_not_found') continue; throw error; }
-        if (!stored.value.archived) fillers.push(stored.value.recording);
+        if (!stored.value.archived && !await this.deleted(stored.value.recording.id)) fillers.push(stored.value.recording);
       }
       cursor = page.cursor;
       if (cursor) {
@@ -122,35 +136,33 @@ export class CloudFillers {
   }
 
   async create(headers: Headers, input: unknown): Promise<FillerRecording> {
-    await this.auth.authenticate(headers, true, true);
-    const value = strictRecord(input, ['name', 'duration', 'asset']);
-    const recording = parseFillerRecording({ ...value, id: randomUUID() });
-    const claimed = parseAsset(recording.asset);
-    const actual = (await this.media.catalog(claimed.id)).asset;
-    if (claimed.id !== actual.id || claimed.bytes !== actual.bytes || claimed.sha256 !== actual.sha256 ||
+    const actor = await this.auth.authenticate(headers, true, true);
+    return admitted(this.store, async claims => {
+      const value = strictRecord(input, ['name', 'duration', 'asset']);
+      const recording = parseFillerRecording({ ...value, id: randomUUID() });
+      const claimed = parseAsset(recording.asset);
+      await claims.add(claimed.id);
+      const actual = (await this.media.catalog(claimed.id)).asset;
+      if (claimed.id !== actual.id || claimed.bytes !== actual.bytes || claimed.sha256 !== actual.sha256 ||
         claimed.contentType !== actual.contentType) throw new ApiError(400, 'invalid_asset');
-    recording.asset = actual;
-    const bytes = encode({ recording, archived: false } satisfies FillerRecord);
-    if (bytes.length > RECORD_BYTES) throw new ApiError(413, 'body_too_large');
-    await this.budget.charge(RECORD_BYTES * 2, { filler: true });
-    await this.auth.authenticate(headers, true, true);
-    await this.store.put(`${INDEX_PREFIX}${recording.id}`, encode({ id: recording.id }), null);
-    await this.auth.authenticate(headers, true, true);
-    await this.store.put(recordKey(recording.id), bytes, null);
-    return recording;
+      recording.asset = actual;
+      const bytes = encode({ recording, archived: false } satisfies FillerRecord);
+      if (bytes.length > RECORD_BYTES) throw new ApiError(413, 'body_too_large');
+      await this.budget.charge(RECORD_BYTES * 2, { filler: true });
+      const fresh = await this.auth.authenticate(headers, true, true);
+      if (fresh.key !== actor.key || fresh.account.id !== actor.account.id) throw new ApiError(401, 'signin_required');
+      claims.uncertain = true;
+      await this.store.put(`${INDEX_PREFIX}${recording.id}`, encode({ id: recording.id }), null);
+      const current = await this.auth.authenticate(headers, true, true);
+      if (current.key !== actor.key || current.account.id !== actor.account.id) throw new ApiError(401, 'signin_required');
+      await this.store.put(recordKey(recording.id), bytes, null);
+      return recording;
+    });
   }
 
-  async archive(headers: Headers, id: string): Promise<{ archived: true }> {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      await this.auth.authenticate(headers, true, true);
-      const stored = await this.record(id);
-      if (stored.value.archived) return { archived: true };
-      await this.auth.authenticate(headers, true, true);
-      try {
-        await this.store.put(recordKey(id), encode({ ...stored.value, archived: true } satisfies FillerRecord), stored.etag);
-        return { archived: true };
-      } catch (error) { if (!(error instanceof BlobConflict)) throw error; }
-    }
-    throw new ApiError(503, 'storage_busy');
+  async archive(headers: Headers, id: string): Promise<{ archived: true } | { pending: true }> {
+    const { LibraryManagement } = await import('./library-management');
+    const result = await new LibraryManagement(this.store, this.auth, this.media, this).remove(headers, 'filler', id);
+    return 'pending' in result ? result : { archived: true };
   }
 }

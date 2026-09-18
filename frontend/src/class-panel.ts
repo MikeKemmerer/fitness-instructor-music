@@ -10,7 +10,7 @@ import * as offline from './offline';
 import { fillerControls } from './filler-controls';
 import { createDraftProtection } from './draft-protection';
 import { createAudioLibraryPicker } from './audio-library-picker';
-import { t } from './i18n';
+import { formatTime, t } from './i18n';
 import { element, field, gainSlider, iconButton, numberInput, selectInput, textInput } from './ui';
 
 export interface ClassPanelContext {
@@ -293,20 +293,22 @@ export function createClassPanel(context: ClassPanelContext) {
     const fields = element('fieldset', 'class-editor'); fields.dataset.libraryContent = '';
     fields.append(field(t(playlist ? 'playlistName' : 'setupName'), textInput(value.name, 160, name => { if (editable()) { value.name = name; changed(); } })));
     if (playlist) {
+      const table = element('table', 'playlist-track-table');
+      table.setAttribute('aria-label', t('musicPlaylists'));
+      const heading = element('tr');
+      for (const label of ['#', t('playlistSong'), t('playlistDuration'), t('trackGain'), t('moreActions')]) {
+        const cell = element('th', '', label); cell.scope = 'col'; heading.append(cell);
+      }
+      const head = element('thead'); head.append(heading); table.append(head);
+      const body = element('tbody'); table.append(body);
       playlist.tracks.forEach((track, index) => {
-        const row = element('div', 'routine-library-row');
-        row.append(element('span', '', track.title));
-        row.append(gainSlider(t('trackGain'), () => track.gain ?? 1, value => { if (editable()) { track.gain = value; changed(); } }, editable).element);
-        const bpm = numberInput(track.bpm ?? Number.NaN, 40, 220, value => {
-          if (!editable()) return;
-          const valid = !bpm.value.trim() || (Number.isFinite(value) && value >= 40 && value <= 220);
-          bpm.setAttribute('aria-invalid', String(!valid));
-          if (!bpm.value.trim()) { delete track.bpm; changed(); }
-          else if (valid) { track.bpm = value; changed(); }
-          if (pendingSave) pendingSave.disabled = !!content.querySelector('input[aria-invalid="true"]');
-        });
-        bpm.required = false; bpm.value = track.bpm === undefined ? '' : String(track.bpm);
-        row.append(field(t('bpm'), bpm));
+        const row = element('tr');
+        row.append(element('td', 'playlist-track-number', String(index + 1)), element('td', 'playlist-track-title', track.title),
+          element('td', 'playlist-track-duration', formatTime(track.duration)));
+        const level = element('td', 'playlist-track-level');
+        level.append(gainSlider(t('trackGain'), () => track.gain ?? 1, value => { if (editable()) { track.gain = value; changed(); } }, editable).element);
+        row.append(level);
+        const actions = element('td', 'playlist-track-actions');
         for (const [direction, icon, label] of [[-1, ArrowUp, 'moveUp'], [1, ArrowDown, 'moveDown']] as const) {
           const move = iconButton(t(label), icon, () => {
             if (!editable() || !playlist) return;
@@ -314,14 +316,15 @@ export function createClassPanel(context: ClassPanelContext) {
             if (target < 0 || target >= playlist.tracks.length) return;
             playlist.tracks.splice(index, 1); playlist.tracks.splice(target, 0, track); changed(); render();
           });
-          move.disabled = index + direction < 0 || index + direction >= playlist!.tracks.length; row.append(move);
+          move.disabled = index + direction < 0 || index + direction >= playlist!.tracks.length; actions.append(move);
         }
-        row.append(iconButton(t('repeatEntry'), Copy, () => { if (editable()) void run((signal, assert) => repeat(track, signal, assert)); }),
+        actions.append(iconButton(t('repeatEntry'), Copy, () => { if (editable()) void run((signal, assert) => repeat(track, signal, assert)); }),
           iconButton(t('deleteTrack'), Trash2, () => {
             if (editable() && playlist && confirm(t('confirmDelete', { name: track.title }))) { playlist.tracks.splice(index, 1); changed(); render(); }
           }));
-        fields.append(row);
+        row.append(actions); body.append(row);
       });
+      fields.append(table);
       const songSelect = selectInput('', [{ value: '', label: t('chooseSong') }, ...context.draft().tracks.map(track => ({ value: track.id, label: track.title }))], () => {});
       fields.append(field(t('addFromRoutine'), songSelect), iconButton(t('addFromRoutine'), Plus, () => {
         const track = context.draft().tracks.find(entry => entry.id === songSelect.value);

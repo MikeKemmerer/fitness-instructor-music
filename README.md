@@ -4,6 +4,16 @@ Private household fitness-class PWA. Public code, private music.
 
 ## Workflow Review
 
+September 17 source changes add a dedicated **Playlists** workspace with
+local-first saving, numbered/duration song rows, preview transport, compact levels
+and the shared Add track menu. Routine deletion is visible in its footer and
+chooser. **Settings > Uploaded audio** manages song/filler metadata, upload and
+preview; unused-only logical deletion requires the server activation gate in
+[api/README.md](api/README.md#admission-and-activation-gate). This implementation
+is still undergoing integration and remote verification, not a release receipt.
+The [filler-engine recommendation](docs/third-party-assets.md#filler-production-recommendation)
+does not introduce new bundled music or change saved sound IDs.
+
 September 16: [current user instructions](docs/user-guide.md) and the
 [R01-R24 acceptance checklist](docs/plan.md#unified-routine-acceptance-r01-r24)
 describe the unified Routine changes: implemented in source, awaiting remote

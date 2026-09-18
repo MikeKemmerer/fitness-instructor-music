@@ -3,6 +3,8 @@ import { createClassMode, createTransportOperation, cueAtSeconds, gainSlider, ne
 import { fillerControls, fillerSoundLabel } from '../frontend/src/filler-controls';
 import { createRoutineSave, sameSavedContent } from '../frontend/src/routine-save';
 import { createAudioLibraryPicker } from '../frontend/src/audio-library-picker';
+import { checkLocalAudioUsage, createMediaLibrary, type LocalAudioUsage } from '../frontend/src/media-library';
+import type { ManagedAudioItem, ManagedAudioPage, LibraryMetadata } from '../shared/cloud-contract';
 import * as cloudState from '../frontend/src/cloud-client';
 import { CloudRequestError } from '../frontend/src/cloud-client';
 import { cloudErrorMessage } from '../frontend/src/cloud-ui';
@@ -19,9 +21,11 @@ import { defaultExportColumns, defaultPdfColumns, exportColumns, type ExportSnap
 import { startApplication } from '../frontend/src/bootstrap';
 import { formatCueTime, parseCueTime } from '../frontend/src/cue-time';
 import { createClassPanel } from '../frontend/src/class-panel';
+import { createPlaylistEditor } from '../frontend/src/playlist-editor';
 import { createClassComposition } from '../frontend/src/class-composition';
 import { createRecoveryPanel } from '../frontend/src/draft-protection';
-import type { ClassSetup, MusicPlaylist, PreparedClass, RevisionReference } from '../shared/class-plan';
+import type { ClassSetup, CloudMusicPlaylist, MusicPlaylist, PreparedClass, RevisionReference } from '../shared/class-plan';
+import type { PlaylistWorkingCopy, ActivePlaylistSelection } from '../frontend/src/offline';
 import { readFileSync } from 'node:fs';
 
 describe('unified review source guards', () => {
@@ -115,10 +119,16 @@ const mocks = vi.hoisted(() => ({
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
   cacheFillerRecording: vi.fn(), getFillerRecordingBlob: vi.fn(),
   listMusicPlaylists: vi.fn(), getMusicPlaylist: vi.fn(), saveMusicPlaylist: vi.fn(), cacheMusicPlaylist: vi.fn(), deleteMusicPlaylist: vi.fn(),
+  getPlaylistWorkingCopy: vi.fn(), listPlaylistWorkingCopies: vi.fn(), savePlaylistWorkingCopy: vi.fn(),
+  listMusicPlaylistPublications: vi.fn(), listCachedMusicPlaylists: vi.fn(), getCachedMusicPlaylist: vi.fn(),
+  getActivePlaylistSelection: vi.fn(), setActivePlaylistSelection: vi.fn(), clearActivePlaylistSelection: vi.fn(),
+  reconcilePlaylistWorkingCopy: vi.fn(), deletePlaylistWorkingCopy: vi.fn(),
+  playlistSnapshot: vi.fn(), playlistSync: vi.fn(),
   listClassSetups: vi.fn(), getClassSetup: vi.fn(), saveClassSetup: vi.fn(), cacheClassSetup: vi.fn(), deleteClassSetup: vi.fn(),
   publishRoutine: vi.fn(), deleteRoutine: vi.fn(), deleteRoutineAndWorkingCopy: vi.fn(),
   getCachedClassSetup: vi.fn(), getPreparedClass: vi.fn(),
   getTrackBlob: vi.fn(), cacheCloudTrack: vi.fn(),
+  inspectLocalAudioReferences: vi.fn(async (): Promise<LocalAudioUsage> => ({ references: [], complete: true })),
   createAudioPreview: vi.fn(), detectBpm: vi.fn(), analyzeLoudness: vi.fn(),
   exportExcel: vi.fn(), exportPdf: vi.fn(), downloadExport: vi.fn(),
   preview: { stop: vi.fn(), dispose: vi.fn(), playFiller: vi.fn(), playTrack: vi.fn(), pause: vi.fn(),
@@ -180,6 +190,8 @@ class TestElement extends EventTarget {
   select() { this.selectionStart = 0; this.selectionEnd = this.value.length; }
   setSelectionRange(start: number, end: number) { this.selectionStart = start; this.selectionEnd = end; }
   append(...children: TestElement[]) { for (const child of children) this.insertBefore(child, null); }
+  prepend(...children: TestElement[]) { for (const child of [...children].reverse()) this.insertBefore(child, this.firstChild); }
+  appendChild(child: TestElement) { return this.insertBefore(child, null); }
   after(...children: TestElement[]) {
     const parent = this.parentNode;
     if (!parent) return;
@@ -226,6 +238,7 @@ function stubDocument() {
     fullscreenElement: null as TestElement | null,
     querySelector: () => new TestElement('div'),
     createElement: (tag: string) => new TestElement(tag),
+    createElementNS: (_namespace: string, tag: string) => new TestElement(tag),
   });
   vi.stubGlobal('document', owner);
   vi.stubGlobal('HTMLElement', TestElement);
@@ -246,6 +259,10 @@ vi.mock('../frontend/src/ui', async original => ({
   setButtonIcon: vi.fn(),
 }));
 vi.mock('../frontend/src/offline', () => mocks);
+vi.mock('../frontend/src/playlist-save', async original => ({
+  ...await original<typeof import('../frontend/src/playlist-save')>(),
+  createPlaylistSave: () => ({ snapshot: mocks.playlistSnapshot, sync: mocks.playlistSync }),
+}));
 vi.mock('../frontend/src/player', () => ({ createPlayer: () => mocks.player }));
 vi.mock('../frontend/src/audio-preview', () => ({ createAudioPreview: mocks.createAudioPreview }));
 vi.mock('../frontend/src/bpm', () => ({ detectTrackBpm: mocks.detectBpm }));
@@ -452,7 +469,8 @@ describe('unified audio picker', () => {
     const cache = new Map<string, Blob>();
     mocks.getTrackBlob.mockImplementation(async id => cache.get(id));
     mocks.cacheCloudTrack.mockImplementation(async (id, value) => { cache.set(id, value); });
-    const library = { audioPage: vi.fn(async () => ({ items })),
+    const library = { managedPage: vi.fn(async () => ({ items: items.map(item => ({ id: item.asset.id, kind: 'song', asset: item.asset,
+      metadata: { revision: 0, title: item.title, artist: '', duration: item.duration } })) })),
       downloadTracks: vi.fn(async (tracks: Track[], _media: CloudRoutine['media'], _transfer: { signal?: AbortSignal }) => {
         cache.set(tracks[0]!.id, blob);
       }) };
@@ -564,7 +582,7 @@ describe('unified audio picker', () => {
     mocks.listRoutines.mockResolvedValue([]); mocks.listCloudRoutines.mockResolvedValue([]);
     mocks.getTrackBlob.mockImplementation(async id => id === 'missing' ? undefined : blob);
     mocks.cacheCloudTrack.mockResolvedValue(undefined);
-    const library = { audioPage: vi.fn(), downloadTracks: vi.fn() }; const added = vi.fn();
+    const library = { managedPage: vi.fn(), downloadTracks: vi.fn() }; const added = vi.fn();
     const picker = createAudioLibraryPicker({ library: library as unknown as ReturnType<typeof createCloudLibrary>, available: () => true,
       identity: () => 'draft', remaining: () => 5, added, duration: async () => 30 });
     picker.sync(); expect(picker.element.disabled).toBe(false); picker.element.click();
@@ -577,7 +595,7 @@ describe('unified audio picker', () => {
     expect(added.mock.calls[0]![0][0]).toMatchObject({ title: 'Cached phase', cues: [], duration: 30 });
     expect(added.mock.calls[0]![0][0].id).not.toBe('cached'); expect(added.mock.calls[0]![0][0].bpm).toBeUndefined();
     expect(mocks.cacheCloudTrack).toHaveBeenCalledWith(expect.any(String), blob, hash);
-    expect(library.audioPage).not.toHaveBeenCalled(); expect(library.downloadTracks).not.toHaveBeenCalled(); picker.dispose();
+    expect(library.managedPage).not.toHaveBeenCalled(); expect(library.downloadTracks).not.toHaveBeenCalled(); picker.dispose();
   });
 
   it('browses metadata without downloading, then adds checked assets in selection order with fresh IDs', async () => {
@@ -588,7 +606,10 @@ describe('unified audio picker', () => {
     const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
     const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
     const asset = (id: string) => ({ id, bytes: 128, contentType: 'audio/wav', sha256 });
-    const library = { audioPage: vi.fn(async () => ({ items: [{ asset: asset('first'), title: 'First' }, { asset: asset('second'), title: 'Second', bpm: 120 }] })),
+    const library = { managedPage: vi.fn(async () => ({ items: [
+      { id: 'first', kind: 'song', asset: asset('first'), metadata: { revision: 0, title: 'First', artist: '' } },
+      { id: 'second', kind: 'song', asset: asset('second'), metadata: { revision: 3, title: 'Second', artist: '<Artist>', bpm: 120 } },
+    ] })),
       downloadTracks: vi.fn(async () => {}) };
     mocks.getTrackBlob.mockResolvedValue(new Blob([new Uint8Array(128)], { type: 'audio/wav' }));
     const added = vi.fn();
@@ -606,7 +627,148 @@ describe('unified audio picker', () => {
     expect(tracks.map(track => track.title)).toEqual(['Second', 'First']);
     expect(new Set(tracks.map(track => track.id)).size).toBe(2); expect(tracks.map(track => track.id)).not.toContain('first');
     expect(tracks.every(track => track.cues.length === 0)).toBe(true); expect(tracks[1]!.bpm).toBeUndefined();
+    expect(tracks[0]!.bpm).toBe(120); expect(tracks[0]).not.toHaveProperty('artist');
     expect(library.downloadTracks).toHaveBeenCalledTimes(2); picker.dispose();
+  });
+});
+
+describe('uploaded audio manager', () => {
+  beforeEach(() => { vi.clearAllMocks(); nodes.length = 0; stubDocument(); vi.stubGlobal('window', new EventTarget()); });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+  async function harness() {
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', expiresAt: Date.now() + 3600_000,
+      user: { id: 'author', username: 'author', role: 'editor', authVersion: 1 } });
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    vi.spyOn(cloudState, 'subscribeCloudSession').mockReturnValue(() => {});
+    const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
+    const hash = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
+    const item: ManagedAudioItem = { id: 'asset-manager', kind: 'song', asset: { id: 'asset-manager', bytes: 128, sha256: hash, contentType: 'audio/wav' },
+      metadata: { revision: 0, title: '<House song>', artist: '<Artist>' } };
+    type Transfer = { signal?: AbortSignal };
+    const cloud = {
+      managedPage: vi.fn(async (_kind: 'song' | 'filler', _cursor?: string, _transfer?: Transfer): Promise<ManagedAudioPage> => ({ items: [structuredClone(item)] })),
+      libraryMetadata: vi.fn(async (): Promise<LibraryMetadata> => ({ ...item.metadata, revision: 3 })),
+      putLibraryMetadata: vi.fn(async (_kind: string, _id: string, revision: number, value: Pick<LibraryMetadata, 'title' | 'artist' | 'bpm'>) => ({ ...value, revision: revision + 1 })),
+      libraryUsage: vi.fn(async () => ({ references: [] as import('../shared/cloud-contract').LibraryUsagePage['references'], complete: true })),
+      deleteLibraryItem: vi.fn(async (): Promise<import('../shared/cloud-contract').LibraryDeleteResult> => ({ deleted: true, bytesRetained: true })),
+      downloadTracks: vi.fn(async (_tracks: Track[], _media: CloudRoutine['media'], _transfer: Transfer) => {}),
+      uploadAsset: vi.fn(async () => item.asset), recordLibraryIntake: vi.fn(async () => {}), addFiller: vi.fn(), ensureFiller: vi.fn(),
+    };
+    let state: PreviewState = { kind: 'idle', trackId: null, playing: false, loading: false, elapsed: 0, duration: 0, error: null };
+    const listeners = new Set<(value: PreviewState) => void>();
+    const emit = (value: Partial<PreviewState>) => { state = { ...state, ...value }; for (const listener of listeners) listener(state); };
+    const preview: AudioPreview = { getState: () => state, dispose: vi.fn(), seek: vi.fn(), playFiller: vi.fn(async () => {}),
+      playTrack: vi.fn(async track => emit({ kind: 'track', trackId: track.id, playing: true, duration: track.duration })),
+      stop: vi.fn(() => emit({ kind: 'idle', trackId: null, playing: false })), pause: vi.fn(() => emit({ playing: false })),
+      subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); } };
+    let busy = false;
+    const localUsage = vi.fn(async () => ({ references: [] as import('../shared/cloud-contract').LibraryUsagePage['references'], complete: true }));
+    const beforePreview = vi.fn(); const changed = vi.fn();
+    const manager = createMediaLibrary({ hosted: true, cloud: cloud as unknown as ReturnType<typeof createCloudLibrary>, preview,
+      known: () => [], busy: () => busy, working: value => { busy = value; }, visible: () => true, beforePreview, changed, localUsage });
+    const root = manager.element as unknown as TestElement;
+    root.open = true; root.dispatchEvent(new Event('toggle'));
+    await vi.waitFor(() => expect(root.querySelectorAll('.media-row')).toHaveLength(2));
+    await vi.waitFor(() => expect(busy).toBe(false));
+    const button = (label: string, within = root) => within.querySelectorAll('button').find(node => node.title === label)!;
+    const dialog = () => root.querySelector('dialog')!;
+    const input = (label: string) => dialog().querySelectorAll('label').find(node => node.textContent === label)!.querySelector('input')!;
+    return { manager, root, cloud, item, blob, preview, emit, beforePreview, changed, localUsage, button, dialog, input, idle: () => vi.waitFor(() => expect(busy).toBe(false)) };
+  }
+
+  it('browses text-only metadata and unknown intake without downloading, and searches loaded rows', async () => {
+    const setup = await harness();
+    expect(setup.cloud.downloadTracks).not.toHaveBeenCalled(); expect(mocks.getTrackBlob).not.toHaveBeenCalled();
+    const cells = setup.root.querySelectorAll('.media-cell');
+    expect(cells.map(cell => cell.textContent)).toEqual([t('unknownValue'), '<House song>', '<Artist>', t('unknownValue'), t('unknownValue')]);
+    expect(cells.every(cell => cell.children.length === 0)).toBe(true);
+    const search = setup.root.querySelectorAll('input').find(node => node.type === 'search')!;
+    search.value = 'no match'; search.dispatchEvent(new Event('input'));
+    expect(setup.root.querySelectorAll('.media-cell')).toHaveLength(0); expect(setup.cloud.managedPage).toHaveBeenCalledOnce();
+    setup.manager.dispose();
+  });
+
+  it('retains metadata input on CAS conflict and requires an explicit revision reload', async () => {
+    const setup = await harness();
+    setup.cloud.putLibraryMetadata.mockRejectedValueOnce(new cloudState.CloudRequestError('cloud_http_error', 409, 'metadata_conflict'));
+    setup.button(t('editAudio')).click(); setup.input(t('audioTitle')).value = '<Revised title>';
+    setup.input(t('audioArtist')).value = 'Artist'; setup.input(t('audioBpm')).value = '128';
+    setup.button(t('saveChanges'), setup.dialog()).click(); await setup.idle();
+    expect(setup.input(t('audioTitle')).value).toBe('<Revised title>');
+    expect(setup.button(t('saveChanges'), setup.dialog()).disabled).toBe(true);
+    expect(setup.dialog().querySelectorAll('p').some(node => node.textContent === t('audioMetadataConflict'))).toBe(true);
+    setup.button(t('audioReloadRevision'), setup.dialog()).click(); await setup.idle();
+    expect(setup.input(t('audioTitle')).value).toBe('<Revised title>');
+    setup.button(t('saveChanges'), setup.dialog()).click(); await setup.idle();
+    expect(setup.cloud.putLibraryMetadata.mock.calls.map(call => call[2])).toEqual([0, 3]);
+    expect(setup.cloud.putLibraryMetadata.mock.lastCall![3]).toEqual({ title: '<Revised title>', artist: 'Artist', bpm: 128 });
+    expect(setup.root.querySelector('dialog')).toBeNull(); expect(setup.cloud.uploadAsset).not.toHaveBeenCalled(); setup.manager.dispose();
+  });
+
+  it.each(['referenced', 'incomplete'] as const)('blocks %s local audio deletion and never deletes on opening or cancelling', async reason => {
+    const setup = await harness();
+    setup.localUsage.mockResolvedValue({ references: reason === 'referenced' ? [{ kind: 'routine', id: 'unsaved', name: '<Unsaved routine>' }] : [], complete: reason !== 'incomplete' });
+    setup.button(t('deleteAudio')).click(); await setup.idle();
+    expect(setup.button(t('deleteAudio'), setup.dialog()).disabled).toBe(true);
+    expect(setup.cloud.deleteLibraryItem).not.toHaveBeenCalled();
+    expect(setup.dialog().querySelectorAll('p').some(node => node.textContent === t(reason === 'referenced' ? 'audioInUse' : 'audioLocalUncertain'))).toBe(true);
+    setup.button(t('cancel'), setup.dialog()).click(); expect(setup.root.querySelector('dialog')).toBeNull();
+    expect(setup.cloud.deleteLibraryItem).not.toHaveBeenCalled(); setup.manager.dispose();
+  });
+
+  it('continues a pending deletion only on another explicit click with the same target revision', async () => {
+    const setup = await harness(); setup.cloud.deleteLibraryItem.mockResolvedValueOnce({ pending: true });
+    setup.button(t('deleteAudio')).click(); await setup.idle();
+    expect(setup.cloud.deleteLibraryItem).not.toHaveBeenCalled();
+    setup.button(t('deleteAudio'), setup.dialog()).click(); await setup.idle();
+    expect(setup.cloud.deleteLibraryItem).toHaveBeenCalledOnce();
+    expect(setup.dialog().querySelectorAll('p').some(node => node.textContent === t('audioDeletePending'))).toBe(true);
+    setup.button(t('audioContinueCheck'), setup.dialog()).click(); await setup.idle();
+    expect(setup.cloud.deleteLibraryItem.mock.calls).toHaveLength(2);
+    expect(setup.root.querySelector('dialog')).toBeNull(); expect(setup.localUsage).toHaveBeenCalledTimes(3); setup.manager.dispose();
+  });
+
+  it.each(['leave', 'switch'] as const)('aborts a pending verified preview on %s and never starts late audio', async action => {
+    const setup = await harness(); const waiting = deferred();
+    setup.cloud.downloadTracks.mockImplementation(async () => waiting.promise);
+    setup.button(t('playPreview')).click();
+    await vi.waitFor(() => expect(setup.cloud.downloadTracks).toHaveBeenCalledOnce());
+    expect(setup.beforePreview).toHaveBeenCalledOnce();
+    const signal = setup.cloud.downloadTracks.mock.calls[0]![2].signal!;
+    if (action === 'leave') setup.manager.leave();
+    else {
+      setup.cloud.managedPage.mockResolvedValue({ items: [] });
+      setup.root.querySelectorAll('button').find(node => node.textContent === t('managedFillers'))!.click();
+    }
+    expect(signal.aborted).toBe(true); waiting.resolve(); await setup.idle();
+    expect(setup.preview.playTrack).not.toHaveBeenCalled(); setup.manager.dispose();
+  });
+
+  it('does not reupload committed bytes when intake metadata fails', async () => {
+    const setup = await harness();
+    mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'original', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
+    mocks.getTrackBlob.mockResolvedValue(setup.blob);
+    setup.cloud.recordLibraryIntake.mockRejectedValueOnce(new Error('network_unavailable'));
+    const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    files.files = [new File([setup.blob], 'original.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(t('uploadAudio')).click(); await setup.idle();
+    expect(setup.cloud.uploadAsset).toHaveBeenCalledOnce(); expect(mocks.storeTrack).toHaveBeenCalledOnce();
+    expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioUploadMetadataFailed'));
+    expect(setup.button(t('resumeAudioUpload')).hidden).toBe(true); expect(setup.cloud.managedPage).toHaveBeenCalledTimes(2);
+    setup.manager.dispose();
+  });
+
+  it.each([true, false])('combines unsaved playlist references with the durable scan (complete=%s)', async complete => {
+    const setup = await harness();
+    const retained = { kind: 'routine' as const, id: 'saved', name: 'Retained history', revision: 2 };
+    mocks.inspectLocalAudioReferences.mockResolvedValue({ references: [retained], complete });
+    const playlist: MusicPlaylist = { schemaVersion: 2, id: 'open-playlist', name: 'Unsaved playlist', revision: 1,
+      locked: false, published: false, tracks: [{ id: 'entry', title: 'Private', duration: 30, firstBeat: 0, bodyArea: '', cues: [] }] };
+    const result = await checkLocalAudioUsage(setup.item, [{ playlist, media: { entry: setup.item.asset } }], () => {});
+    expect(result.references).toEqual([retained, { kind: 'playlist', id: playlist.id, name: playlist.name, revision: 1 }]);
+    expect(result.complete).toBe(complete);
+    expect(mocks.inspectLocalAudioReferences).toHaveBeenCalledWith(setup.item.asset, undefined); setup.manager.dispose();
   });
 });
 
@@ -2177,6 +2339,204 @@ describe('inline class sequence', () => {
   });
 });
 
+describe('dedicated playlist workspace', () => {
+  let saved: Map<string, PlaylistWorkingCopy>;
+  let local: Map<string, MusicPlaylist>;
+  let selection: ActivePlaylistSelection | null;
+  const sessions: ReturnType<typeof createPlaylistEditor>[] = [];
+  const mix = (id: string, name = id): MusicPlaylist => ({ schemaVersion: 2, id, name, revision: 1, locked: false, published: false, tracks: [] });
+  const song = (id: string): Track => ({ id, title: id, duration: 30, firstBeat: 0, bodyArea: '', cues: [], bpm: 100, gain: 1.4 });
+  beforeEach(() => {
+    vi.resetAllMocks(); nodes.length = 0; stubDocument(); vi.stubGlobal('window', new EventTarget());
+    vi.stubGlobal('navigator', { onLine: false }); vi.stubGlobal('confirm', vi.fn(() => true));
+    saved = new Map(); local = new Map(); selection = null;
+    mocks.preview.getState.mockReturnValue({ kind: 'idle', trackId: null, playing: false, loading: false, elapsed: 0, duration: 0, error: null });
+    mocks.preview.subscribe.mockReturnValue(() => {});
+    mocks.listMusicPlaylists.mockImplementation(async () => structuredClone([...local.values()]));
+    mocks.getMusicPlaylist.mockImplementation(async id => structuredClone(local.get(id) ?? null));
+    mocks.listPlaylistWorkingCopies.mockImplementation(async () => structuredClone([...saved.values()]));
+    mocks.getPlaylistWorkingCopy.mockImplementation(async id => structuredClone(saved.get(id) ?? null));
+    mocks.listCachedMusicPlaylists.mockResolvedValue([]); mocks.listMusicPlaylistPublications.mockResolvedValue([]);
+    mocks.listDraftRecoveries.mockResolvedValue([]); mocks.saveDraftRecovery.mockResolvedValue(undefined); mocks.removeDraftRecovery.mockResolvedValue(undefined);
+    mocks.getActivePlaylistSelection.mockImplementation(async () => selection);
+    mocks.setActivePlaylistSelection.mockImplementation(async value => { selection = structuredClone(value); });
+    mocks.clearActivePlaylistSelection.mockImplementation(async () => { selection = null; });
+    mocks.getTrackBlob.mockResolvedValue(new Blob([new Uint8Array(128)], { type: 'audio/wav' }));
+    mocks.playlistSnapshot.mockImplementation(async (playlist, media) => structuredClone({ playlist, media }));
+    mocks.savePlaylistWorkingCopy.mockImplementation(async (envelope: CloudMusicPlaylist, options) => {
+      const previous = saved.get(envelope.playlist.id);
+      if (options.expectedLocalVersion !== (previous?.localVersion ?? null)) throw new Error('playlist_conflict');
+      const record = { envelope: structuredClone(envelope), localVersion: (previous?.localVersion ?? 0) + 1,
+        cloudBaseRevision: options.cloudBaseRevision, pendingCloud: options.cloud, savedAt: 123456 };
+      saved.set(envelope.playlist.id, record); local.set(envelope.playlist.id, structuredClone(envelope.playlist)); return structuredClone(record);
+    });
+  });
+  afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+  async function harness(hosted = false) {
+    let externalBusy = false;
+    const routine = newRoutine(); const message = vi.fn(); const working = vi.fn((value: boolean) => { externalBusy = value; });
+    const session = createPlaylistEditor({ hosted, preview: mocks.preview as unknown as AudioPreview,
+      busy: () => externalBusy, working, visible: () => true, known: () => [{ routine, media: {} }], returnToRoutine: vi.fn(), message });
+    sessions.push(session);
+    const root = session.element as unknown as TestElement;
+    (document.documentElement as unknown as TestElement).append(root);
+    await session.initialize();
+    const button = (label: string, within = root) => within.querySelectorAll('button').find(node => node.title === label)!;
+    const input = () => root.querySelectorAll('label').find(node => node.textContent === t('playlistName'))!.children[0]!;
+    const changeName = (value: string) => { input().value = value; input().dispatchEvent(new Event('input')); };
+    const settled = () => vi.waitFor(() => expect(session.working()).toBe(false));
+    const modal = () => root.querySelectorAll('dialog').find(node => node.open && !node.classList.contains('playlist-chooser'))!;
+    return { session, root, button, input, changeName, settled, modal, routine, message, working, block: (value: boolean) => { externalBusy = value; session.sync(); } };
+  }
+  it('saves locally with independent history and truthful metadata, and Close only clears playlist selection', async () => {
+    const fixture = await harness(); const routine = structuredClone(fixture.routine);
+    fixture.button(t('newPlaylist')).click(); fixture.changeName('<Arrival>');
+    fixture.button(t('saveChanges')).click(); await fixture.settled();
+    expect(mocks.savePlaylistWorkingCopy).toHaveBeenCalledWith(expect.anything(), { expectedLocalVersion: null, cloud: false, cloudBaseRevision: null });
+    expect(mocks.playlistSync).not.toHaveBeenCalled(); expect(selection?.source).toBe('local');
+    fixture.button(t('undoEdit')).click(); expect(fixture.input().value).toBe(t('newPlaylist'));
+    fixture.button(t('redoEdit')).click(); expect(fixture.input().value).toBe('<Arrival>');
+    fixture.button(t('closePlaylist')).click(); fixture.button(t('cancel'), fixture.modal()).click();
+    expect(fixture.input().value).toBe('<Arrival>'); expect(document.activeElement).toBe(fixture.button(t('closePlaylist')));
+    fixture.button(t('closePlaylist')).click(); fixture.button(t('discard'), fixture.modal()).click(); await fixture.settled();
+    expect(mocks.clearActivePlaylistSelection).toHaveBeenCalledOnce(); expect(saved.size).toBe(1);
+    expect(mocks.clearActiveRoutine).not.toHaveBeenCalled(); expect(mocks.player.unload).not.toHaveBeenCalled(); expect(fixture.routine).toEqual(routine);
+  });
+  it('preserves numbered songs, hidden BPM and legacy gain through undoable level and order edits', async () => {
+    const value = mix('arrival'); value.tracks = [song('one'), song('two')]; local.set(value.id, value);
+    const fixture = await harness(); fixture.button(t('openRoutine', { name: value.name })).click(); await fixture.settled();
+    expect(fixture.root.querySelectorAll('.playlist-track-number').map(node => node.textContent)).toEqual(['1', '2']);
+    expect(fixture.root.querySelectorAll('input').some(node => node.type === 'number')).toBe(false);
+    const slider = () => fixture.root.querySelectorAll('input').find(node => node.type === 'range')!;
+    expect(fixture.root.querySelectorAll('output')[0]!.textContent).toBe('140%');
+    slider().value = '125'; slider().dispatchEvent(new Event('input')); fixture.button(t('undoEdit')).click();
+    expect(fixture.root.querySelectorAll('output')[0]!.textContent).toBe('140%');
+    fixture.button(t('moveDown')).click(); fixture.button(t('saveChanges')).click(); await fixture.settled();
+    expect(saved.get(value.id)!.envelope.playlist.tracks.map(track => [track.id, track.bpm, track.gain])).toEqual([['two', 100, 1.4], ['one', 100, 1.4]]);
+    expect(mocks.player.load).not.toHaveBeenCalled(); expect(mocks.preview.playTrack).not.toHaveBeenCalled();
+  });
+  it('serially imports cue-free entries, undoes the batch, and rejects excess files before decoding', async () => {
+    const fixture = await harness(); fixture.button(t('newPlaylist')).click();
+    const file = fixture.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    const first = deferred(); mocks.storeTrack.mockImplementationOnce(async () => { await first.promise; return { ...song('one'), cues: [{ id: 'cue' }], after: { mode: 'none' } }; })
+      .mockResolvedValueOnce(song('two'));
+    file.files = [new File(['a'], 'a.wav'), new File(['b'], 'b.wav')]; file.dispatchEvent(new Event('change'));
+    expect(mocks.storeTrack).toHaveBeenCalledTimes(1); first.resolve(); await fixture.settled();
+    expect(mocks.storeTrack).toHaveBeenCalledTimes(2); expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(2);
+    fixture.button(t('undoEdit')).click(); expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(0);
+    fixture.button(t('redoEdit')).click(); fixture.button(t('saveChanges')).click(); await fixture.settled();
+    const entries = [...saved.values()][0]!.envelope.playlist.tracks;
+    expect(entries.every(track => track.cues.length === 0 && track.after === undefined)).toBe(true);
+    file.files = Array.from({ length: 99 }, () => new File(['x'], 'x.wav')); file.dispatchEvent(new Event('change'));
+    expect(mocks.storeTrack).toHaveBeenCalledTimes(2); expect(fixture.message).toHaveBeenCalledWith(t('tooManyTracks'), true);
+    expect(mocks.preview.playTrack).not.toHaveBeenCalled(); expect(mocks.player.play).not.toHaveBeenCalled();
+  });
+  it('stages Open before accepting Discard and preserves the current draft after failed Open or Cancel', async () => {
+    const other = mix('other'); local.set(other.id, other);
+    const fixture = await harness(); fixture.button(t('newPlaylist')).click(); fixture.changeName('Unsaved');
+    fixture.button(t('openDifferentPlaylist')).click(); fixture.button(t('openRoutine', { name: other.name })).click();
+    fixture.button(t('cancel'), fixture.modal()).click(); expect(fixture.input().value).toBe('Unsaved');
+    fixture.button(t('openRoutine', { name: other.name })).click(); mocks.getMusicPlaylist.mockResolvedValueOnce(null);
+    fixture.button(t('discard'), fixture.modal()).click(); await fixture.settled();
+    expect(fixture.input().value).toBe('Unsaved'); expect(fixture.session.hasUnsaved()).toBe(true); expect(mocks.setActivePlaylistSelection).not.toHaveBeenCalled();
+    fixture.button(t('cancel'), fixture.modal()).click();
+    fixture.button(t('openRoutine', { name: other.name })).click(); fixture.button(t('discard'), fixture.modal()).click(); await fixture.settled();
+    expect(fixture.input().value).toBe('other'); expect(selection?.id).toBe(other.id);
+  });
+  it('blocks saves during another editor transfer and preserves a dirty draft when a saved Cloud copy is acknowledged', async () => {
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', user: null, expiresAt: null });
+    const value = mix('queued'); const record: PlaylistWorkingCopy = { envelope: { playlist: value, media: {} }, localVersion: 1, cloudBaseRevision: null, pendingCloud: true, savedAt: 123456 };
+    saved.set(value.id, record); selection = { id: value.id, source: 'household', published: false };
+    const fixture = await harness(true); vi.stubGlobal('navigator', { onLine: true }); fixture.changeName('Not saved to Cloud'); fixture.block(true);
+    expect(fixture.button(t('saveChanges')).disabled).toBe(true); fixture.button(t('saveChanges')).dispatchEvent(new Event('click'));
+    expect(mocks.playlistSnapshot).not.toHaveBeenCalled(); fixture.block(false);
+    mocks.playlistSync.mockImplementation(async () => ({ ...structuredClone(record), cloudBaseRevision: 1, pendingCloud: false }));
+    await fixture.session.syncPending();
+    expect(mocks.playlistSync).toHaveBeenCalledWith(record, expect.objectContaining({ signal: expect.any(AbortSignal) })); expect(fixture.input().value).toBe('Not saved to Cloud');
+    expect(fixture.session.hasUnsaved()).toBe(true); expect(fixture.button(t('cloudPublish')).disabled).toBe(true);
+    expect(mocks.player.load).not.toHaveBeenCalled();
+  });
+  it('keeps a null Cloud base across repeated local saves and displays pending work beside newer unsaved edits', async () => {
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor'); vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'offline', user: null, expiresAt: null });
+    const fixture = await harness(true); fixture.button(t('newPlaylist')).click();
+    for (const title of ['First', 'Second']) {
+      fixture.changeName(title); fixture.button(t('saveChanges')).click(); await fixture.settled();
+    }
+    expect(mocks.savePlaylistWorkingCopy.mock.calls.map(call => call[1])).toEqual([
+      { expectedLocalVersion: null, cloud: true, cloudBaseRevision: null },
+      { expectedLocalVersion: 1, cloud: true, cloudBaseRevision: null },
+    ]);
+    fixture.changeName('Unsaved third');
+    expect(fixture.root.querySelector('.playlist-save-status')!.textContent).toContain(t('unsaved'));
+    expect(fixture.root.querySelector('.playlist-save-status')!.textContent).toContain(t('savedPending'));
+    expect([...saved.values()][0]!.envelope.playlist.name).toBe('Second'); expect(mocks.playlistSync).not.toHaveBeenCalled();
+  });
+  it('keeps locked rows read-only even for dispatched mutations', async () => {
+    const value = { ...mix('locked'), locked: true, tracks: [song('one')] }; local.set(value.id, value);
+    const fixture = await harness(); fixture.button(t('openRoutine', { name: value.name })).click(); await fixture.settled();
+    fixture.changeName('forged'); fixture.button(t('removePlaylistEntry')).dispatchEvent(new Event('click'));
+    fixture.button(t('saveChanges')).dispatchEvent(new Event('click'));
+    expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(1); expect(mocks.savePlaylistWorkingCopy).not.toHaveBeenCalled();
+    expect(fixture.button(t('undoEdit')).disabled).toBe(true); expect(mocks.deleteMusicPlaylist).not.toHaveBeenCalled();
+  });
+  it('duplicates to a separately named ID and fresh entry IDs without deleting audio or changing the source', async () => {
+    const value = mix('original'); value.tracks = [song('one')]; local.set(value.id, structuredClone(value));
+    const fixture = await harness(); fixture.button(t('openRoutine', { name: value.name })).click(); await fixture.settled();
+    fixture.button(t('duplicatePlaylist')).click(); const dialog = fixture.modal(); dialog.querySelector('input')!.value = 'Independent';
+    fixture.button(t('duplicatePlaylist'), dialog).click(); await fixture.settled();
+    expect(fixture.input().value).toBe('Independent'); fixture.button(t('saveChanges')).click(); await fixture.settled();
+    const duplicate = [...saved.values()][0]!.envelope.playlist;
+    expect(duplicate.id).not.toBe(value.id); expect(duplicate.tracks[0]!.id).not.toBe(value.tracks[0]!.id);
+    expect(duplicate.tracks[0]).toMatchObject({ title: 'one', bpm: 100, gain: 1.4, cues: [] });
+    expect(local.get(value.id)).toEqual(value); expect(mocks.cacheCloudTrack).toHaveBeenCalledOnce();
+    expect(mocks.deleteMusicPlaylist).not.toHaveBeenCalled(); expect(mocks.player.load).not.toHaveBeenCalled();
+  });
+  it('lists playlist recovery separately and leaves a routine recovery untouched', async () => {
+    const playlist = mix('recovered');
+    const records: DraftRecovery[] = [
+      { id: 'playlist-recovery', kind: 'playlist', source: 'local', value: playlist, baseRevision: 1, media: {}, updatedAt: 1000 },
+      { id: 'routine-recovery', kind: 'routine', source: 'local', value: newRoutine(), baseRevision: 1, media: {}, updatedAt: 1000 },
+    ];
+    mocks.listDraftRecoveries.mockResolvedValue(records);
+    const fixture = await harness(); const recovery = fixture.root.querySelector('.recovery-library')!;
+    recovery.open = true; recovery.dispatchEvent(new Event('toggle'));
+    await vi.waitFor(() => expect(recovery.querySelectorAll('.routine-library-row')).toHaveLength(1));
+    fixture.button(t('restoreCopy'), recovery).click(); await fixture.settled();
+    expect(fixture.input().value).toBe(t('recoveryCopy', { name: playlist.name }));
+    expect(mocks.removeDraftRecovery).not.toHaveBeenCalledWith('routine-recovery', expect.anything());
+    expect(mocks.saveRoutineWorkingCopy).not.toHaveBeenCalled();
+  });
+  it('restores exact cached publications for players without enabling authoring or replacing editable copies', async () => {
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('player');
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'offline', user: null, expiresAt: null });
+    const publication = { playlist: { ...mix('published'), published: true, revision: 3, tracks: [song('one')] }, media: {} };
+    mocks.listCachedMusicPlaylists.mockResolvedValue([publication]); mocks.getCachedMusicPlaylist.mockResolvedValue(publication);
+    selection = { id: publication.playlist.id, source: 'household', published: true, revision: 3 };
+    const fixture = await harness(true);
+    expect(mocks.getCachedMusicPlaylist).toHaveBeenCalledWith('published', 3, true);
+    expect(fixture.button(t('newPlaylist')).hidden).toBe(true); expect(fixture.button(t('saveChanges')).hidden).toBe(true);
+    fixture.button(t('removePlaylistEntry')).dispatchEvent(new Event('click')); fixture.button(t('saveChanges')).dispatchEvent(new Event('click'));
+    expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(1); expect(mocks.savePlaylistWorkingCopy).not.toHaveBeenCalled();
+    expect(mocks.reconcilePlaylistWorkingCopy).not.toHaveBeenCalled(); expect(mocks.playlistSync).not.toHaveBeenCalled();
+  });
+  it('ignores a late saved-copy acknowledgment after disposal and aborts its transfer', async () => {
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor'); vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', user: null, expiresAt: null });
+    const value = mix('pending'); const record: PlaylistWorkingCopy = { envelope: { playlist: value, media: {} }, localVersion: 1, cloudBaseRevision: null, pendingCloud: true, savedAt: 1000 };
+    saved.set(value.id, record); selection = { id: value.id, source: 'household', published: false };
+    const fixture = await harness(true); const gate = deferred(); vi.stubGlobal('navigator', { onLine: true });
+    mocks.playlistSync.mockImplementation(async () => { await gate.promise; return { ...record, cloudBaseRevision: 1, pendingCloud: false }; });
+    const pending = fixture.session.syncPending(); await vi.waitFor(() => expect(mocks.playlistSync).toHaveBeenCalledOnce());
+    const signal = mocks.playlistSync.mock.calls[0]![1].signal as AbortSignal;
+    fixture.session.dispose(); expect(signal.aborted).toBe(true); gate.resolve(); await pending;
+    expect(mocks.setActivePlaylistSelection).not.toHaveBeenCalled(); expect(fixture.message).not.toHaveBeenCalled();
+  });
+});
+
 describe('class panel saved references and local actions', () => {
   beforeEach(() => {
     vi.resetAllMocks(); nodes.length = 0; stubDocument(); vi.stubGlobal('confirm', vi.fn(() => true));
@@ -2196,26 +2556,28 @@ describe('class panel saved references and local actions', () => {
     return { panel, root, button, selected, message, restore };
   };
 
-  it('edits blank and known Settings BPM with independent undo and exposes the shared audio picker', async () => {
+  it('retains legacy panel numbered songs, duration and undoable levels while preserving hidden BPM metadata', async () => {
     const track: Track = { id: 'unknown', title: 'Unknown', duration: 30, firstBeat: 0, bodyArea: '', cues: [] };
     const playlist: MusicPlaylist = { schemaVersion: 2, id: 'playlist', name: 'Settings mix', revision: 5, locked: false, published: false,
       tracks: [track, { ...track, id: 'known', title: 'Known', bpm: 100 }] };
     mocks.listMusicPlaylists.mockResolvedValue([playlist]);
     const routine = newRoutine(); const original = structuredClone(routine); const harness = await panelHarness(routine);
     harness.button(t('openRoutine', { name: playlist.name })).click();
-    const inputs = () => harness.root.querySelectorAll('label').filter(node => node.textContent === t('bpm')).map(node => node.children[0]!);
+    const inputs = () => harness.root.querySelectorAll('input').filter(node => node.type === 'range');
     await vi.waitFor(() => expect(inputs()).toHaveLength(2));
-    expect(inputs().map(input => input.value)).toEqual(['', '100']);
+    expect(harness.root.querySelectorAll('.playlist-track-number').map(node => node.textContent)).toEqual(['1', '2']);
+    expect(harness.root.querySelectorAll('.playlist-track-duration').map(node => node.textContent)).toEqual(['0:30', '0:30']);
+    expect(harness.root.querySelectorAll('label').some(node => node.textContent === t('bpm'))).toBe(false);
     expect(harness.button(t('existingAudio')).disabled).toBe(false);
-    const input = inputs()[0]!; input.value = '126'; input.dispatchEvent(new Event('input'));
+    const input = inputs()[0]!; input.value = '75'; input.dispatchEvent(new Event('input'));
     expect(harness.button(t('undoEdit')).disabled).toBe(false);
-    harness.button(t('undoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['', '100']);
-    harness.button(t('redoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['126', '100']);
-    const known = inputs()[1]!; known.value = ''; known.dispatchEvent(new Event('input'));
+    harness.button(t('undoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['100', '100']);
+    harness.button(t('redoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['75', '100']);
     mocks.saveMusicPlaylist.mockImplementation(async value => ({ ...structuredClone(value), revision: 6 }));
     harness.button(t('librarySave', { name: playlist.name, destination: t('localDestination') })).click();
     await vi.waitFor(() => expect(mocks.saveMusicPlaylist).toHaveBeenCalledOnce());
-    expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks.map((entry: Track) => entry.bpm)).toEqual([126, undefined]);
+    expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks.map((entry: Track) => entry.bpm)).toEqual([undefined, 100]);
+    expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks[0]!.gain).toBe(0.75);
     expect(routine).toEqual(original); expect(playlist.tracks[0]!.bpm).toBeUndefined(); expect(playlist.tracks[1]!.bpm).toBe(100);
     harness.panel.dispose();
   });
@@ -2293,14 +2655,19 @@ describe('UI persistence and transport wiring', () => {
   let source: Routine;
   let playback: PlayerState;
   let emit: (state: PlayerState) => void;
-  const button = (label: string) => nodes.find(node => node.tag === 'button' && node.title === label)!;
+  const button = (label: string) => nodes.find(node => node.className === 'edit-panel')?.querySelectorAll('button')
+    .find(node => node.title === label) ?? nodes.find(node => node.tag === 'button' && node.title === label)!;
   const selection = () => nodes.find(node => node.tag === 'select' && node.attributes.get('aria-label') === t('savedRoutines'))!;
   const currentDraft = () => mocks.renderEditor.mock.lastCall![1] as Routine;
   const editName = (name: string) => {
     currentDraft().name = name;
     (mocks.renderEditor.mock.lastCall![2] as () => void)();
   };
-  const settled = () => vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
+  const settled = async () => {
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await vi.waitFor(() => expect(button(t('duplicate')).disabled).toBe(false));
+  };
   const open = async () => { await import('../frontend/src/main'); await settled(); };
   const choose = (id: string) => { selection().value = id; selection().dispatchEvent(new Event('change')); };
   const duplicateRoutine = async () => {
@@ -3463,6 +3830,48 @@ describe('UI persistence and transport wiring', () => {
     expect(currentDraft().tracks).toHaveLength(0);
     expect(mocks.player.load).toHaveBeenCalledOnce();
     expect(mocks.player.stop).not.toHaveBeenCalled();
+  });
+
+  it('exposes selected Delete routine beside Close and keeps cancellation nonmutating', async () => {
+    await open(); await settled();
+    const footer = nodes.find(node => node.className === 'editor-footer')!;
+    const remove = footer.querySelectorAll('button').find(node => node.title === t('deleteRoutine'))!;
+    expect(remove.hidden).toBe(false); expect(remove.disabled).toBe(false);
+    vi.mocked(confirm).mockReturnValueOnce(false); remove.click(); await settled();
+    expect(mocks.deleteRoutine).not.toHaveBeenCalled(); expect(currentDraft()).toEqual(source);
+    remove.click(); await settled(); expect(mocks.deleteRoutine).toHaveBeenCalledExactlyOnceWith(source.id, 4);
+  });
+
+  it('deletes the exact other chooser ID despite duplicate names without changing current draft or Teach', async () => {
+    const other = { ...structuredClone(source), id: 'other-same-name', revision: 7 }; records.set(other.id, other);
+    await open(); await settled(); const prepared = structuredClone(mocks.player.load.mock.calls);
+    button(t('openDifferent')).click();
+    const rows = nodes.find(node => node.className === 'routine-library-rows')!;
+    const matching = rows.querySelectorAll('.routine-library-row').filter(row => row.querySelector('.library-row-name')?.textContent === source.name);
+    expect(matching).toHaveLength(2);
+    const target = matching.find(row => !row.querySelector('.current-routine'))!;
+    const remove = target.querySelectorAll('button').find(node => node.title === t('deleteRoutine'))!;
+    mocks.preview.stop.mockClear(); vi.mocked(confirm).mockReturnValueOnce(false); remove.click(); await settled();
+    expect(mocks.deleteRoutine).not.toHaveBeenCalled();
+    remove.click(); await settled();
+    expect(mocks.deleteRoutine).toHaveBeenCalledExactlyOnceWith(other.id, 7);
+    expect(currentDraft()).toEqual(source); expect(mocks.player.load.mock.calls).toEqual(prepared);
+    expect(mocks.player.stop).not.toHaveBeenCalled(); expect(mocks.preview.stop).not.toHaveBeenCalled();
+    expect(mocks.clearActiveRoutine).not.toHaveBeenCalled();
+  });
+
+  it('omits chooser deletion for locked or published routines and rejects a changed target head', async () => {
+    const locked = { ...structuredClone(source), id: 'locked-other', locked: true };
+    const publication = { ...structuredClone(source), id: 'published-other', published: true };
+    records.set(locked.id, locked); mocks.listRoutinePublications.mockResolvedValue([publication]);
+    const other = { ...structuredClone(source), id: 'changing-other' }; records.set(other.id, other);
+    await open(); await settled(); button(t('openDifferent')).click();
+    const rows = nodes.find(node => node.className === 'routine-library-rows')!.querySelectorAll('.routine-library-row');
+    expect(rows.filter(row => row.querySelectorAll('button').some(node => node.title === t('deleteRoutine')))).toHaveLength(2);
+    const target = rows.find(row => !row.querySelector('.current-routine') && row.querySelectorAll('button').some(node => node.title === t('deleteRoutine')))!;
+    records.set(other.id, { ...other, revision: other.revision + 1 });
+    target.querySelectorAll('button').find(node => node.title === t('deleteRoutine'))!.click(); await settled();
+    expect(mocks.deleteRoutine).not.toHaveBeenCalled(); expect(currentDraft()).toEqual(source);
   });
 
   it.each(['routine_locked', 'routine_conflict'])('surfaces local delete %s and retains the selected routine', async code => {

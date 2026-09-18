@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { CloudAsset, CloudRoutine, CloudRoutineSummary } from '../../../shared/cloud-contract';
 import { allRoutineTracks, type Routine } from '../../../shared/routine';
 import { parseRoutineContent, strictRecord } from '../validation';
+import type { ReferenceClaims } from './admission';
 import { CloudAuth } from './auth';
 import { ApiError, safeId } from './config';
 import { boundedContent, fillerAssetIds, resolveFillers, resolveMedia, routineFillers } from './content';
@@ -24,8 +25,10 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
   saved(body: CloudRoutine): CloudRoutine {
     return this.withEntity(body, { ...body.routine, savedAt: this.auth.now() });
   }
-  validateReplacement(previous: CloudRoutine, next: CloudRoutine): void {
-    if (previous.routine.schemaVersion === 2 && next.routine.schemaVersion === 1) {
+  validateReplacement(previous: CloudRoutine, next: unknown): void {
+    const candidate = next && typeof next === 'object' && 'routine' in next ? next.routine : null;
+    if (previous.routine.schemaVersion === 2 && candidate && typeof candidate === 'object'
+      && 'schemaVersion' in candidate && candidate.schemaVersion === 1) {
       throw new ApiError(409, 'routine_schema_downgrade');
     }
   }
@@ -33,7 +36,7 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
     if (!body.routine.tracks.length) throw new ApiError(400, 'publication_requires_tracks');
   }
 
-  async parse(input: unknown): Promise<CloudRoutine> {
+  async parse(input: unknown, _headers?: Headers, claims?: ReferenceClaims): Promise<CloudRoutine> {
     const value = strictRecord(input, ['routine', 'media']);
     if (!value.routine || typeof value.routine !== 'object') throw new ApiError(400, 'invalid_input');
     const fields = ['id', 'revision', 'locked', 'published', 'schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
@@ -47,8 +50,8 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
     const routine = { ...parseRoutineContent(content), id, revision, locked, published };
     const tracks = allRoutineTracks(routine);
     if (tracks.some(track => !safeId(track.id))) throw new ApiError(400, 'invalid_id');
-    await resolveFillers(routineFillers(routine), this.fillers);
-    return boundedContent({ routine, media: await resolveMedia(value.media, tracks, this.media) });
+    await resolveFillers(routineFillers(routine), this.fillers, claims);
+    return boundedContent({ routine, media: await resolveMedia(value.media, tracks, this.media, claims) });
   }
 
   async list(headers: Headers, published: boolean): Promise<{ routines: CloudRoutineSummary[] }> {

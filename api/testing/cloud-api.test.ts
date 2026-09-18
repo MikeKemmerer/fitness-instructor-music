@@ -18,6 +18,9 @@ import { HEAD_BYTES, HISTORY_LIMIT } from '../src/cloud/documents';
 import type { CloudClassSetup, ResolvedClassSetup } from '../src/cloud/plans';
 import { parseRoutineContent } from '../src/validation';
 import { LIBRARY_SCAN_LIMIT } from '../src/cloud/library';
+import { AssetAdmission, GATE_BYTES } from '../src/cloud/admission';
+import { MANAGED_PAGE_KEYS, metadataRevision } from '../src/cloud/library-management';
+import { LibraryReferences, REFERENCE_LIMITS } from '../src/cloud/library-references';
 
 vi.mock('@azure/functions', () => ({ app: { http: vi.fn() } }));
 
@@ -234,6 +237,33 @@ function atRevision(headers: Headers, revision: number): Headers {
   return result;
 }
 
+async function activateLibrary(store: BlobStore): Promise<void> {
+  await store.put('control/library-admission-v1', encode({ version: 1, exclusiveWriters: true }), null);
+}
+
+async function legacyArchive(fillers: CloudFillers, id: string): Promise<void> {
+  const stored = await fillers.record(id);
+  await fillers.store.put(`fillers/records/${id}`, encode({ ...stored.value, archived: true }), stored.etag);
+}
+
+function barrier() {
+  let enter!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const released = new Promise<void>(resolve => { release = resolve; });
+  return { entered, release, pause: async () => { enter(); await released; } };
+}
+
+async function managementFixture(activate = true) {
+  const context = fixture();
+  const api = new CloudApi(context.store, context.env, context.auth.now);
+  const other = new CloudApi(context.store, context.env, context.auth.now);
+  const { headers } = await context.login();
+  const asset = await uploadAudio(api.media, headers);
+  if (activate) await activateLibrary(context.store);
+  return { ...context, api, other, headers, asset };
+}
+
 function pin(value: { id: string; revision: number; published: boolean }): RevisionReference {
   return { id: value.id, revision: value.revision, published: value.published };
 }
@@ -354,7 +384,14 @@ describe('unified routine HTTP aggregate', () => {
     const quota = store.blobs.get('control/quota');
     expect((await api.handle(request('routines', 'POST', headers, input))).status).toBe(400);
     expect(store.blobs.has(api.routines.headKey(input.routine.id))).toBe(false);
-    expect(store.blobs.get('control/quota')).toEqual(quota);
+    const before = JSON.parse(quota!.bytes.toString());
+    const after = (await readJson<Record<string, number>>(store, 'control/quota'))!.value;
+    expect(after).toMatchObject({ routines: before.routines, fillers: before.fillers, assets: before.assets, active: before.active });
+    expect(after.bytes).toBeGreaterThanOrEqual(before.bytes);
+    expect([...store.blobs.keys()].some(key => key.startsWith('snapshots/'))).toBe(false);
+    for (const key of store.blobs.keys()) {
+      if (key.startsWith('library/gates/')) expect((await new AssetAdmission(store).read(key.slice('library/gates/'.length))).value.claims).toEqual([]);
+    }
   });
 
   it('authorizes the exact complete published phase/filler union and preserves old publication playback', async () => {
@@ -509,7 +546,7 @@ describe('filler analysis HTTP metadata', () => {
     expect(JSON.parse(result.body.toString())).toEqual({ analysis });
     expect(result.headers['cache-control']).toContain('no-store');
     for (const [key, blob] of original) expect(store.blobs.get(key)).toEqual(blob);
-    await api.routines.fillers.archive(headers, recording.id);
+    await legacyArchive(api.routines.fillers, recording.id);
     const archived = await api.handle(request(path, 'GET', headers));
     expect(archived.status).toBe(200);
     expect(JSON.parse(archived.body.toString())).toEqual({ analysis });
@@ -551,6 +588,522 @@ describe('filler analysis HTTP metadata', () => {
     catalog.value.asset.sha256 = '0'.repeat(64);
     await store.put(key, encode(catalog.value), catalog.etag);
     expect((await api.handle(request(path, 'PUT', headers, analysis))).status).toBe(503);
+  });
+});
+
+describe('uploaded audio management HTTP (synthetic Blob store)', () => {
+  it('lists every completed upload with truthful revision-zero metadata, including song/filler overlap', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const recording = await api.routines.fillers.create(headers, { name: 'Immutable loop', duration: 20, asset });
+    await stageAudio(api.media, headers, wav(4096));
+    const get = vi.spyOn(store, 'get');
+    const songs = await api.handle(request('library/songs', 'GET', headers));
+    expect(songs.status).toBe(200);
+    expect(JSON.parse(String(songs.body))).toEqual({ items: [{ id: asset.id, kind: 'song', asset,
+      metadata: { revision: 0, title: '', artist: '' } }] });
+    const fillers = await api.handle(request('library/fillers', 'GET', headers));
+    expect(JSON.parse(String(fillers.body))).toEqual({ items: [{ id: recording.id, kind: 'filler', asset, recording,
+      metadata: { revision: 0, title: recording.name, artist: '', duration: 20 } }] });
+    expect(get.mock.calls.some(([key]) => key.includes('/chunks/'))).toBe(false);
+    expect(songs.headers['cache-control']).toContain('private, no-store');
+  });
+
+  it('edits future presentation with metadata CAS without mutating saved or published snapshots', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine(asset));
+    await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'publish');
+    const snapshots = [...store.blobs].filter(([key]) => /^(snapshots|publications)\//.test(key));
+    const path = `library/songs/${asset.id}/metadata`;
+    const initial = await api.handle(request(path, 'GET', headers));
+    expect(initial.headers.etag).toBe('"0"');
+    expect(JSON.parse(String(initial.body))).toEqual({ metadata: { revision: 0, title: '<literal song>', artist: '', duration: 60, bpm: 120 } });
+    const changed = await api.handle(request(path, 'PUT', atRevision(headers, 0), { title: '<literal new title>', artist: 'Artist', bpm: 99.5 }));
+    expect(changed.status).toBe(200);
+    expect(changed.headers.etag).toBe('"1"');
+    expect((await other.handle(request(path, 'PUT', atRevision(headers, 0), { title: 'Stale', artist: '' }))).status).toBe(412);
+    const page = await api.library.list(headers);
+    expect(page.items[0]).toMatchObject({ title: '<literal new title>', bpm: 99.5, duration: 60 });
+    await other.managed.put(atRevision(headers, 1), 'song', asset.id, { title: '', artist: '' });
+    expect((await api.library.list(headers)).items[0]).not.toHaveProperty('bpm');
+    for (const [key, value] of snapshots) expect(store.blobs.get(key)).toEqual(value);
+  });
+
+  it('accepts intake exactly once, preserves it through edits and never claims independent measurement', async () => {
+    const { api, headers, asset } = await managementFixture();
+    const path = `library/songs/${asset.id}`;
+    const result = await api.handle(request(`${path}/intake`, 'PUT', atRevision(headers, 0), { filename: 'Original.wav', duration: 1200 }));
+    expect(result.status).toBe(200);
+    expect(JSON.parse(String(result.body))).toEqual({ metadata: { revision: 1, title: '', artist: '', filename: 'Original.wav', duration: 1200 } });
+    expect((await api.handle(request(`${path}/intake`, 'PUT', atRevision(headers, 0), { filename: 'Other.wav', duration: 1 }))).status).toBe(412);
+    await api.managed.put(atRevision(headers, 1), 'song', asset.id, { title: 'Future title', artist: 'Known', bpm: 40 });
+    expect((await api.managed.metadata(headers, 'song', asset.id)).metadata).toEqual({ revision: 2, title: 'Future title', artist: 'Known', bpm: 40,
+      filename: 'Original.wav', duration: 1200 });
+    expect((await api.handle(request(`${path}/metadata`, 'PUT', atRevision(headers, 2), { title: '', artist: '', filename: 'forged' }))).status).toBe(400);
+    expect((await api.handle(request('library/songs/missing/intake', 'PUT', atRevision(headers, 0), { filename: 'Unknown.wav', duration: 5 }))).status).toBe(404);
+  });
+
+  it.each([{ filename: '../audio.wav', duration: 1 }, { filename: 'C:\\audio.wav', duration: 1 }, { filename: '.', duration: 1 },
+    { filename: 'x'.repeat(301), duration: 1 }, { filename: 'valid.wav', duration: 0 }, { filename: 'valid.wav', duration: 1201 },
+    { filename: 'valid.wav', duration: '10' }, { filename: 'valid.wav', duration: null }, { filename: 'valid.wav', duration: 1, title: 'extra' }])(
+    'rejects invalid intake %j before metadata persistence', async input => {
+      const { api, headers, asset, store } = await managementFixture();
+      expect((await api.handle(request(`library/songs/${asset.id}/intake`, 'PUT', atRevision(headers, 0), input))).status).toBe(400);
+      expect(store.blobs.has(`library/metadata/song/${asset.id}`)).toBe(false);
+    });
+
+  it.each([{ title: 'x'.repeat(301), artist: '' }, { title: '', artist: 'x'.repeat(301) }, { title: '', artist: '', bpm: null },
+    { title: '', artist: '', bpm: 39 }, { title: '', artist: '', bpm: 221 }, { title: '', artist: '', bpm: '100' },
+    { title: '' }, { title: '', artist: '', revision: 0 }])('rejects strict metadata input %j', async input => {
+    const { api, headers, asset } = await managementFixture();
+    expect((await api.handle(request(`library/songs/${asset.id}/metadata`, 'PUT', atRevision(headers, 0), input))).status).toBe(400);
+  });
+
+  it('requires canonical quoted metadata revisions, accepts bounds and rejects oversized JSON', async () => {
+    const { api, headers, asset } = await managementFixture();
+    const path = `library/songs/${asset.id}/metadata`;
+    expect((await api.handle(request(path, 'PUT', headers, { title: '', artist: '' }))).status).toBe(428);
+    for (const header of ['0', '"00"', '-1', 'W/"0"', '*', '"9007199254740992"']) expect(() => metadataRevision(header)).toThrow();
+    expect(metadataRevision('"0"')).toBe(0);
+    expect((await api.handle(request(path, 'PUT', atRevision(headers, 0), { title: 'x'.repeat(300), artist: 'y'.repeat(300), bpm: 220 }))).status).toBe(200);
+    expect((await api.handle(request(path, 'PUT', atRevision(headers, 1), { title: 'x'.repeat(5000), artist: '' }))).status).toBe(413);
+    expect((await api.handle(request(`library/songs/${asset.id}`, 'DELETE', atRevision(headers, 0)))).status).toBe(412);
+  });
+
+  it('denies anonymous, spoofed and player access; retains Origin, CSRF, strict methods and queries', async () => {
+    const { api, headers, asset, login } = await managementFixture();
+    const player = (await login('player')).headers;
+    const editor = (await login('editor')).headers;
+    const path = `library/songs/${asset.id}`;
+    for (const [route, method, input] of [['library/songs', 'GET', undefined], [`${path}/metadata`, 'GET', undefined],
+      [`${path}/usage`, 'GET', undefined], [`${path}/metadata`, 'PUT', { title: '', artist: '' }],
+      [`${path}/intake`, 'PUT', { filename: 'Synthetic.wav', duration: 10 }], [path, 'DELETE', undefined]] as const) {
+      for (const denied of [new Headers({ origin: 'https://example.invalid' }),
+        new Headers({ origin: 'https://example.invalid', 'x-ms-client-principal': 'owner' })]) {
+        expect((await api.handle(request(route, method, denied, input))).status).toBe(401);
+      }
+      expect((await api.handle(request(route, method, atRevision(player, 0), input))).status).toBe(403);
+    }
+    expect((await api.handle(request('library/songs', 'GET', editor))).status).toBe(200);
+    for (const field of ['origin', 'x-csrf-token']) {
+      const denied = atRevision(headers, 0);
+      denied.set(field, 'forged');
+      expect((await api.handle(request(path, 'DELETE', denied))).status).toBe(403);
+    }
+    for (const route of ['library/songs?cursor=', 'library/songs?cursor=a&cursor=b', 'library/songs?limit=999',
+      `${path}/metadata?cursor=a`, `${path}/usage?cursor=`, `${path}?force=true`]) {
+      expect((await api.handle(request(route, route.includes('force') ? 'DELETE' : 'GET', atRevision(headers, 0)))).status).toBe(400);
+    }
+    for (const [route, method] of [['library/songs', 'POST'], [`${path}/usage`, 'PUT'], [`${path}/metadata`, 'DELETE'],
+      [`${path}/intake`, 'GET'], [`${path}/metadata/extra`, 'GET'], ['library/other', 'GET'], [path, 'HEAD']]) {
+      expect((await api.handle(request(route!, method!, headers))).status).toBe(404);
+    }
+    expect((await api.handle(request(path, 'DELETE', atRevision(headers, 0), {}))).status).toBe(400);
+    expect((await api.handle(request(`${path}/metadata`, 'GET', headers, {}))).status).toBe(400);
+  });
+
+  it('keeps filler descriptors immutable, enforces filler intake bounds, and tombstones without physical deletion', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const recording = await api.routines.fillers.create(headers, { name: 'Original name', duration: 25, asset });
+    const original = store.blobs.get(`fillers/records/${recording.id}`);
+    expect((await api.handle(request(`library/fillers/${recording.id}/intake`, 'PUT', atRevision(headers, 0), { filename: 'Loop.wav', duration: 361 }))).status).toBe(400);
+    await api.managed.put(atRevision(headers, 0), 'filler', recording.id, { title: 'Future display', artist: 'Artist', bpm: 100 });
+    expect(store.blobs.get(`fillers/records/${recording.id}`)).toEqual(original);
+    expect((await api.managed.list(headers, 'filler')).items[0]).toMatchObject({ recording,
+      metadata: { revision: 1, title: 'Future display', artist: 'Artist', bpm: 100, duration: 25 } });
+    const remove = vi.spyOn(store, 'delete');
+    expect(await api.managed.remove(atRevision(headers, 1), 'filler', recording.id)).toEqual({ deleted: true, bytesRetained: true });
+    expect(await api.managed.list(headers, 'filler')).toEqual({ items: [] });
+    expect((await api.managed.list(headers, 'song')).items[0]!.id).toBe(asset.id);
+    expect(await api.routines.fillers.get(headers, recording.id)).toEqual(recording);
+    const input = routine();
+    input.routine.filler = { ...input.routine.filler, sound: 'recording', recording };
+    await expect(api.routines.create(headers, input)).rejects.toMatchObject({ code: 'media_deleted' });
+    expect(store.blobs.get(`fillers/records/${recording.id}`)).toEqual(original);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('logically deletes unused songs, preserves bytes, and prevents completed-upload replay and new references', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const media = [...store.blobs].filter(([key]) => key.startsWith('assets/') || key.startsWith('uploads/'));
+    const remove = vi.spyOn(store, 'delete');
+    const response = await api.handle(request(`library/songs/${asset.id}`, 'DELETE', atRevision(headers, 0)));
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(response.body))).toEqual({ deleted: true, bytesRetained: true });
+    expect(await other.managed.remove(atRevision(headers, 0), 'song', asset.id)).toEqual({ deleted: true, bytesRetained: true });
+    expect(await other.library.list(headers)).toEqual({ items: [] });
+    expect(await other.managed.list(headers, 'song')).toEqual({ items: [] });
+    await expect(other.media.complete(headers, asset.id)).rejects.toMatchObject({ code: 'media_deleted' });
+    await expect(other.routines.create(headers, routine(asset))).rejects.toMatchObject({ code: 'media_deleted' });
+    await expect(other.routines.fillers.create(headers, { name: 'No resurrection', duration: 2, asset })).rejects.toMatchObject({ code: 'media_deleted' });
+    expect(hashBytes((await other.media.chunk(asset.id, 0)).bytes)).toBe(asset.sha256);
+    for (const [key, value] of media) expect(store.blobs.get(key)).toEqual(value);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit all-writers activation barrier and never auto-enables DELETE', async () => {
+    const { api, headers, asset, store } = await managementFixture(false);
+    const path = `library/songs/${asset.id}`;
+    expect((await api.handle(request(path, 'DELETE', atRevision(headers, 0)))).body).toBe('{"error":"library_delete_unconfigured"}');
+    expect(store.blobs.has(`library/gates/${asset.id}`)).toBe(false);
+    await store.put('control/library-admission-v1', encode({ version: 1, exclusiveWriters: false }), null);
+    expect((await api.handle(request(path, 'DELETE', atRevision(headers, 0)))).status).toBe(503);
+  });
+
+  it('handles bounded chunks-only and empty-continuation pages without hiding unreferenced uploads', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    for (let index = 0; index < MANAGED_PAGE_KEYS; index++) await store.put(`assets/0000/chunks/${index}`, Buffer.alloc(1), null);
+    const first = await api.managed.list(headers, 'song');
+    expect(first.items).toEqual([]);
+    expect(first.cursor).toBeDefined();
+    expect((await api.managed.list(headers, 'song', first.cursor)).items.map(item => item.id)).toContain(asset.id);
+    const list = vi.spyOn(store, 'list');
+    list.mockResolvedValueOnce({ keys: [], cursor: 'empty-page' });
+    expect(await api.managed.list(headers, 'song')).toMatchObject({ items: [], cursor: expect.any(String) });
+    list.mockResolvedValueOnce({ keys: [`assets/${asset.id}/catalog`, `assets/${asset.id}/catalog`], cursor: undefined });
+    await expect(api.managed.list(headers, 'song')).rejects.toMatchObject({ status: 503 });
+    list.mockRestore();
+    await store.put(`library/metadata/song/${asset.id}`, encode({ revision: 1, title: 'Corrupt' }), null);
+    await expect(api.managed.list(headers, 'song', first.cursor)).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('does not let the legacy archive endpoint bypass retained usage or metadata CAS', async () => {
+    const { api, headers, asset } = await managementFixture();
+    const recording = await api.routines.fillers.create(headers, { name: 'Retained loop', duration: 10, asset });
+    const input = routine();
+    input.routine.filler = { ...input.routine.filler, sound: 'recording', recording };
+    await api.routines.create(headers, input);
+    const path = `fillers/${recording.id}`;
+    expect((await api.handle(request(path, 'DELETE', headers))).status).toBe(428);
+    expect((await api.handle(request(path, 'DELETE', atRevision(headers, 0)))).body).toBe('{"error":"media_in_use"}');
+    expect((await api.handle(request(path, 'GET', headers))).body).toBe(encode(recording).toString());
+  });
+});
+
+describe('uploaded audio durable admission races (two instances)', () => {
+  it('allows only one simultaneous metadata revision and releases the definitive CAS loser', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const put = store.put.bind(store);
+    const paused = barrier();
+    let arrivals = 0;
+    vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key === `library/metadata/song/${asset.id}`) {
+        arrivals++;
+        if (arrivals === 2) paused.release();
+        await paused.pause();
+      }
+      return put(key, bytes, expected);
+    });
+    const results = await Promise.allSettled([
+      api.managed.put(atRevision(headers, 0), 'song', asset.id, { title: 'First', artist: '' }),
+      other.managed.put(atRevision(headers, 0), 'song', asset.id, { title: 'Second', artist: '' }),
+    ]);
+    expect(arrivals).toBe(2);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: { status: 412 } });
+    expect((await new AssetAdmission(store).read(asset.id)).value.claims).toEqual([]);
+  });
+
+  it('retains an ambiguous metadata claim instead of allowing deletion during a delayed write', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const put = store.put.bind(store);
+    const spy = vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if (key === `library/metadata/song/${asset.id}`) throw new ApiError(503, 'lost_acknowledgment');
+      return etag;
+    });
+    await expect(api.managed.put(atRevision(headers, 0), 'song', asset.id, { title: 'Committed', artist: '' })).rejects.toMatchObject({ status: 503 });
+    spy.mockRestore();
+    expect((await other.managed.metadata(headers, 'song', asset.id)).metadata.revision).toBe(1);
+    await expect(other.managed.remove(atRevision(headers, 1), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_write_pending' });
+  });
+
+  it('save-first holds its claim after authoritative resolution until head commit', async () => {
+    const { api, other, headers, asset } = await managementFixture();
+    const paused = barrier();
+    const catalog = api.media.catalog.bind(api.media);
+    const spy = vi.spyOn(api.media, 'catalog').mockImplementation(async id => {
+      const result = await catalog(id);
+      await paused.pause();
+      return result;
+    });
+    const saving = api.routines.create(headers, routine(asset));
+    await paused.entered;
+    try {
+      await expect(other.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_write_pending' });
+    } finally { paused.release(); }
+    await saving;
+    spy.mockRestore();
+    await expect(other.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'media_in_use' });
+  });
+
+  it('delete-first closes admission before scanning and rejects every new writer across instances', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const paused = barrier();
+    const list = store.list.bind(store);
+    let stopped = false;
+    vi.spyOn(store, 'list').mockImplementation(async (prefix, limit, cursor) => {
+      if (prefix === 'heads/' && !stopped) { stopped = true; await paused.pause(); }
+      return list(prefix, limit, cursor);
+    });
+    const deleting = api.managed.remove(atRevision(headers, 0), 'song', asset.id);
+    await paused.entered;
+    try {
+      await expect(other.routines.create(headers, routine(asset))).rejects.toMatchObject({ code: 'reference_write_pending' });
+      await expect(other.playlists.create(headers, musicPlaylist(asset))).rejects.toMatchObject({ code: 'reference_write_pending' });
+      await expect(other.routines.fillers.create(headers, { name: 'Pending', duration: 1, asset })).rejects.toMatchObject({ code: 'reference_write_pending' });
+      await expect(other.managed.put(atRevision(headers, 0), 'song', asset.id, { title: '', artist: '' })).rejects.toMatchObject({ code: 'reference_write_pending' });
+    } finally { paused.release(); }
+    expect(await deleting).toEqual({ deleted: true, bytesRetained: true });
+  });
+
+  it('filler creation holds the shared asset claim through its immutable record commit', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const paused = barrier();
+    const put = store.put.bind(store);
+    vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key.startsWith('fillers/records/')) await paused.pause();
+      return put(key, bytes, expected);
+    });
+    const creating = api.routines.fillers.create(headers, { name: 'Concurrent loop', duration: 10, asset });
+    await paused.entered;
+    try {
+      await expect(other.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_write_pending' });
+    } finally { paused.release(); }
+    await creating;
+    await expect(other.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'media_in_use' });
+  });
+
+  it.each(['save', 'lock', 'unlock', 'publish', 'delete', 'duplicate'] as const)('holds retained routine references during %s', async action => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine(asset));
+    const paused = barrier();
+    const put = store.put.bind(store);
+    vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key.startsWith('routines/') && key.endsWith('/head')) await paused.pause();
+      return put(key, bytes, expected);
+    });
+    const writing = action === 'duplicate' ? api.routines.duplicate(headers, draft.routine.id, false)
+      : api.routines.mutate(atRevision(headers, 1), draft.routine.id, action, action === 'save' || action === 'lock' ? draft : undefined);
+    await paused.entered;
+    try {
+      await expect(other.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_write_pending' });
+    } finally { paused.release(); }
+    await writing;
+  });
+
+  it('claims all routine phases, fillers and retained class exact references', async () => {
+    const context = await unifiedFixture();
+    const { api, headers, input, assets, store } = context;
+    await activateLibrary(store);
+    const other = new CloudApi(store, context.env, context.auth.now);
+    const draft = await api.routines.create(headers, input);
+    const playlist = await api.playlists.create(headers, musicPlaylist(assets[4]!));
+    const setup = classPlan(pin(draft.routine));
+    setup.setup.walkIn = pin(playlist.playlist);
+    const paused = barrier();
+    const put = store.put.bind(store);
+    vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      if (key.startsWith('classes/') && key.endsWith('/head')) await paused.pause();
+      return put(key, bytes, expected);
+    });
+    const writing = api.classes.create(headers, setup);
+    await paused.entered;
+    try {
+      for (const asset of assets) await expect(other.managed.remove(atRevision(headers, 0), 'song', asset.id))
+        .rejects.toMatchObject({ code: 'reference_write_pending' });
+    } finally { paused.release(); }
+    await writing;
+  });
+
+  it('retains ambiguous commit claims across restart and never expires them', async () => {
+    const { api, other, headers, asset, store, advance, login } = await managementFixture();
+    const put = store.put.bind(store);
+    const spy = vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if (key.startsWith('routines/') && key.endsWith('/head')) throw new ApiError(503, 'lost_acknowledgment');
+      return etag;
+    });
+    await expect(api.routines.create(headers, routine(asset))).rejects.toMatchObject({ status: 503 });
+    spy.mockRestore();
+    const claim = (await new AssetAdmission(store).read(asset.id)).value.claims;
+    expect(claim).toHaveLength(1);
+    advance(365 * 24 * 60 * 60 * 1000);
+    const fresh = (await login()).headers;
+    await expect(other.managed.remove(atRevision(fresh, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_write_pending' });
+    expect((await new AssetAdmission(store).read(asset.id)).value.claims).toEqual(claim);
+  });
+
+  it('persists bounded deletion checkpoints and resumes after restart without reopening admission', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    for (let index = 0; index < 10; index++) await api.routines.create(headers, routine());
+    const get = vi.spyOn(store, 'get');
+    const result = await api.handle(request(`library/songs/${asset.id}`, 'DELETE', atRevision(headers, 0)));
+    expect(result.status).toBe(202);
+    expect(result.body).toBe('{"pending":true}');
+    expect(get.mock.calls.filter(([key]) => key.startsWith('snapshots/')).length).toBeLessThanOrEqual(REFERENCE_LIMITS.snapshots);
+    expect((await new AssetAdmission(store).read(asset.id)).value.checking?.checkpoint).toBeDefined();
+    await expect(other.routines.create(headers, routine(asset))).rejects.toMatchObject({ code: 'reference_write_pending' });
+    expect(await other.managed.remove(atRevision(headers, 0), 'song', asset.id)).toEqual({ deleted: true, bytesRetained: true });
+  });
+
+  it('recovers a lost filler-tombstone acknowledgment without changing descriptor bytes or reopening the recording', async () => {
+    const { api, other, headers, asset, store } = await managementFixture();
+    const recording = await api.routines.fillers.create(headers, { name: 'Unused', duration: 1, asset });
+    const put = store.put.bind(store);
+    const spy = vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const etag = await put(key, bytes, expected);
+      if (key === `library/deleted-fillers/${recording.id}`) throw new ApiError(503, 'lost_acknowledgment');
+      return etag;
+    });
+    await expect(api.managed.remove(atRevision(headers, 0), 'filler', recording.id)).rejects.toMatchObject({ status: 503 });
+    expect((await new AssetAdmission(store).read(asset.id)).value.checking?.ready).toBe(true);
+    spy.mockRestore();
+    expect(await other.managed.remove(atRevision(headers, 0), 'filler', recording.id)).toEqual({ deleted: true, bytesRetained: true });
+    expect((await new AssetAdmission(store).read(asset.id)).value.checking).toBeUndefined();
+    expect(await other.routines.fillers.get(headers, recording.id)).toEqual(recording);
+  });
+});
+
+describe('uploaded audio retained history and finite scans', () => {
+  it('reports and blocks retained playlist publications and class exact references', async () => {
+    const { api, headers, asset } = await managementFixture();
+    const draft = await api.routines.create(headers, routine(asset));
+    const published = await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'publish');
+    const playlist = await api.playlists.create(headers, musicPlaylist(asset));
+    const publishedPlaylist = await api.playlists.mutate(atRevision(headers, 1), playlist.playlist.id, 'publish');
+    const input = classPlan(pin(published.routine));
+    input.setup.walkIn = pin(publishedPlaylist.playlist);
+    const setup = await api.classes.create(headers, input);
+    await api.classes.mutate(atRevision(headers, 1), setup.setup.id, 'publish');
+    await api.routines.mutate(atRevision(headers, 2), draft.routine.id, 'delete');
+    await api.playlists.mutate(atRevision(headers, 2), playlist.playlist.id, 'delete');
+    const kinds = new Set<string>();
+    let cursor: string | undefined;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const page = await api.managed.usage(headers, 'song', asset.id, cursor);
+      for (const reference of page.references) kinds.add(reference.kind);
+      cursor = page.cursor;
+      if (page.complete) break;
+    }
+    expect(cursor).toBeUndefined();
+    expect(kinds).toEqual(new Set(['routine', 'playlist', 'class']));
+    await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'media_in_use' });
+  });
+
+  it('enforces the combined document limit even when continuation is supplied', async () => {
+    const { api, headers, asset } = await managementFixture();
+    await api.routines.create(headers, routine());
+    const cursor = Buffer.from(JSON.stringify({ version: 1, asset: asset.id, exclude: '', stage: 0,
+      marker: '', document: '', offset: 0, documents: LIMITS.routines, records: 0, last: '' })).toString('base64url');
+    await expect(api.managed.usage(headers, 'song', asset.id, cursor)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
+  });
+
+  it('blocks removed tracks in retained history and tombstoned heads, not just current usage', async () => {
+    const { api, headers, asset } = await managementFixture();
+    const draft = await api.routines.create(headers, routine(asset));
+    const empty = routine();
+    empty.routine.id = draft.routine.id;
+    await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'save', empty);
+    await api.routines.mutate(atRevision(headers, 2), draft.routine.id, 'delete');
+    const usage = await api.managed.usage(headers, 'song', asset.id);
+    expect(usage.references).toContainEqual({ kind: 'routine', id: draft.routine.id, name: draft.routine.name, revision: 1 });
+    await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'media_in_use' });
+  });
+
+  it('fails closed on unknown legacy history, preserving the closed gate', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine());
+    await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'save', draft);
+    const key = api.routines.headKey(draft.routine.id);
+    const head = (await readJson<Record<string, unknown>>(store, key))!;
+    delete head.value.history;
+    await store.put(key, encode(head.value), head.etag);
+    expect((await api.library.list(headers)).items.map(item => item.asset.id)).toContain(asset.id);
+    expect((await api.managed.list(headers, 'song')).items.map(item => item.id)).toContain(asset.id);
+    await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
+    expect((await new AssetAdmission(store).read(asset.id)).value.checking).toBeDefined();
+  });
+
+  it('fails closed on a missing retained snapshot instead of interpreting it as unused', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine());
+    const { value: head } = await api.routines.storedHead(draft.routine.id);
+    const get = store.get.bind(store);
+    vi.spyOn(store, 'get').mockImplementation((key, maximum) => key === head.draft.key ? Promise.resolve(null) : get(key, maximum));
+    await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
+    expect((await new AssetAdmission(store).read(asset.id)).value.checking).toBeDefined();
+  });
+
+  it('caps scan payload bytes before reading another maximum-sized snapshot', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    for (let index = 0; index < 9; index++) await api.routines.create(headers, routine());
+    const get = store.get.bind(store);
+    let bytesRead = 0;
+    vi.spyOn(store, 'get').mockImplementation(async (key, maximum) => {
+      const blob = await get(key, maximum);
+      if (!blob) return blob;
+      if (key.startsWith('snapshots/')) blob.bytes = Buffer.concat([blob.bytes, Buffer.alloc(LIMITS.jsonBytes - blob.bytes.length, 32)]);
+      if (key.startsWith('snapshots/') || key.startsWith('routines/')) bytesRead += blob.bytes.length;
+      return blob;
+    });
+    const page = await api.managed.references.scan(headers, asset.id);
+    expect(page.complete).toBe(false);
+    expect(bytesRead).toBeLessThanOrEqual(REFERENCE_LIMITS.bytes);
+  });
+
+  it('rejects oversized history and malformed admission state', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine());
+    const { value: head, etag } = await api.routines.storedHead(draft.routine.id);
+    head.history = Array.from({ length: HISTORY_LIMIT + 1 }, (_, index) => ({ revision: index + 1, draft: head.draft.key }));
+    await store.put(api.routines.headKey(draft.routine.id), encode(head), etag);
+    await expect(api.managed.usage(headers, 'song', asset.id)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
+    await store.put(`library/gates/${asset.id}`, encode({ version: 1, claims: [], deleted: false }), null);
+    await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('treats legacy class exact-reference corruption as uncertainty even for otherwise unused audio', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine());
+    const saved = await api.classes.create(headers, classPlan(pin(draft.routine)));
+    const { value: head } = await api.classes.storedHead(saved.setup.id);
+    const snapshot = (await readJson<CloudClassSetup>(store, head.draft.key))!;
+    snapshot.value.setup.routine.revision = 99;
+    await store.put(head.draft.key, encode(snapshot.value), snapshot.etag);
+    await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
+  });
+
+  it('bounds elapsed scanning work and rejects cursors for another asset', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    let clock = 0;
+    const references = new LibraryReferences(store, api.auth, () => clock);
+    const list = store.list.bind(store);
+    const spy = vi.spyOn(store, 'list').mockImplementation(async (prefix, limit, cursor) => {
+      const page = await list(prefix, limit, cursor);
+      clock += REFERENCE_LIMITS.milliseconds + 1;
+      return page;
+    });
+    const page = await references.scan(headers, asset.id);
+    expect(page).toMatchObject({ references: [], complete: false, cursor: expect.any(String) });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+    await expect(references.scan(headers, 'another-asset', '', page.cursor)).rejects.toMatchObject({ code: 'invalid_cursor' });
+  });
+
+  it.each(['metadata', 'delete'] as const)('rechecks current accounts after quota immediately before %s commits', async operation => {
+    const { api, headers, asset, store, accounts } = await managementFixture();
+    const put = store.put.bind(store);
+    const spy = vi.spyOn(store, 'put').mockImplementation(async (key, bytes, expected) => {
+      const result = await put(key, bytes, expected);
+      if (key === 'control/quota') accounts[0]!.authVersion++;
+      return result;
+    });
+    await expect(operation === 'metadata'
+      ? api.managed.put(atRevision(headers, 0), 'song', asset.id, { title: 'Denied', artist: '' })
+      : api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ status: 401 });
+    expect(store.blobs.has(`library/metadata/song/${asset.id}`)).toBe(false);
+    expect((await new AssetAdmission(store).read(asset.id)).value.deleted).toBeUndefined();
+    spy.mockRestore();
   });
 });
 
@@ -660,7 +1213,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
     delete draft.routine.tracks[0]!.after;
     await api.routines.mutate(atRevision(headers, 2), created.routine.id, 'save', draft);
     await api.routines.mutate(atRevision(headers, 3), created.routine.id, 'publish');
-    await api.routines.fillers.archive(headers, recording.id);
+    await legacyArchive(api.routines.fillers, recording.id);
     const playerHeaders = (await context.login('player')).headers;
     for (const authority of [`routineId=${created.routine.id}&revision=2`, `classId=${setup.setup.id}&revision=2`]) {
       const download = await api.handle(request(`media/${gapAsset.id}/chunks/0?${authority}`, 'GET', playerHeaders));
@@ -712,7 +1265,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
     await api.classes.mutate(atRevision(headers, 2), saved.setup.id, 'save', changedSetup);
     await api.classes.mutate(atRevision(headers, 3), saved.setup.id, 'publish');
     const remove = vi.spyOn(api.store, 'delete');
-    await api.routines.fillers.archive(headers, recording.id);
+    await legacyArchive(api.routines.fillers, recording.id);
     await api.playlists.mutate(atRevision(headers, 4), list.playlist.id, 'delete');
     await api.routines.mutate(atRevision(headers, 6), changed.routine.id, 'delete');
     expect(remove).not.toHaveBeenCalled();
@@ -759,7 +1312,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
   it('validates every recording in custom gaps and announcements, including dormant and archived rules', async () => {
     const { api, headers, asset, publication } = await planFixture();
     const recording = await api.routines.fillers.create(headers, { name: 'Authoritative loop', duration: 10, asset });
-    await api.routines.fillers.archive(headers, recording.id);
+    await legacyArchive(api.routines.fillers, recording.id);
     for (const target of ['default', 'gap', 'before', 'after'] as const) {
       for (const field of ['name', 'duration', 'id', 'asset']) {
         const claimed = structuredClone(recording);
@@ -1120,7 +1673,7 @@ describe('shared filler library (Blob fake)', () => {
       const path = `fillers/${recording.id}`;
       const expectedBody = encode(recording).toString();
       expect(await api.handle(request(path, 'GET', readHeaders))).toMatchObject({ status: 200, body: expectedBody });
-      await api.routines.fillers.archive(headers, recording.id);
+      await legacyArchive(api.routines.fillers, recording.id);
       const key = `fillers/records/${recording.id}`;
       const protectedRecord = (await context.store.get(key, 4096))!;
       const signature = hashBytes(protectedRecord.bytes);
@@ -1162,7 +1715,7 @@ describe('shared filler library (Blob fake)', () => {
       const recording = await api.routines.fillers.create(headers, { name: 'Private loop', duration: 20, asset });
       const playerHeaders = (await context.login('player')).headers;
       expect(await api.handle(request(`fillers/${recording.id}`, 'GET', playerHeaders))).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
-      await api.routines.fillers.archive(headers, recording.id);
+      await legacyArchive(api.routines.fillers, recording.id);
       for (const id of [recording.id, randomUUID(), 'invalid!']) {
         expect(await api.handle(request(`fillers/${id}`, 'GET', playerHeaders))).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
       }
@@ -1183,7 +1736,7 @@ describe('shared filler library (Blob fake)', () => {
     });
   });
 
-  it('uses the production Blob adapter for conditional insert and archive on the same record', async () => {
+  it('uses the production Blob adapter for conditional recording inserts and preserves a legacy archived descriptor', async () => {
     const context = fixture();
     const { headers } = await context.login();
     const asset = await uploadAudio(new CloudMedia(context.store, context.auth), headers);
@@ -1209,15 +1762,17 @@ describe('shared filler library (Blob fake)', () => {
     const recording = await fillers.create(headers, { name: 'Adapter fixture', duration: 15, asset });
     const key = `fillers/records/${recording.id}`;
     const etag = context.store.blobs.get(key)!.etag;
-    expect(writes.map(write => write.key)).toEqual(['control/quota', `fillers/index/${recording.id}`, key]);
-    expect(writes[1]!.conditions).toEqual({ ifNoneMatch: '*' });
-    expect(writes[2]!.conditions).toEqual({ ifNoneMatch: '*' });
+    expect(writes.filter(write => write.key.startsWith('fillers/'))).toEqual([
+      { key: `fillers/index/${recording.id}`, conditions: { ifNoneMatch: '*' } },
+      { key, conditions: { ifNoneMatch: '*' } },
+    ]);
+    expect(writes.some(write => write.key === `library/gates/${asset.id}`)).toBe(true);
     await expect(store.put(key, encode({ recording, archived: false }), null)).rejects.toBeInstanceOf(BlobConflict);
-    await fillers.archive(headers, recording.id);
+    await legacyArchive(fillers, recording.id);
     expect(writes.at(-1)).toEqual({ key, conditions: { ifMatch: etag } });
     expect(await fillers.resolve(recording)).toStrictEqual(recording);
     const count = writes.length;
-    await fillers.archive(headers, recording.id);
+    await fillers.get(headers, recording.id);
     expect(writes).toHaveLength(count);
   });
 
@@ -1228,6 +1783,7 @@ describe('shared filler library (Blob fake)', () => {
     const asset = await uploadAudio(api.media, ownerHeaders);
     const input = { name: 'Household loop', duration: 20, asset };
     const retained = await api.routines.fillers.create(ownerHeaders, input);
+    await activateLibrary(context.store);
     for (const role of ['owner', 'editor', 'player']) {
       const headers = role === 'owner' ? ownerHeaders : (await context.login(role)).headers;
       const result = await api.handle(request('fillers', 'POST', headers, input));
@@ -1251,8 +1807,8 @@ describe('shared filler library (Blob fake)', () => {
       }
       expect((await api.handle(request(`media/${asset.id}`, 'GET', headers))).status).toBe(200);
       expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers, {}))).status).toBe(400);
-      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).body).toBe('{"archived":true}');
-      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).body).toBe('{"archived":true}');
+      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).status).toBe(428);
+      expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', atRevision(headers, 0)))).body).toBe('{"error":"media_in_use"}');
       expect(result.headers['cache-control']).toContain('no-store');
     }
     const spoofed = new Headers({ origin: 'https://example.invalid', 'x-ms-client-principal': 'owner' });
@@ -1295,7 +1851,7 @@ describe('shared filler library (Blob fake)', () => {
     body.routine.filler = { ...body.routine.filler, sound: 'recording', recording };
     const draft = await api.routines.create(headers, body);
     headers.set('if-match', '"1"');
-    await api.routines.fillers.archive(headers, recording.id);
+    await legacyArchive(api.routines.fillers, recording.id);
     const head = context.store.blobs.get(`routines/${draft.routine.id}/head`);
     const forgeries = [{ ...recording, name: 'Fake claimed name' }, { ...recording, duration: 31 },
       { ...recording, asset: unrelated }, { ...recording, id: 'local-unregistered-id' },
@@ -1336,8 +1892,9 @@ describe('shared filler library (Blob fake)', () => {
     vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
       if (key.startsWith('fillers/')) {
         expect(expected).toBeNull();
-        expect((await readJson<{ fillers: number; bytes: number }>(context.store, 'control/quota'))!.value)
-          .toMatchObject({ fillers: LIMITS.fillers, bytes: Number(initial.bytes) + 8192 });
+        const quota = (await readJson<{ fillers: number; bytes: number }>(context.store, 'control/quota'))!.value;
+        expect(quota.fillers).toBe(LIMITS.fillers);
+        expect(quota.bytes).toBeGreaterThanOrEqual(Number(initial.bytes) + 8192 + GATE_BYTES);
       }
       return put(key, bytes, expected);
     });
@@ -1355,6 +1912,7 @@ describe('shared filler library (Blob fake)', () => {
     const asset = await uploadAudio(media, headers);
     const input = { name: 'Revoked loop', duration: 1, asset };
     const recording = stage === 'archive' ? await fillers.create(headers, input) : undefined;
+    if (recording) await activateLibrary(context.store);
     const put = context.store.put.bind(context.store);
     const get = context.store.get.bind(context.store);
     vi.spyOn(context.store, 'put').mockImplementation(async (key, bytes, expected) => {
@@ -1367,7 +1925,7 @@ describe('shared filler library (Blob fake)', () => {
       if (stage === 'archive' && key.startsWith('fillers/records/')) context.accounts[1]!.enabled = false;
       return result;
     });
-    await expect(recording ? fillers.archive(headers, recording.id) : fillers.create(headers, input)).rejects.toMatchObject({ status: 401 });
+    await expect(recording ? fillers.archive(atRevision(headers, 0), recording.id) : fillers.create(headers, input)).rejects.toMatchObject({ status: 401 });
     const records = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('fillers/records/'));
     expect(records).toHaveLength(recording ? 1 : 0);
     if (recording) expect(JSON.parse(records[0]![1].bytes.toString())).toEqual({ recording, archived: false });
@@ -1402,7 +1960,7 @@ describe('shared filler library (Blob fake)', () => {
     await expect(fillers.list(headers)).rejects.toMatchObject({ status: 503 });
   });
 
-  it('allows same-asset additions and both duplicates concurrently with idempotent archive', async () => {
+  it('allows same-asset additions and both duplicates while unused-only archive remains blocked', async () => {
     const context = fixture();
     const { headers } = await context.login();
     const api = new CloudApi(context.store, context.env, context.auth.now);
@@ -1414,17 +1972,19 @@ describe('shared filler library (Blob fake)', () => {
     const saved = await api.routines.create(headers, body);
     headers.set('if-match', '"1"');
     await api.routines.mutate(headers, saved.routine.id, 'publish');
-    const [first, second, added, archived, repeated] = await Promise.all([
+    await activateLibrary(context.store);
+    const [first, second, added] = await Promise.all([
       api.routines.duplicate(headers, saved.routine.id, true), api.routines.duplicate(headers, saved.routine.id, false),
-      api.routines.fillers.create(headers, input), api.routines.fillers.archive(headers, recording.id),
-      new CloudFillers(context.store, context.auth, api.media).archive(headers, recording.id),
+      api.routines.fillers.create(headers, input),
     ]);
     expect(first.routine.filler.recording).toStrictEqual(recording);
     expect(second.routine.filler.recording).toStrictEqual(recording);
     expect(first.routine.id).not.toBe(second.routine.id);
     expect(added.id).not.toBe(recording.id);
-    expect(archived).toEqual(repeated);
-    expect(await api.routines.fillers.list(headers)).toEqual({ fillers: [added] });
+    await expect(api.routines.fillers.archive(atRevision(headers, 0), recording.id)).rejects.toMatchObject({ code: 'media_in_use' });
+    await expect(new CloudFillers(context.store, context.auth, api.media).archive(atRevision(headers, 0), recording.id))
+      .rejects.toMatchObject({ code: 'media_in_use' });
+    expect((await api.routines.fillers.list(headers)).fillers).toEqual(expect.arrayContaining([recording, added]));
     expect(await api.routines.fillers.resolve(recording)).toStrictEqual(recording);
   });
 
@@ -1445,7 +2005,9 @@ describe('shared filler library (Blob fake)', () => {
     headers.set('if-match', '"1"');
     const publication = await api.routines.mutate(headers, saved.routine.id, 'publish');
     const rawPublished = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'));
-    expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', headers))).status).toBe(200);
+    await activateLibrary(context.store);
+    expect((await api.handle(request(`fillers/${recording.id}`, 'DELETE', atRevision(headers, 0)))).body).toBe('{"error":"media_in_use"}');
+    await legacyArchive(api.routines.fillers, recording.id);
     expect(JSON.parse(String((await api.handle(request('fillers', 'GET', headers))).body))).toEqual({ fillers: [] });
     const draft = await api.routines.get(headers, saved.routine.id, false);
     expect(draft.routine.filler).toStrictEqual(input.routine.filler);
@@ -1473,7 +2035,7 @@ describe('shared filler library (Blob fake)', () => {
     for (const [key, blob] of rawPublished) expect(context.store.blobs.get(key)).toEqual(blob);
   });
 
-  it('creates a catalog-backed recording and archives it without changing retained metadata or audio', async () => {
+  it('logically deletes an unused recording without changing its retained descriptor or audio', async () => {
     const context = fixture();
     const { headers } = await context.login();
     const media = new CloudMedia(context.store, context.auth);
@@ -1481,6 +2043,8 @@ describe('shared filler library (Blob fake)', () => {
     const asset = await uploadAudio(media, headers);
     const before = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('assets/'));
     const recording = await fillers.create(headers, { name: '<literal recording>', duration: 15, asset });
+    await activateLibrary(context.store);
+    headers.set('if-match', '"0"');
     expect(recording).toEqual({ id: expect.any(String), name: '<literal recording>', duration: 15, asset });
     expect(recording.id).not.toBe(asset.id);
     expect(await fillers.list(headers)).toEqual({ fillers: [recording] });
@@ -1897,7 +2461,7 @@ describe('bounded durable media and quota (Blob fake)', () => {
       headers.set('if-match', '"1"');
       const published = await api.routines.mutate(headers, saved.routine.id, 'publish');
       const snapshots = [...context.store.blobs.entries()].filter(([key]) => key.startsWith('publications/'));
-      await api.routines.fillers.archive(headers, recording.id);
+      await legacyArchive(api.routines.fillers, recording.id);
       expect((await api.handle(request(`fillers/${recording.id}`, 'GET', headers))).body).toBe(created.body);
       const duplicate = await api.routines.duplicate(headers, saved.routine.id, true);
       expect(duplicate.routine.filler.recording).toStrictEqual(recording);

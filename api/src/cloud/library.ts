@@ -1,9 +1,11 @@
-import type { CloudAudioItem, CloudAudioPage, CloudRoutine } from '../../../shared/cloud-contract';
-import { allRoutineTracks, type Track } from '../../../shared/routine';
+import type { CloudAudioItem, CloudAudioPage } from '../../../shared/cloud-contract';
 import { strictRecord } from '../validation';
+import { AssetAdmission } from './admission';
 import { CloudAuth } from './auth';
 import { ApiError, safeId } from './config';
 import { CloudMedia } from './media';
+import { storedMetadata } from './library-management';
+import { LibraryReferences, type Description } from './library-references';
 import { CloudPlaylists } from './plans';
 import { CloudRoutines } from './routines';
 import type { BlobStore } from './store';
@@ -41,33 +43,24 @@ export class CloudLibrary {
       if (!key.endsWith('/catalog')) continue;
       const id = key.split('/')[1]!;
       if (!safeId(id)) throw new ApiError(503, 'storage_unavailable');
+      if ((await new AssetAdmission(this.store).read(id)).value.deleted) continue;
       const { asset } = await this.media.catalog(id);
       items.set(id, { asset: { ...asset }, title: '' });
     }
-    const describe = (tracks: Track[], media: CloudRoutine['media']) => {
-      for (const track of tracks) {
-        const descriptor = media[track.id];
-        const item = descriptor && items.get(descriptor.id);
-        if (!item || descriptor.sha256 !== item.asset.sha256 || descriptor.bytes !== item.asset.bytes
-          || descriptor.contentType !== item.asset.contentType) continue;
-        if (!item.title && typeof track.title === 'string' && track.title.trim() && track.title.length <= 300) item.title = track.title;
-        if (item.duration === undefined && Number.isFinite(track.duration) && track.duration > 0 && track.duration <= 1200) item.duration = track.duration;
-        if (item.bpm === undefined && typeof track.bpm === 'number' && Number.isFinite(track.bpm) && track.bpm >= 40 && track.bpm <= 220) item.bpm = track.bpm;
-      }
-    };
     if (items.size) {
-      for (const id of await this.routines.discover()) {
-        try {
-          const body = await this.routines.readVersion(id, false);
-          describe(allRoutineTracks(body.routine), body.media);
-        } catch (error) { if (!(error instanceof ApiError) || error.status !== 404) throw error; }
+      const descriptions = new Map<string, Description | undefined>([...items.keys()].map(id => [id, undefined]));
+      await new LibraryReferences(this.store, this.auth).scan(headers, items.keys().next().value!, '', undefined, descriptions);
+      for (const [id, description] of descriptions) {
+        if (description) Object.assign(items.get(id)!, description);
       }
-      for (const id of await this.playlists.discover()) {
-        try {
-          const body = await this.playlists.readVersion(id, false);
-          describe(body.playlist.tracks, body.media);
-        } catch (error) { if (!(error instanceof ApiError) || error.status !== 404) throw error; }
-      }
+    }
+    for (const item of items.values()) {
+      const metadata = (await storedMetadata(this.store, 'song', item.asset.id))?.value;
+      if (!metadata) continue;
+      item.title = metadata.title;
+      if (metadata.duration !== undefined) item.duration = metadata.duration;
+      if (metadata.bpm === undefined) delete item.bpm;
+      else item.bpm = metadata.bpm;
     }
     const fresh = await this.auth.authenticate(headers, false, true);
     if (fresh.key !== actor.key || fresh.account.id !== actor.account.id) throw new ApiError(401, 'signin_required');

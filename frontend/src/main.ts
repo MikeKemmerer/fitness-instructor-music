@@ -21,6 +21,7 @@ import { captureCloudIdentity, getCloudContext, getCloudRole, refreshCloudSessio
 import { cloudHash, createCloudLibrary, routineRecordings, type CloudTransfer } from './cloud-library';
 import { createClassLibrary, type ClassSelection } from './class-library';
 import { createClassPanel } from './class-panel';
+import { createPlaylistEditor } from './playlist-editor';
 import { createClassComposition } from './class-composition';
 import { createDraftProtection, createRecoveryPanel } from './draft-protection';
 import { createRoutineSave, sameSavedContent } from './routine-save';
@@ -34,9 +35,10 @@ import { cloudErrorMessage, cloudStatusMessage, confirmCloudNavigation,
 import { contentFingerprint, duplicateDraft, hasInvalidCueTimes, renderEditor, sortedCues, type EditorSession } from './editor';
 import { createExportPanel } from './export-panel';
 import { createFillerLibrary } from './filler-library';
+import { createMediaLibrary } from './media-library';
 import { errorMessage, formatNumber, formatTime, locale, t, trackCount, validationMessage, type MessageKey } from './i18n';
 import { accents, applyTheme, palette, readPreferences, savePreferences } from './theme';
-import { createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
+import { actionMenu, createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
 import { hostedCloudSelectionKey, hostedInvalidationEvent } from './hosted-session';
 
 const hostedPilot = import.meta.env.VITE_HOSTED_PILOT === 'true';
@@ -53,6 +55,8 @@ let chooserOpen = true;
 let autoPrepareRequested = false;
 let preparationFailed = false;
 let retryingPending = false;
+let pendingSyncRequested = false;
+let pendingSessionRefresh = false;
 let cloudEnvelope: CloudRoutine | null = null;
 let cloudSelection: CloudSelection | null = null;
 let cloudRoutines: CloudRoutineSummary[] = [];
@@ -84,7 +88,9 @@ let preparedClassKey = '';
 let preparedSourceFingerprint = '';
 let shareMode: 'create' | 'replace' = 'replace';
 let classPanel: ReturnType<typeof createClassPanel> | undefined;
+let playlistEditor: ReturnType<typeof createPlaylistEditor> | undefined;
 let composition: ReturnType<typeof createClassComposition> | undefined;
+let mediaLibrary: ReturnType<typeof createMediaLibrary> | undefined;
 const classLibrary = createClassLibrary();
 const selectionKey = () => JSON.stringify(cloudSelection ? [cloudSelection.id, cloudSelection.revision, cloudSelection.published, !!cloudSelection.cached, cloudEnvelope?.media] : null);
 const classKey = () => JSON.stringify(selectedClass);
@@ -92,7 +98,7 @@ let editorBusy = true;
 let appDisposed = false;
 let state: PlayerState;
 let displayedTrack = '';
-let activeTab: 'teach' | 'edit' | 'settings' = 'teach';
+let activeTab: 'teach' | 'edit' | 'playlists' | 'settings' = 'teach';
 let validationErrors: string[] = [];
 let editorSession: EditorSession | undefined;
 interface CueDrag {
@@ -139,15 +145,15 @@ const main = element('main');
 const cloudPanel = element('section', 'cloud-panel');
 cloudPanel.hidden = !hostedPilot;
 cloudPanel.setAttribute('aria-label', t('cloudRoutines'));
-const panels = { teach: element('section', 'teach-panel'), edit: element('section', 'edit-panel'), settings: element('section', 'settings-panel') };
+const panels = { teach: element('section', 'teach-panel'), edit: element('section', 'edit-panel'), playlists: element('section', 'playlists-panel'), settings: element('section', 'settings-panel') };
 const tabButtons = new Map<string, HTMLButtonElement>();
-for (const [name, icon] of [['teach', Headphones], ['edit', Pencil], ['settings', Settings2]] as const) {
+for (const [name, icon] of [['teach', Headphones], ['edit', Pencil], ['playlists', ListMusic], ['settings', Settings2]] as const) {
   const button = iconButton(t(name), icon, () => selectTab(name), true);
   button.id = `tab-${name}`;
   button.setAttribute('role', 'tab');
   button.setAttribute('aria-controls', `panel-${name}`);
   button.addEventListener('keydown', event => {
-    const names: Array<'teach' | 'edit' | 'settings'> = ['teach', 'edit', 'settings'];
+    const names: Array<typeof activeTab> = ['teach', 'edit', 'playlists', 'settings'];
     const offset = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
     if (!offset && event.key !== 'Home' && event.key !== 'End') return;
     event.preventDefault();
@@ -192,7 +198,8 @@ function selectTab(tab: typeof activeTab): void {
   if (activeTab !== tab) cancelCueDrag();
   if (tab !== 'teach') { cueEditing = false; cueTimeInvalid = false; }
   if (activeTab === 'edit' && tab !== 'edit') { fillerLibrary.leave(); stopEditorAudio(); }
-  if (activeTab === 'settings' && tab !== 'settings') { fillerLibrary.leave(); audioPreview.stop(); }
+  if (activeTab === 'settings' && tab !== 'settings') { mediaLibrary?.leave(); fillerLibrary.leave(); audioPreview.stop(); }
+  if (activeTab === 'playlists' && tab !== 'playlists') playlistEditor?.leave();
   activeTab = tab;
   for (const [name, panel] of Object.entries(panels)) {
     panel.hidden = name !== tab;
@@ -201,6 +208,7 @@ function selectTab(tab: typeof activeTab): void {
     button.tabIndex = name === tab ? 0 : -1;
   }
   editorSession?.syncAvailability();
+  if (tab === 'playlists') playlistEditor?.enter();
   fillerLibrary.sync();
   if (previous !== tab && (tab === 'settings' || tab === 'edit')) void fillerLibrary.refresh();
   if (previous !== tab && tab === 'edit' && hostedPilot && !cloudRoutines.length && getCloudContext().access === 'online') void runCloud(loadHousehold);
@@ -425,7 +433,7 @@ const cloudPublish = iconButton(t('cloudPublish'), Send, () => { void runCloud(a
   await cacheCloudRoutine(result.routine);
   notify(t('cloudPublished'));
 }); });
-const cloudDelete = iconButton(t('cloudDelete'), Trash2, () => { void runCloud(async transfer => {
+const deleteSelectedCloudRoutine = () => { void runCloud(async transfer => {
   if (!cloudEnvelope || !cloudSelection || cloudSelection.published) throw new Error('cloud_head_required');
   if (!confirm(t('cloudConfirmDelete', { name: draft.name }))) return;
   if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
@@ -446,7 +454,8 @@ const cloudDelete = iconButton(t('cloudDelete'), Trash2, () => { void runCloud(a
   refreshDraft(true);
   renderCloudList();
   notify(t('cloudDeleted'));
-}); });
+}); };
+const cloudDelete = iconButton(t('cloudDelete'), Trash2, deleteSelectedCloudRoutine);
 cloudDelete.classList.add('danger');
 const cloudCancel = iconButton(t('cloudCancel'), X, () => {
   cloudController?.abort();
@@ -606,11 +615,10 @@ startClass.hidden = true;
 startClass.setAttribute('aria-controls', 'panel-teach');
 const preparationActions = element('div', 'action-row');
 function openClassMusic(): void {
-  if (!classPanel || editorBusy || transportOperation.pending) return;
-  selectTab('settings');
-  classPanel.element.open = true;
-  classPanel.element.scrollIntoView({ block: 'start' });
-  classPanel.element.querySelector('summary')?.focus({ preventScroll: true });
+  if (!playlistEditor || editorBusy || transportOperation.pending) return;
+  selectTab('playlists');
+  playlistEditor.enter(routineOpen);
+  tabButtons.get('playlists')?.focus({ preventScroll: true });
 }
 const classMusic = iconButton(t('classMusic'), ListMusic, openClassMusic, true);
 const practiceOpenDraft = iconButton(t('cloudOpenDraft'), Pencil, () => cloudOpenDraft.click(), true);
@@ -871,7 +879,7 @@ const localPublish = iconButton(t('localPublish'), Send, () => { void runEditor(
   if (!head || draft !== source) throw new Error('routine_conflict');
   acceptSavedRoutine(head); notify(t('localPublished'));
 }); });
-const localDelete = iconButton(t('localDelete'), Trash2, () => { void runEditor(async () => {
+const deleteSelectedLocalRoutine = () => { void runEditor(async () => {
   if (cloudSelection || !canEdit() || draft.locked) throw new Error('routine_locked');
   if (persistedRevision === null) throw new Error(t('saveRoutineFirst'));
   if (!confirm(t('confirmLibraryAction', { action: t('libraryDelete', { name: draft.name }) }))) return;
@@ -900,27 +908,8 @@ const localDelete = iconButton(t('localDelete'), Trash2, () => { void runEditor(
   stopEditorAudio(); savedRoutines = savedRoutines.filter(value => value.id !== source.id);
   draft = newRoutine(); draft.name = t('newName'); draft.filler.sound = 'lofi';
   persistedRevision = null; dirty = false; draftGeneration++; refreshDraft(true); notify(t('localDeleted'));
-}); });
-function actionMenu(label: string, icon: typeof Ellipsis, showLabel = false) {
-  const menu = element('details', 'command-menu');
-  const trigger = element('summary', `button${showLabel ? '' : ' icon-button'}`);
-  trigger.title = label; trigger.setAttribute('aria-label', label);
-  setButtonIcon(trigger, icon);
-  trigger.append(element('span', showLabel ? '' : 'visually-hidden', label));
-  trigger.addEventListener('click', event => {
-    if (trigger.getAttribute('aria-disabled') === 'true') event.preventDefault();
-  });
-  const commands = element('div', 'command-menu-items');
-  menu.append(trigger, commands);
-  const closeMenu = () => { menu.open = false; };
-  const outside = (event: Event) => { if (event.target instanceof Node && !menu.contains(event.target)) closeMenu(); };
-  document.addEventListener('pointerdown', outside);
-  menu.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { event.preventDefault(); closeMenu(); trigger.focus({ preventScroll: true }); }
-  });
-  commands.addEventListener('click', event => { if ((event.target as HTMLElement).closest('button')) closeMenu(); });
-  return { element: menu, trigger, commands, close: closeMenu, dispose: () => document.removeEventListener('pointerdown', outside) };
-}
+}); };
+const localDelete = iconButton(t('localDelete'), Trash2, deleteSelectedLocalRoutine);
 const moreMenu = actionMenu(t('moreActions'), Ellipsis);
 const routineOverflow = moreMenu.element;
 const overflowActions = moreMenu.commands;
@@ -1078,6 +1067,63 @@ function rememberLibrary(id?: string): void {
   if (id) libraryRecent = [id, ...libraryRecent.filter(value => value !== id)].slice(0, 20);
   try { sessionStorage.setItem(libraryPreferenceKey, JSON.stringify({ owner: preferenceOwner(), favorites: [...libraryFavorites], recent: libraryRecent })); } catch {}
 }
+
+async function deleteChooserRoutine(value: CloudRoutineSummary, source: 'local' | 'household', listedCopy?: RoutineWorkingCopy): Promise<void> {
+  if (editorBusy || transportOperation.pending || appDisposed || value.locked || value.published
+    || (hostedPilot && !['owner', 'editor'].includes(getCloudRole() ?? ''))) return;
+  const current = routineOpen && !selectedClass && draft.id === value.id && !draft.published
+    && source === (cloudSelection ? 'household' : 'local');
+  if (current) {
+    if (cloudSelection) deleteSelectedCloudRoutine(); else deleteSelectedLocalRoutine();
+    return;
+  }
+  const work = async (transfer: CloudTransfer = {}) => {
+    const identity = hostedPilot ? captureCloudIdentity() : () => {};
+    const assert = () => { identity(); if (appDisposed || transfer.signal?.aborted) throw new Error('cloud_cancelled'); };
+    const copy = await getRoutineWorkingCopy(value.id); assert();
+    if (listedCopy && (!copy || copy.localVersion !== listedCopy.localVersion)) throw new Error('routine_conflict');
+    if (copy?.envelope.routine.locked || copy?.envelope.routine.published) throw new Error('routine_locked');
+    const local = await getRoutine(value.id); assert();
+    const remote = source === 'household' || copy?.cloudBaseRevision != null || !!copy?.cloudAttempt;
+    let head: CloudRoutine | null = null;
+    if (remote) {
+      if (!hostedPilot || getCloudContext().access !== 'online' || navigator.onLine === false) throw new Error('cloud_head_required');
+      try { head = await cloudLibrary.readHead(value.id, transfer); }
+      catch (error) {
+        if (!(error instanceof CloudRequestError && error.status === 404 && source === 'local' && copy?.cloudAttempt?.baseRevision === null)) throw error;
+      }
+      assert();
+      if (head) {
+        if (head.routine.locked || head.routine.published) throw new Error('routine_locked');
+        const attempt = copy?.cloudAttempt;
+        const acknowledged = attempt && head.routine.revision === (attempt.baseRevision ?? 0) + 1 && sameSavedContent(head, attempt.envelope);
+        if (!acknowledged && head.routine.revision !== (copy?.cloudBaseRevision ?? value.revision)) throw new Error('routine_conflict');
+      }
+    } else if (!copy && (!local || local.revision !== value.revision)) throw new Error('routine_conflict');
+    if (local?.locked || local?.published) throw new Error('routine_locked');
+    if (!confirm(t('confirmLibraryAction', { action: t('libraryDelete', { name: value.name }) }))) return;
+    assert();
+    if (head) await cloudLibrary.command(head, 'delete', false, transfer);
+    assert();
+    if (copy && local) await deleteRoutineAndWorkingCopy(value.id, local.revision, copy.localVersion);
+    else if (copy) await deleteRoutineWorkingCopy(value.id, copy.localVersion);
+    else if (local && !remote) await deleteRoutine(value.id, local.revision);
+    assert();
+    workingCopies = workingCopies.filter(item => item.envelope.routine.id !== value.id);
+    savedRoutines = savedRoutines.filter(item => item.id !== value.id);
+    if (remote) {
+      cloudRoutines = cloudRoutines.filter(item => item.id !== value.id);
+      cachedCloudRoutines = cachedCloudRoutines.filter(item => item.id !== value.id);
+    }
+    renderRoutineLibrary(); notify(t(remote ? 'cloudDeleted' : 'localDeleted'));
+  };
+  if (hostedPilot) await runCloud(work);
+  else {
+    editorBusy = true; syncAvailability();
+    try { await work(); } catch (error) { chooserErrors.show(errorMessage(error)); }
+    finally { editorBusy = false; syncAvailability(); }
+  }
+}
 function renderRoutineLibrary(): void {
   const playerRole = hostedPilot && getCloudRole() === 'player';
   for (const [source, button] of sourceButtons) {
@@ -1165,7 +1211,15 @@ function renderRoutineLibrary(): void {
       });
     });
     open.disabled = editorBusy || transportOperation.pending;
-    row.append(text, favorite, open); routineRows.append(row);
+    row.append(text, favorite, open);
+    if (!playerRole && !legacy && !value.locked && !value.published) {
+      const remove = iconButton(t('deleteRoutine'), Trash2, () => { void deleteChooserRoutine(value, source, copy); }, true);
+      remove.classList.add('danger'); remove.disabled = editorBusy || transportOperation.pending
+        || (source === 'household' && (getCloudContext().access !== 'online' || navigator.onLine === false));
+      remove.dataset.cloudRoutineDelete = String(source === 'household');
+      row.append(remove);
+    }
+    routineRows.append(row);
   }
 }
 const replaceTarget = field(t('cloudReplace'), cloudSelect);
@@ -1197,7 +1251,12 @@ const openDifferent = iconButton(t('openDifferent'), ListMusic, () => {
 editorRoutineTitle.tabIndex = -1;
 editorHeadingActions.append(openDifferent);
 const close = iconButton(t('closeRoutine'), X, () => closeRoutine(), true);
-const editorFooter = element('footer', 'editor-footer'); editorFooter.append(close); panels.edit.append(editorFooter);
+const deleteSelectedRoutine = iconButton(t('deleteRoutine'), Trash2, () => {
+  if (!routineOpen || editorBusy || transportOperation.pending || !canEdit() || draft.locked) return;
+  if (cloudSelection) deleteSelectedCloudRoutine(); else deleteSelectedLocalRoutine();
+}, true);
+deleteSelectedRoutine.classList.add('danger');
+const editorFooter = element('footer', 'editor-footer'); editorFooter.append(close, deleteSelectedRoutine); panels.edit.append(editorFooter);
 
 function nameRoutine(label: string, initial: string, action: (name: string) => Promise<void>): void {
   cancelCueDrag();
@@ -1314,7 +1373,7 @@ const recoveries = createRecoveryPanel({
         name: t('recoveryCopy', { name: record.value.name }) }, source: record.source }));
       return;
     }
-    if (record.kind !== 'routine') { selectTab('settings'); await classPanel?.restoreRecovery(record); return; }
+    if (record.kind === 'playlist') { selectTab('playlists'); await playlistEditor?.initialize(); await playlistEditor?.restoreRecovery(record); return; }
     await runEditor(async () => {
       if (!('filler' in record.value) || (dirty && !confirm(t('confirmSwitch', { name: draft.name })))) return;
       const assertIdentity = hostedPilot ? captureCloudIdentity() : () => {};
@@ -1406,6 +1465,9 @@ disableDemosInput.addEventListener('change', () => {
 disableDemosLabel.append(disableDemosInput, element('span', '', t('disableDemos')));
 demoSettings.append(element('h2', '', t('demoSettings')), disableDemosLabel);
 const fillerLibrary = createFillerLibrary({ hosted: hostedPilot, cloud: cloudLibrary, preview: audioPreview,
+  managed: hostedPilot,
+  busy: () => editorBusy || retryingPending || transportOperation.pending,
+  working: value => { editorBusy = value; syncAvailability(); },
   analyzeLoudness: analyzeTrackLoudness,
   isCurrent: () => !appDisposed && (activeTab === 'settings' || activeTab === 'edit') && !shell.classList.contains('class-mode'),
   changed: () => editorSession?.refreshFillers(),
@@ -1425,7 +1487,14 @@ classPanel = createClassPanel({ hosted: hostedPilot, draft: () => draft,
     refreshDraft(false);
   },
 });
-panels.settings.append(classPanel.element);
+playlistEditor = createPlaylistEditor({ hosted: hostedPilot, preview: audioPreview,
+  busy: () => editorBusy || retryingPending || transportOperation.pending || !!composition?.working() || shell.classList.contains('class-mode'),
+  working: value => { editorBusy = value; syncAvailability(); if (!value) schedulePreparation(); },
+  visible: () => activeTab === 'playlists',
+  known: () => [{ routine: draft, media: { ...cloudEnvelope?.media, ...draftMedia } }],
+  returnToRoutine: () => { selectTab('edit'); tabButtons.get('edit')?.focus({ preventScroll: true }); }, message: notify,
+});
+panels.playlists.append(playlistEditor.element);
 composition = createClassComposition({
   hosted: hostedPilot, routine: () => draft, routineSaved: () => persistedRevision !== null && !dirty,
   source: () => cloudSelection ? 'household' : 'local', selection: () => selectedClass,
@@ -1473,7 +1542,25 @@ if (hostedPilot) {
   });
   storage.append(signOutNotice, signOut);
 }
-panels.settings.append(settingsHeading, appearance, soundSettings, demoSettings, fillerLibrary.element, storage);
+mediaLibrary = createMediaLibrary({ hosted: hostedPilot, cloud: cloudLibrary, preview: audioPreview,
+  known: () => [
+    { routine: draft, media: { ...cloudEnvelope?.media, ...draftMedia } },
+    ...(playlistEditor?.currentMedia() ?? []),
+    ...(loaded ? [{ routine: loaded, media: {} }] : []),
+    ...(loaded && preparedAudio ? [{ routine: { ...loaded, schemaVersion: 2 as const,
+      sequence: { crossfade: preparedAudio.crossfade, before: preparedAudio.before, after: preparedAudio.after } }, media: {} }] : []),
+    ...[preparedAudio?.walkIn, preparedAudio?.walkOut].flatMap(playlist => playlist ? [{ playlist, media: {} }] : []),
+  ],
+  busy: () => editorBusy || retryingPending || transportOperation.pending || !!composition?.working() || shell.classList.contains('class-mode'),
+  working: value => { editorBusy = value; syncAvailability(); if (!value) schedulePreparation(); },
+  visible: () => activeTab === 'settings' && !appDisposed && !shell.classList.contains('class-mode'),
+  beforePreview: () => { stopEditorAudio(); if (['playing', 'filler'].includes(state?.status)) transportOperation.cancel(() => player.pause()); },
+  changed: () => { void fillerLibrary.refresh(); },
+  catalog: items => fillerLibrary.catalog(items),
+});
+if (hostedPilot) mediaLibrary.element.append(fillerLibrary.element);
+panels.settings.append(settingsHeading, appearance, soundSettings, demoSettings, mediaLibrary.element,
+  ...(hostedPilot ? [] : [fillerLibrary.element]), storage);
 
 function makeRange(label: string, minimum: number, maximum: number, value: number, change: (value: number) => void, unit: 'pixels' | 'percent' = 'percent'): HTMLLabelElement {
   const input = element('input');
@@ -1613,8 +1700,25 @@ function schedulePreparation(): void {
 }
 
 async function retryPending(): Promise<void> {
-  if (!editorBusy) await syncPending();
+  if (!hostedPilot || appDisposed || getCloudContext().access !== 'online' && !pendingSessionRefresh) {
+    pendingSyncRequested = false;
+    return;
+  }
+  pendingSyncRequested = true;
+  if (editorBusy || appDisposed || transportOperation.pending || composition?.working()) return;
+  pendingSyncRequested = false;
+  editorBusy = true; syncAvailability();
+  try {
+    if (pendingSessionRefresh && hostedPilot) {
+      pendingSessionRefresh = false;
+      const identity = captureCloudIdentity(); await refreshCloudSession(); identity();
+    }
+    await syncPending(); await playlistEditor?.syncPending();
+  } catch (error) { if (!appDisposed) notify(cloudErrorMessage(error), true); }
+  finally { editorBusy = false; syncAvailability(); schedulePreparation(); }
 }
+
+function onOnline(): void { pendingSessionRefresh = hostedPilot; void retryPending(); }
 
 async function syncPending(transfer: CloudTransfer = {}): Promise<void> {
   if (!hostedPilot || retryingPending || appDisposed || getCloudContext().access !== 'online') return;
@@ -1828,12 +1932,17 @@ function refreshDraft(structural: boolean, grouped = !structural): void {
 
 function syncAvailability(): void {
   if (appDisposed) return;
+  if (pendingSyncRequested && !editorBusy && !transportOperation.pending && !composition?.working()) {
+    queueMicrotask(() => { if (pendingSyncRequested && !appDisposed) void retryPending(); });
+  }
   audioPicker.sync();
   exportPanel.syncAvailability();
   const busy = editorBusy || transportOperation.pending;
   openDifferent.hidden = !routineOpen; openDifferent.disabled = busy;
   chooserClose.disabled = busy;
   editorFooter.hidden = !routineOpen; close.disabled = busy;
+  deleteSelectedRoutine.hidden = !routineOpen || !canEdit() || draft.locked;
+  deleteSelectedRoutine.disabled = busy || persistedRevision === null || (!!cloudSelection && (!cloudEnvelope || getCloudContext().access !== 'online'));
   fileInput.hidden = hostedPilot && getCloudRole() === 'player';
   fileInput.disabled = busy || draft.locked || !canEdit();
   for (const button of [...importButtons, ...demoButtons]) {
@@ -1891,10 +2000,13 @@ function syncAvailability(): void {
   editorPrepare.disabled = prepare.disabled;
   prepare.hidden = editorPrepare.hidden = !routineOpen || !preparationFailed;
   classMusic.disabled = editorClassMusic.disabled = busy;
-  for (const button of routineRows.querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy;
+  for (const button of routineRows.querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy
+    || (button.dataset.cloudRoutineDelete === 'true' && (getCloudContext().access !== 'online' || navigator.onLine === false));
   for (const [source, button] of sourceButtons) button.disabled = busy || (hostedPilot && getCloudRole() === 'player' && source === 'local');
   for (const [version, button] of versionButtons) button.disabled = busy || (hostedPilot && getCloudRole() === 'player' && version === 'draft');
   classPanel?.sync();
+  playlistEditor?.sync();
+  mediaLibrary?.sync();
   composition?.sync();
   if (composition && !routineOpen) composition.controls.hidden = true;
   protection.sync();
@@ -2329,13 +2441,16 @@ void (async () => {
   finally {
     editorBusy = false;
     syncAvailability();
+    if (hostedPilot && !appDisposed && getCloudContext().access === 'online') await runCloud(async transfer => {
+      await loadHousehold(transfer);
+      await syncPending(transfer);
+      await playlistEditor?.syncPending(transfer);
+    });
     if (routineOpen) requestPreparation();
-    void retryPending();
-    if (hostedPilot && !appDisposed && getCloudContext().access === 'online') void runCloud(loadHousehold);
   }
 })();
 function onBeforeUnload(event: BeforeUnloadEvent): void {
-  if (dirty || classPanel?.hasUnsaved() || composition?.hasUnsaved() || (loaded && ['playing', 'filler', 'paused'].includes(state.status))) event.preventDefault();
+  if (dirty || playlistEditor?.hasUnsaved() || classPanel?.hasUnsaved() || composition?.hasUnsaved() || (loaded && ['playing', 'filler', 'paused'].includes(state.status))) event.preventDefault();
 }
 window.addEventListener('beforeunload', onBeforeUnload);
 window.addEventListener('blur', cancelCueDrag);
@@ -2355,11 +2470,13 @@ function disposeApp(): void {
   cancelCueDrag();
   appDisposed = true;
   noticeDisplay.dispose(); validationDisplay.dispose(); cloudFeedbackErrors.dispose(); playbackErrors.dispose(); offlineStatusDisplay.dispose();
-  window.removeEventListener('online', retryPending);
+  window.removeEventListener('online', onOnline);
   protection.dispose();
   recoveries.dispose();
   classPanel?.dispose();
+  playlistEditor?.dispose();
   composition?.dispose();
+  mediaLibrary?.dispose();
   fillerLibrary.dispose();
   audioPicker.dispose();
   exportPanel.dispose();
@@ -2387,12 +2504,13 @@ function onPageHide(event: PageTransitionEvent): void {
   cancelCueDrag();
   if (event.persisted) {
     classMode.exit(false);
+    mediaLibrary?.leave();
     stopEditorAudio();
     transportOperation.cancel(() => player.pause());
   } else disposeApp();
 }
 window.addEventListener('pagehide', onPageHide);
-window.addEventListener('online', retryPending);
+window.addEventListener('online', onOnline);
 if (hostedPilot) window.addEventListener(hostedInvalidationEvent, disposeApp);
 if (hostedPilot) window.addEventListener(hostedInvalidationEvent, () => {
   libraryFavorites.clear(); libraryRecent = [];

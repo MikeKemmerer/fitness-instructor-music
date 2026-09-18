@@ -4,6 +4,7 @@ import { ServiceError } from '../errors';
 import { CloudAuth, clearCookie } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
 import { CloudLibrary } from './library';
+import { LibraryManagement } from './library-management';
 import { CloudMedia } from './media';
 import { CloudClasses, CloudPlaylists } from './plans';
 import { CloudRoutines } from './routines';
@@ -76,9 +77,11 @@ function readQuery(url: URL, parts: string[], method: string): { published: bool
     || (method === 'GET' && parts[0] === 'classes' && parts.length === 3 && parts[2] === 'prepare'));
   const listRead = entityRoute && method === 'GET' && parts.length === 1;
   const libraryRead = parts.join('/') === 'media/library' && method === 'GET';
+  const managedRead = parts[0] === 'library' && ['songs', 'fillers'].includes(parts[1]!) && method === 'GET'
+    && (parts.length === 2 || (parts.length === 4 && parts[3] === 'usage'));
   const mediaRead = !libraryRead && parts[0] === 'media' && method === 'GET' && (parts.length === 2 || (parts.length === 4 && parts[2] === 'chunks'));
   const allowed = singleRead ? ['published', 'revision'] : listRead ? ['published']
-    : libraryRead ? ['cursor'] : mediaRead ? ['routineId', 'playlistId', 'classId', 'revision'] : [];
+    : libraryRead || managedRead ? ['cursor'] : mediaRead ? ['routineId', 'playlistId', 'classId', 'revision'] : [];
   if (new Set(keys).size !== keys.length || keys.some(key => !allowed.includes(key))
     || (url.searchParams.has('published') && !['true', 'false'].includes(url.searchParams.get('published')!))) {
     throw new ApiError(400, 'invalid_query');
@@ -108,6 +111,7 @@ export class CloudApi {
   readonly playlists: CloudPlaylists;
   readonly classes: CloudClasses;
   readonly library: CloudLibrary;
+  readonly managed: LibraryManagement;
   constructor(readonly store: BlobStore, env: () => NodeJS.ProcessEnv, now: () => number = Date.now) {
     this.auth = new CloudAuth(store, env, now);
     this.media = new CloudMedia(store, this.auth);
@@ -115,6 +119,7 @@ export class CloudApi {
     this.playlists = new CloudPlaylists(store, this.auth, this.media);
     this.classes = new CloudClasses(store, this.auth, this.routines, this.playlists);
     this.library = new CloudLibrary(store, this.auth, this.media, this.routines, this.playlists);
+    this.managed = new LibraryManagement(store, this.auth, this.media, this.routines.fillers);
   }
 
   async traffic(bucket: string, limit: number): Promise<void> {
@@ -139,12 +144,12 @@ export class CloudApi {
       if (!url.pathname.startsWith('/api/') || /%|\\|\/\//.test(url.pathname)) throw new ApiError(404, 'route_not_found');
       const parts = url.pathname.slice(5).split('/');
       const method = request.method.toUpperCase();
-        const { published, revision } = readQuery(url, parts, method);
+      const { published, revision } = readQuery(url, parts, method);
       const writing = !['GET', 'HEAD', 'OPTIONS'].includes(method);
       if (writing) this.auth.origin(request.headers);
       const json = (value: unknown, status = 200, extra: Record<string, string> = {}): ApiResponse => {
         const entity = value && typeof value === 'object'
-          ? 'setup' in value ? value.setup : 'playlist' in value ? value.playlist : 'routine' in value ? value.routine : undefined
+          ? 'metadata' in value ? value.metadata : 'setup' in value ? value.setup : 'playlist' in value ? value.playlist : 'routine' in value ? value.routine : undefined
           : undefined;
         const etag: Record<string, string> = entity && typeof entity === 'object' && 'revision' in entity && Number.isSafeInteger(entity.revision)
           ? { etag: `"${entity.revision}"` } : {};
@@ -163,6 +168,34 @@ export class CloudApi {
         await this.auth.logout(request.headers);
         return json({ ok: true }, 200, { 'set-cookie': clearCookie() });
       }
+      if (parts[0] === 'library' && ['songs', 'fillers'].includes(parts[1]!)) {
+        await this.auth.authenticate(request.headers, writing, true);
+        const kind = parts[1] === 'songs' ? 'song' : 'filler';
+        const cursor = url.searchParams.get('cursor') ?? undefined;
+        if (parts.length === 2 && method === 'GET') {
+          await emptyBody(request);
+          return json(await this.managed.list(request.headers, kind, cursor));
+        }
+        if (parts.length === 4 && parts[3] === 'metadata') {
+          if (method === 'GET') {
+            await emptyBody(request);
+            return json(await this.managed.metadata(request.headers, kind, parts[2]!));
+          }
+          if (method === 'PUT') return json(await this.managed.put(request.headers, kind, parts[2]!, await jsonBody(request, 4096)));
+        }
+        if (parts.length === 4 && parts[3] === 'intake' && method === 'PUT') {
+          return json(await this.managed.put(request.headers, kind, parts[2]!, await jsonBody(request, 4096), true));
+        }
+        if (parts.length === 4 && parts[3] === 'usage' && method === 'GET') {
+          await emptyBody(request);
+          return json(await this.managed.usage(request.headers, kind, parts[2]!, cursor));
+        }
+        if (parts.length === 3 && method === 'DELETE') {
+          await emptyBody(request);
+          const result = await this.managed.remove(request.headers, kind, parts[2]!);
+          return json(result, 'pending' in result ? 202 : 200);
+        }
+      }
       if (parts[0] === 'fillers') {
         if (parts.length === 3 && parts[2] === 'analysis') {
           if (method === 'GET') {
@@ -176,7 +209,8 @@ export class CloudApi {
         if (parts.length === 2 && method === 'GET') return json(await this.routines.fillers.get(request.headers, parts[1]!));
         if (parts.length === 2 && method === 'DELETE') {
           await emptyBody(request);
-          return json(await this.routines.fillers.archive(request.headers, parts[1]!));
+          const result = await this.routines.fillers.archive(request.headers, parts[1]!);
+          return json(result, 'pending' in result ? 202 : 200);
         }
       }
       if (['routines', 'playlists', 'classes'].includes(parts[0]!)) {

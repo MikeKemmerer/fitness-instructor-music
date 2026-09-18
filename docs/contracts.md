@@ -1,5 +1,118 @@
 # Initial Rehearsal Contract
 
+## Playlist Workspace (September 17)
+
+Playlists is a dedicated workspace beside Routines, not a Settings expando. It
+uses the same header, modal chooser, Undo/Redo, Save, More and Close conventions.
+Rows show number, title, measured duration, preview transport and 0-125% gain;
+Add track offers existing library audio or processed imports. No class sequence,
+cues, between-track filler, cue beeps or BPM controls are rendered. Retain stored
+BPM and legacy gains unchanged until an explicit supported edit. Playlist and
+Routine drafts, selections, history and prepared playback remain independent.
+Managing playlists from a routine never silently adopts a new playlist revision.
+
+IndexedDB version 8 adds `playlistWorkingCopies`; reuse `cloudMusicPlaylists`
+for immutable Cloud envelopes. `PlaylistWorkingCopy` contains
+`{envelope:CloudMusicPlaylist,localVersion:number,cloudBaseRevision:number|null,
+pendingCloud:boolean,savedAt:number,cloudAttempt?:{envelope:CloudMusicPlaylist,
+localVersion:number,baseRevision:number|null}}`. The timestamp is a local-save
+timestamp, not a claimed server save time. The playlist wire format is unchanged.
+
+Offline exports `getPlaylistWorkingCopy(id)`, `listPlaylistWorkingCopies()`,
+`savePlaylistWorkingCopy(envelope,{expectedLocalVersion,cloud,cloudBaseRevision})`,
+`recordPlaylistSyncAttempt(id,localVersion,envelope,baseRevision)`,
+`acknowledgePlaylistWorkingCopy(id,localVersion,envelope)`,
+`reconcilePlaylistWorkingCopy(envelope)` and
+`deletePlaylistWorkingCopy(id,expectedLocalVersion)`. The signatures and failure
+semantics parallel routine working copies, with playlist-specific validation and
+`playlist_conflict` errors. Clean reads do not rewrite local save timestamps.
+Acknowledgment of exact attempt A may rebase newer local B but cannot discard B.
+Publish/lock are still server operations; failed/conflicted Cloud saves remain
+locally durable. Local saves remain selectable through the existing local playlist
+APIs without confusing local version numbers with Cloud revisions. A playlist
+working copy participates in audio-retention checks and explicit account purge.
+
+`ActivePlaylistSelection` is `{id,source:'local'|'household',published,revision?}`;
+published selection requires an exact positive revision. Use separate meta keys
+through `getActivePlaylistSelection()`, `setActivePlaylistSelection(value)` and
+`clearActivePlaylistSelection()`. Save may record its own playlist selection but
+must never write Routine selection keys. `listCachedMusicPlaylists()` enumerates
+latest draft/publication Cloud envelopes separately; local publications can be
+listed through `listMusicPlaylistPublications()`. Publication reads cannot replace
+the editable working copy. Close clears only the playlist selection, never media
+or saved/pending content. Failed Open and Cancel preserve the current draft.
+
+The playlist save coordinator snapshots all track descriptors before the local
+commit, stages uploads separately from committing the Cloud head, and durably
+records each attempted envelope before POST/PUT. First Cloud revision is 1 even
+after multiple local saves. Replay requires exact attempt/head comparison and
+If-Match; unknown remote changes are conflicts, never forced overwrites. Queue
+retries only explicitly saved work, bounded and serialized with Routine transfers.
+Ordinary expiry preserves local work/playback; explicit logout/account change
+invalidates in-flight operations and purges private browser state as before.
+
+Saved playlist snapshots already adopted into routines remain unchanged.
+
+## Uploaded Audio Management (September 17)
+
+Settings owns an Uploaded audio disclosure with Songs and Fillers views, bounded
+metadata pages, explicit preview Play/Pause/Stop, title/artist/BPM editing and
+multi-file processed upload. Routine deletion is discoverable but uses the existing
+revision/lock enforcement and never deletes music bytes. No real user records are
+deleted by implementing or testing these controls.
+
+`shared/cloud-contract.ts` defines `LibraryMetadata`, `ManagedAudioItem`,
+`ManagedAudioPage`, `LibraryUsagePage` and `LibraryDeleteResult`. Author-only
+`GET /api/library/{songs|fillers}?cursor=...` lists completed, non-deleted items.
+`GET /api/library/{songs|fillers}/{id}/metadata` returns `{metadata}`;
+`PUT` at that path accepts exactly `{title,artist,bpm?}`, with quoted metadata
+revision in If-Match (initial revision 0). It returns `{metadata}`. Missing fields
+mean unknown, never guessed. Title/artist max300 characters, optional BPM40-220;
+metadata max4KiB. Metadata lives separately from immutable audio/recording
+descriptors, so existing routine/playlist/filler snapshots never change.
+
+`PUT /api/library/{songs|fillers}/{id}/intake` accepts exactly
+`{filename,duration}` once with If-Match:"0" before editable metadata exists;
+the server validates basename-only filename max300 and duration0..1200(song) or
+0..360(filler), positive finite. Intake stores client-measured duration/original
+basename; no claim of independent server measurement. Existing uploads without
+these facts stay unknown. Editable metadata PUT cannot overwrite intake facts.
+Upload bytes still go through existing bounded conversion/chunk/hash checks;
+intake does not authorize or upload arbitrary external media.
+
+`GET /api/library/{songs|fillers}/{id}/usage?cursor=...` returns bounded references
+and completeness; it is informational, not deletion authorization.
+`DELETE /api/library/{songs|fillers}/{id}` is empty-body, authenticated,
+author/Origin/CSRF guarded and metadata-revision conditional. It returns200
+`{deleted:true,bytesRetained:true}`,202`{pending:true}` for bounded continuation,
+409`media_in_use` or `reference_write_pending`, or explicit fail-closed uncertainty.
+DELETE may be repeated only for its same checking operation, never by clearing
+a tombstone. User approved logical deletion without storage reclamation for now.
+
+Deletion must BLOCK referenced files, including retained routine/playlist
+history/publications, legacy class exact references and filler descriptors. Known
+current-device drafts/recoveries also block UI deletion. Cloud cannot inspect
+another device's unsynced data; disclose this limit. Future Cloud saves referencing
+a deleted item fail explicitly, preserving local work. No physical blob purge.
+
+Per-asset durable CAS admission claims fence reference writes through the
+document/filler commit and close admission before the authoritative bounded
+deletion scan. No process-local mutex or scan-then-delete race is acceptable.
+Uncertain/crashed claims never expire automatically; fail closed until proven
+reconciliation. New workers must all enforce this gate before enabling destructive
+library operations. Metadata edits use independent CAS and cannot alter descriptors.
+Legacy archived filler reads remain supported, but new manager DELETE is unused-only.
+Completed-upload replay cannot resurrect a deleted catalog entry. Persist scan
+checkpoints and bound request work; unknown/corrupt history is not unused.
+
+Original title/artist tags may be absent; do not invent them. Library edits are
+presentation for future selections, not a hidden rewrite of existing snapshots.
+For fillers the immutable recording name stays fixed; use catalog presentation in
+selection controls without changing its authoritative recording descriptor.
+Software/music-engine research does not authorize bundling samples: redistribution
+rights and musical quality must be reviewed separately. No ambient-streamer edits,
+live synthesis engine, new Azure resources or session-policy changes in this work.
+
 ## Unified Routine Revision (September 16)
 
 This section supersedes separate class authoring below. One Routine is the entire
@@ -23,8 +136,8 @@ records are not deleted or merged by this compatibility change.
 `{crossfade, walkIn?, before?, after?, walkOut?}`. Walk-in/out are owned snapshots
 `{name, tracks, source?:{id,revision,published}}`, not live library references.
 Their entries are cue-free, without after-rules, and have globally unique IDs
-across the entire routine. The source is provenance only. Settings owns playlist
-editing; adopting a playlist copies entries into one undoable routine edit.
+across the entire routine. The source is provenance only. The Playlists workspace
+owns playlist editing; adopting a playlist copies entries into one undoable routine edit.
 `allRoutineTracks`, `allRoutineFillers` and `routineClassAudio` are shared helpers.
 `CloudRoutine.media` covers exactly every main/walk-in/walk-out track ID. Resolve
 all recording descriptors and authorize only the complete published asset union.

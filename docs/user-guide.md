@@ -1,6 +1,6 @@
 # Fitness Music Player: Current Workflows
 
-Status: September 16, 2026. Unified Routine changes are implemented in this source
+Status: September 17, 2026. Playlist and uploaded-audio changes are implemented in this source
 checkout, awaiting remote verification, with remaining limits documented below.
 This is not a claim that the new build is deployed. Use the Azure app and check its
 footer build timestamp for the installed release. Do not start a local preview or
@@ -19,8 +19,8 @@ these changes; it is historical, not the current operating guide.
    Edit cue times > type, nudge or drag a selected cue > Save.
 4. **Teach:** open the intended routine > Teach > check the complete phase queue >
    Start class > Play. Opening/preparation/Class Mode entry remain silent.
-5. **Playlists:** Settings > Music playlists > New music playlist > name > Import
-   audio or From Audio Library > order/levels/optional BPM > Save. Return to
+5. **Playlists:** Playlists > New music playlist > name > Add track > From audio library
+   or Import audio > order and levels > Save. Return to
    Routines and explicitly choose it for walk-in or walk-out.
 6. **Close:** Close routine at the editor footer > Save, Discard changes or Cancel.
    Save uses the same local-first path; closing does not delete the library/audio.
@@ -29,6 +29,42 @@ The standalone build uses the same **Save** button but saves only on this device
 There is no separate class name or Save class setup step.
 
 ## Before You Begin
+
+### Playlists And Uploaded Audio
+
+The **Playlists** workspace edits reusable music lists independently of Routines.
+It has a matching header, chooser, Undo/Redo, Save and Close workflow. Song rows
+show their number, duration, preview controls and level slider. Playlist editing
+has no class phases, cues, filler, cue beeps or BPM controls; existing stored BPM
+is retained. Save commits locally before attempting Cloud synchronization. Pending
+saves and later unsaved edits remain distinct. Editing a playlist never silently
+changes a routine that already adopted its saved tracks.
+
+Use **Delete routine** in the routine footer, or the trash control beside a
+deletable draft in the chooser. Review the named routine and storage location in
+the confirmation. Locked routines must be unlocked first; published views do not
+offer destructive editing. Routine deletion does not delete the uploaded music.
+**Remove from playlist** likewise removes only that song occurrence.
+
+Expand **Settings > Uploaded audio** to manage Songs and Fillers. Rows show
+available filename, title, artist, duration and BPM metadata, with Play/Pause,
+Stop, Edit and Delete. Unknown historical facts remain unknown. Upload selected
+files through the existing bounded audio-processing pipeline. Preview loads only
+the selected audio; browsing metadata does not download the entire library.
+Metadata edits change future selections, not saved routine/playlist snapshots.
+Original filename and measured duration are read-only intake facts.
+
+**Delete audio** is unused-only and keeps the stored bytes; it is not a storage
+purge. Saved histories, publications, class references, pending copies and known
+local drafts can block it. An incomplete check cannot authorize deletion. Cloud
+cannot inspect unsynced drafts on another device. Deletion also requires the
+operator's server activation gate after all older writers are drained; until
+that is established, the API reports that deletion is unavailable. See the
+[API activation requirements](../api/README.md#admission-and-activation-gate).
+
+For better upbeat filler, the [music-engine recommendation](third-party-assets.md#filler-production-recommendation)
+describes SuperCollider and alternatives. This change does not bundle new tracks
+or replace the sounds in saved routines.
 
 - On Teach, **Class readiness** summarizes the prepared routine and its walk-in,
    announcement and walk-out phases. Opening a routine, restoring an active selection
@@ -41,7 +77,7 @@ There is no separate class name or Save class setup step.
    and power checkboxes are your confirmation, not automatic hardware detection.
 - One **Undo edit / Redo edit** pair above the routine editor covers its name,
    phases, playlist adoption, song order, cues, filler, BPM, levels and inserted audio.
-   Settings playlists have their own library history. Undo changes content, not
+   Playlists has its own independent history. Undo changes content, not
    server revisions, locks, publication or media deletion. After Save, undo creates
    an unsaved edit against the current saved revision; Save again when ready.
 - **Routines > Recoverable drafts**, directly below the selected routine's header
@@ -112,8 +148,8 @@ There is no separate class name or Save class setup step.
    To change one gap, use the **Filler** action in that song's header (accessible as
    **After [song name]**). Choose Inherit, None or Custom; Custom has independent
    sound, level, timed/held behavior and crossfade. The final song's outgoing rule
-   is retained but inactive. Custom recordings come from **Settings > Filler library**;
-   removing a library choice does not break saved references.
+   is retained but inactive. Upload custom recordings through
+   **Settings > Uploaded audio > Fillers**; referenced audio cannot be deleted.
    A summary below the song shows active custom sound, timed/held duration, level
    and fade even when collapsed. It follows that song on reorder. Disabled gaps
    and a last-song custom rule are explicitly marked inactive; returning to the
@@ -121,11 +157,11 @@ There is no separate class name or Save class setup step.
 6. Configure optional Class sequence phases using section 3 below. They belong to
    this Routine, not a separately saved setup. Enabled music phases need a valid
    playlist selection before Save or preparation.
-7. Press the single **Save to Cloud** action. It first commits the whole Routine
+7. Press the single **Save** action. It first commits the whole Routine
    durably on this device, then attempts Cloud synchronization and uploads only
-   missing media. In the standalone build, the same slot says **Save on this device**
+   missing media. In the standalone build, the same slot says **Save**
    and does not contact Cloud. Import alone does not upload songs.
-8. Check the result: **Saved on this device / Pending Cloud** is not Cloud success.
+8. Check the result: **Saved on this device / Cloud sync pending** is not Cloud success.
    A queued Save survives close/reload and can finish on a later reconnect/startup
    after the same user and role are revalidated. It synchronizes explicitly saved
    work, not subsequent unsaved typing. Sign in again as the same user after expiry;
@@ -133,15 +169,15 @@ There is no separate class name or Save class setup step.
    copy and requires review, not forced overwrite. Duplicate it under a new name
    to retain a separate variant before reopening a conflicting server draft.
 9. For playback-only members, finish saving the unlocked Cloud draft and
-   choose **Publish saved routine**. Locking does not publish. Publishing creates
+   choose **More actions > Publish for playback**. Locking does not publish. Publishing creates
    a new immutable revision; it does not alter an already-prepared class.
 
 ### Add Already Uploaded Audio
 
-1. Open an editable unlocked routine as owner/editor, or an editable playlist under
-   **Settings > Music playlists**. Cloud playlist editing requires online access;
-   device-local playlist editing can use the available verified cache offline.
-2. Choose **From Audio Library** alongside **Import audio**. Online, the picker
+1. Open an editable unlocked routine as owner/editor, or a playlist under
+   **Playlists**. Available verified audio can be edited offline; Cloud-bound
+   saves remain pending until the same account reconnects successfully.
+2. Choose **Add track > From audio library**. Online, the picker
    initially reads metadata pages, not every song's audio. Offline, it lists only
    known assets whose cached bytes match the descriptor's size and SHA-256; this
    is not a complete offline Cloud catalog. Uncached or mismatched audio is omitted.
@@ -150,7 +186,7 @@ There is no separate class name or Save class setup step.
 4. Wait for selected audio to download/verify, or for the cached copy to be
    revalidated offline. Entries append with fresh IDs, empty cues and known BPM
    only; immutable assets are reused without another upload or conversion.
-   Save the Routine or Settings playlist to its displayed destination.
+   Save the Routine or playlist to its displayed destination.
 
 Use the picker row's Preview action to audition that verified asset before adding
 it. Preview downloads only that selection when needed and never inserts a song.
@@ -165,16 +201,16 @@ manually correct BPM and First beat before relying on counted cues. Failed BPM
 detection does not prevent manually entering a BPM or using timestamps. Unknown
 imported/reused song BPM stays blank. Timestamp and elapsed-second cues do not need
 BPM; count cues require valid BPM/First beat. Resolve count cues before clearing
-their BPM. Settings playlist entries also have an optional BPM field: leave it
-blank when unknown or enter a known value from 40 to 220. Existing known values,
-including legacy 100 BPM, are not erased.
+their BPM. Playlists do not expose BPM editing; existing known values, including
+legacy 100 BPM, are retained. Library BPM metadata can be edited in Uploaded audio
+for future selections without changing existing saved snapshots.
 
 Content-level sliders run **0-125%**, with the percentage underneath. 100% is unity;
 the normal color transitions toward red above 100%. This is linear amplitude, not
 perceived loudness. A stored legacy value above 125% remains audible at its actual
 stored value and visibly warned, not silently reduced. Moving its slider explicitly
 sets a new value at or below 125%; that content edit can be undone. These controls
-cover routine songs, default/custom/announcement filler, Settings playlist songs
+cover routine songs, default/custom/announcement filler, playlist songs
 and adopted walk-in/out songs. Adjust adopted song levels directly in their Routine
 phase section; these edits do not change the reusable source playlist.
 
@@ -246,7 +282,7 @@ stale-revision conflict. No separate setup reference needs updating.
    groups share spacing and are separated from the Routine name field.
 3. In each music section, choose a saved **Music playlist**. Arrival and departure
    can use completely different songs and ordering. **Manage music playlists**
-   navigates to **Settings > Music playlists**, the only reusable-playlist editor.
+   navigates to the dedicated **Playlists** workspace.
    Create/save a playlist there, return to Routines, then **Refresh playlists** and
    select it. Adoption copies its current saved songs and levels into this Routine.
    Later library edits do not change this copy; explicitly reselect and Save to adopt
@@ -298,12 +334,12 @@ requires leaving it, but operating a prepared class does not.
 
 ## 4. Settings, Share And Close
 
-**Reusable playlists:** Settings > Music playlists > choose Local/Cloud and draft/
-published > New music playlist (or open a saved row). Name it, import audio or add
-a song with **From Audio Library** or **Add song from routine**, reorder/repeat/remove
-entries, set levels and leave BPM blank unless known. From Audio Library uses the
-same metadata-first and verified-cache rules described above.
-Save the playlist to its displayed destination. Its library save/history is
+**Reusable playlists:** Playlists > New music playlist (or open a saved row).
+Name it, use **Add track** to import or select uploaded audio, reorder/repeat/remove
+entries and set levels. Rows show duration and independent preview controls;
+the playlist has no choreography controls. The same metadata-first and
+verified-cache rules apply. Save commits locally first and attempts Cloud sync
+when applicable. Its save/history is
 independent of the open Routine; return to that Routine to adopt the saved playlist
 explicitly. Library changes never silently update adopted songs or levels.
 
@@ -314,8 +350,9 @@ result stays unknown. Built-ins show generator BPM without analysis. The bundled
 lo-fi recording is pinned at measured 120 BPM, with moderate confidence and a
 plausible half-time reading of 60; this is not a guaranteed musical downbeat.
 Its 16-second audio always plays at original tempo. Analyze level is advisory;
-set per-use filler gain in the Routine. Removing a custom filler archives its
-choice while preserving audio referenced by existing routines.
+set per-use filler gain in the Routine. Uploaded filler deletion belongs in
+**Settings > Uploaded audio > Fillers** and is blocked while referenced; it is
+not an archive-in-use operation or physical storage purge.
 
 **Cue sheets:** use the **Share** icon beside the routine title, choose Excel or
 PDF, select fields and a filename, then Download. These are local metadata exports,

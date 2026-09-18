@@ -11,7 +11,7 @@ import { CloudApi } from '../api/src/cloud/http';
 import { derivePassword } from '../api/src/cloud/auth';
 import { BlobConflict, type BlobStore, type StoredBlob } from '../api/src/cloud/store';
 import type { FillerRecording } from '../shared/routine';
-import type { RoutineWorkingCopy } from '../frontend/src/offline';
+import type { PlaylistWorkingCopy, RoutineWorkingCopy } from '../frontend/src/offline';
 
 const dist = process.env.HOSTED_TEST_DIST ? resolve(process.env.HOSTED_TEST_DIST)
   : fileURLToPath(new URL('../frontend/dist/', import.meta.url));
@@ -291,6 +291,15 @@ const workingCopies = (page: Page) => page.evaluate(async () => new Promise<Rout
     transaction.onabort = () => { database.close(); reject(transaction.error); };
   };
 }));
+const playlistWorkingCopies = (page: Page) => page.evaluate(async () => new Promise<PlaylistWorkingCopy[]>((accept, reject) => {
+  const request = indexedDB.open('fitness-rehearsal'); request.onerror = () => reject(request.error);
+  request.onsuccess = () => {
+    const database = request.result; const transaction = database.transaction('playlistWorkingCopies');
+    const records = transaction.objectStore('playlistWorkingCopies').getAll();
+    transaction.oncomplete = () => { database.close(); accept(records.result); };
+    transaction.onabort = () => { database.close(); reject(transaction.error); };
+  };
+}));
 async function ready(page: Page) {
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.waitForFunction(async () => (await navigator.serviceWorker.getRegistration())?.active?.state === 'activated');
@@ -409,7 +418,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue(published.name);
     await browserExpect(page.locator('#panel-edit .routine-name-field').getByRole('textbox', { name: 'Routine name', exact: true })).toBeDisabled();
     expect((await workingCopies(page))[0]).toEqual(before);
-    await browserExpect(page.locator('.draft-identity')).toContainText('Published');
+    await browserExpect(page.locator('#panel-edit .draft-identity')).toContainText('Published');
     await browserExpect(actions).toBeVisible();
     await openRoutineActions(page);
     await page.getByRole('button', { name: 'Open cloud draft', exact: true }).click();
@@ -456,7 +465,8 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       const title = await picker.locator('.audio-library-row').first().locator('span').first().textContent();
       expect(title).toBeTruthy();
       await picker.getByRole('searchbox').fill(title!);
-      expect(calls.slice(start).filter(call => call.path.startsWith('/api/media/')).every(call => call.path === '/api/media/library')).toBe(true);
+      expect(calls.slice(start).filter(call => call.path.startsWith('/api/media/'))).toEqual([]);
+      expect(calls.slice(start)).toContainEqual({ path: '/api/library/songs', method: 'GET', status: 200 });
       expect(await activeVoices()).toBe(0); expect(await audio(cold)).toEqual([]);
       const selected = picker.locator('.audio-library-row').first(); await selected.getByRole('checkbox').check();
       const controls = selected;
@@ -835,17 +845,64 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
   }));
 
+  test('playlist saved queue survives reload and reconnect uploads only saved content without replacing a routine or later unsaved edits', () => withHosted(async ({ page, context, calls }) => {
+    page.on('dialog', dialog => dialog.accept()); await login(page); await demo(page); await upload(page); await ready(page);
+    const routinePointers = await activeRoutinePointers(page); const routineCopies = await workingCopies(page);
+    await page.getByRole('tab', { name: 'Playlists', exact: true }).click();
+    const panel = page.locator('#panel-playlists');
+    await panel.getByRole('button', { name: 'New music playlist', exact: true }).click();
+    await panel.getByLabel('Playlist name', { exact: true }).fill('Saved lobby');
+    await panel.locator('summary[aria-label="Add track"]').click();
+    await panel.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
+    await browserExpect(panel.locator('.playlist-entry')).toHaveCount(1);
+    await context.setOffline(true);
+    await panel.getByRole('button', { name: 'Save', exact: true }).click();
+    await browserExpect(panel.locator('.playlist-save-status')).toHaveText('Saved on this device / Cloud sync pending');
+    await browserExpect(panel.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    const pending = (await playlistWorkingCopies(page))[0]!; expect(pending.cloudBaseRevision).toBeNull(); expect(pending.pendingCloud).toBe(true);
+    await panel.getByRole('button', { name: 'Close playlist', exact: true }).click();
+    await browserExpect(panel.getByRole('button', { name: 'New music playlist', exact: true })).toBeVisible();
+    await page.reload(); await page.getByRole('tab', { name: 'Playlists', exact: true }).click();
+    await panel.getByRole('button', { name: 'Open Saved lobby', exact: true }).click();
+    await panel.getByLabel('Playlist name', { exact: true }).fill('Unsaved lobby changes');
+    const beforeResume = calls.length; await context.setOffline(false);
+    await browserExpect.poll(async () => (await playlistWorkingCopies(page))[0]?.pendingCloud).toBe(false);
+    await browserExpect(panel.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    await browserExpect(panel.getByLabel('Playlist name', { exact: true })).toHaveValue('Unsaved lobby changes');
+    const acknowledged = (await playlistWorkingCopies(page))[0]!;
+    expect(acknowledged.envelope.playlist).toMatchObject({ id: pending.envelope.playlist.id, name: 'Saved lobby', revision: 1 });
+    expect(acknowledged.cloudBaseRevision).toBe(1);
+    expect(calls.slice(beforeResume).filter(call => call.path === '/api/playlists' && call.method === 'POST')).toHaveLength(1);
+    expect(calls.slice(beforeResume).filter(call => call.path.startsWith('/api/routines') && call.method !== 'GET')).toEqual([]);
+    expect(await activeRoutinePointers(page)).toEqual(routinePointers); expect(await workingCopies(page)).toEqual(routineCopies);
+    await panel.locator('.editor-actions > .command-menu > summary').click();
+    await browserExpect(panel.getByRole('button', { name: 'Publish for playback', exact: true })).toBeDisabled();
+    await panel.getByRole('button', { name: 'Close playlist', exact: true }).click();
+    const decision = page.getByRole('dialog').filter({ has: page.getByRole('button', { name: 'Discard changes', exact: true }) });
+    await decision.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(panel.getByRole('button', { name: 'Close playlist', exact: true })).toBeFocused();
+    await panel.getByRole('button', { name: 'Close playlist', exact: true }).click();
+    await decision.getByRole('button', { name: 'Discard changes', exact: true }).click();
+    await panel.getByRole('button', { name: 'Open Saved lobby', exact: true }).click();
+    await browserExpect(panel.getByLabel('Playlist name', { exact: true })).toHaveValue('Saved lobby');
+    await page.getByRole('tab', { name: 'Teach', exact: true }).click();
+    await browserExpect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
+    await browserExpect(page.getByRole('progressbar', { name: 'Track progress', exact: true })).toHaveAttribute('aria-valuenow', '0');
+  }));
+
   test('class authors prepare cold drafts and players restore exact published setups after source republish offline', () => withHosted(async ({ page, browser, origin, calls }) => {
     page.on('dialog', dialog => dialog.accept());
     await login(page, 'editor'); await demo(page); await upload(page);
-    await page.getByRole('tab', { name: 'Settings', exact: true }).click();
-    const panel = page.locator('.class-library');
-    await panel.locator(':scope > summary').click();
+    await page.getByRole('tab', { name: 'Playlists', exact: true }).click();
+    const panel = page.locator('#panel-playlists');
     await panel.getByRole('button', { name: 'New music playlist', exact: true }).click();
     await panel.getByLabel('Playlist name', { exact: true }).fill('Shared lobby');
+    await panel.locator('summary[aria-label="Add track"]').click();
+    await browserExpect(panel.getByRole('button', { name: 'From audio library', exact: true })).toBeVisible();
     await panel.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
-    await panel.getByRole('button', { name: 'Save Shared lobby to Cloud', exact: true }).click();
-    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Library draft saved.');
+    await panel.getByRole('button', { name: 'Save', exact: true }).click();
+    await browserExpect(panel.locator('.playlist-save-status')).toHaveText('Saved');
+    await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to cloud.');
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     const sequence = page.getByRole('region', { name: 'Class sequence', exact: true });
     await sequence.getByRole('checkbox', { name: 'Walk-in music', exact: true }).check();
@@ -996,8 +1053,8 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect(player.getByRole('slider', { name: 'Track level', exact: true }).first()).toHaveValue('125');
     await browserExpect(player.getByRole('slider', { name: 'Track level', exact: true }).first()).toBeDisabled();
     await browserExpect(player.getByRole('slider', { name: 'Filler level', exact: true })).toHaveValue('65');
-    await browserExpect(player.locator('.draft-identity')).toContainText('Published');
-    await browserExpect(player.locator('.draft-identity')).toContainText('Last saved:');
+    await browserExpect(player.locator('#panel-edit .draft-identity')).toContainText('Published');
+    await browserExpect(player.locator('#panel-edit .draft-identity')).toContainText('Last saved:');
     const originalOrder = await player.locator('details[data-track-id]').evaluateAll(cards => cards.map(card => (card as HTMLElement).dataset.trackId));
     const originalStatus = await player.locator('.draft-status').textContent();
     const beforeReorder = calls.filter(call => call.method !== 'GET').length;
@@ -1018,7 +1075,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect(player.locator('.track-insertion-line')).toBeHidden();
     expect(await player.locator('details[data-track-id]').evaluateAll(cards => cards.map(card => (card as HTMLElement).dataset.trackId))).toEqual(originalOrder);
     await browserExpect(player.locator('.draft-status')).toHaveText(originalStatus!);
-    await browserExpect(player.locator('.draft-identity')).toContainText('Published');
+    await browserExpect(player.locator('#panel-edit .draft-identity')).toContainText('Published');
     expect(calls.filter(call => call.method !== 'GET')).toHaveLength(beforeReorder);
     expect(await audio(player)).toEqual(originalAudio);
     const downloads = calls.slice(transferStart).filter(call => call.path.startsWith('/api/media/'));
@@ -1038,14 +1095,63 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await device.close();
   }));
 
-  test('cold Prepare preserves playing audio on failure, then a fresh local draft reuses the archived exact ID without filler allocation', () => withHosted(async ({ page, browser, origin, calls, expire }) => {
+  test('uploaded audio manager serially uploads songs, edits catalog-only metadata and contains mobile actions', () => withHosted(async ({ page, calls }) => {
+    await login(page);
+    await page.getByRole('tab', { name: 'Settings', exact: true }).click();
+    const manager = page.locator('.media-library');
+    const start = calls.length;
+    await manager.locator('summary').first().click();
+    await browserExpect(manager.getByRole('button', { name: 'Refresh audio', exact: true })).toBeEnabled();
+    expect(calls.slice(start).some(call => call.path.startsWith('/api/media/'))).toBe(false);
+    const first = fillerWav(); const second = Buffer.from(first); second.writeInt16LE(1234, second.length - 2);
+    await manager.getByLabel('Choose audio files', { exact: true }).setInputFiles([
+      { name: 'House-one.wav', mimeType: 'audio/wav', buffer: first }, { name: 'Dance-two.wav', mimeType: 'audio/wav', buffer: second },
+    ]);
+    await manager.getByRole('button', { name: 'Upload tracks', exact: true }).click();
+    await browserExpect(manager.locator('.media-status')).toHaveText('Upload batch completed.');
+    await browserExpect(manager.locator('.media-row:not(.media-heading)')).toHaveCount(2);
+    const row = manager.locator('.media-row').filter({ hasText: 'House-one.wav' });
+    await row.getByRole('button', { name: 'Edit audio metadata', exact: true }).click();
+    const dialog = manager.getByRole('dialog', { name: 'Edit audio metadata', exact: true });
+    await dialog.getByRole('textbox', { name: 'Title', exact: true }).fill('<House practice>');
+    await dialog.getByRole('textbox', { name: 'Artist', exact: true }).fill('<Artist>');
+    await dialog.getByRole('spinbutton', { name: 'BPM', exact: true }).fill('126');
+    const uploads = calls.filter(call => call.path === '/api/media/uploads' && call.method === 'POST').length;
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await browserExpect(dialog).toHaveCount(0); await browserExpect(row).toContainText('<House practice>');
+    await browserExpect(row).toContainText('<Artist>'); await browserExpect(row).toContainText('126');
+    expect(await row.locator('script,img').count()).toBe(0);
+    expect(calls.filter(call => call.path === '/api/media/uploads' && call.method === 'POST')).toHaveLength(uploads);
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+      await page.setViewportSize(viewport);
+      expect(await manager.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await row.locator('button').evaluateAll(buttons => buttons.every(button => {
+        const bounds = button.getBoundingClientRect(); return bounds.width >= 44 && bounds.height >= 44;
+      }))).toBe(true);
+      await page.screenshot({ path: `test-results/uploaded-audio-${viewport.width}.png`, fullPage: true });
+    }
+    await row.getByRole('button', { name: 'Delete audio', exact: true }).click();
+    const deletion = manager.getByRole('dialog', { name: 'Delete audio', exact: true });
+    await browserExpect(deletion.getByRole('button', { name: 'Delete audio', exact: true })).toBeEnabled();
+    await deletion.getByRole('button', { name: 'Delete audio', exact: true }).click();
+    await browserExpect.poll(() => calls.slice(start).filter(call => call.method === 'DELETE').map(call => call.status)).toEqual([503]);
+    await browserExpect(deletion.getByRole('button', { name: 'Delete audio', exact: true })).toBeDisabled();
+    await deletion.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await browserExpect(manager.locator('.media-row:not(.media-heading)')).toHaveCount(2);
+    const removed = calls.slice(start).find(call => call.method === 'DELETE')!;
+    expect((await page.request.get(`${removed.path}/metadata`)).status()).toBe(200);
+  }));
+
+  test('cold Prepare preserves playing audio on failure, then a fresh local draft reuses the referenced exact ID without filler allocation', () => withHosted(async ({ page, browser, origin, calls, expire }) => {
     page.on('dialog', dialog => dialog.accept());
     await login(page);
     await page.getByRole('tab', { name: 'Settings', exact: true }).click();
     const library = page.getByRole('region', { name: 'Filler library', exact: true });
-    await library.getByLabel('Recording audio file', { exact: true }).setInputFiles({ name: 'UserFiller.wav', mimeType: 'audio/wav', buffer: fillerWav() });
-    await library.getByRole('button', { name: 'Upload recording to Cloud', exact: true }).click();
-    await browserExpect(library.locator('.filler-library-feedback')).toHaveText('Recording saved to the Cloud filler library.');
+    const manager = page.locator('.media-library');
+    await manager.locator('summary').first().click(); await manager.getByRole('tab', { name: 'Fillers', exact: true }).click();
+    await manager.getByLabel('Choose audio files', { exact: true }).setInputFiles({ name: 'UserFiller.wav', mimeType: 'audio/wav', buffer: fillerWav() });
+    await manager.getByRole('button', { name: 'Upload fillers', exact: true }).click();
+    await browserExpect(manager.locator('.media-status')).toHaveText('Upload batch completed.');
     const recording = (await (await page.request.get('/api/fillers')).json()).fillers[0] as FillerRecording;
     await screenshot(page, 'filler-settings');
 
@@ -1076,8 +1182,11 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await author.getByRole('button', { name: 'Stop', exact: true }).click();
     await upload(author);
 
-    await library.getByRole('button', { name: 'Remove recording', exact: true }).click();
-    await browserExpect(library.locator('.filler-library-feedback')).toContainText('Recording removed');
+    await manager.getByRole('button', { name: 'Delete audio', exact: true }).click();
+    const deletion = manager.getByRole('dialog', { name: 'Delete audio', exact: true });
+    await browserExpect(deletion).toContainText('In use. Deletion is blocked.');
+    await browserExpect(deletion.getByRole('button', { name: 'Delete audio', exact: true })).toBeDisabled();
+    await deletion.getByRole('button', { name: 'Cancel', exact: true }).click();
     await author.reload();
     await author.getByRole('tab', { name: 'Routines', exact: true }).click();
     await browserExpect(author.getByRole('combobox', { name: 'Filler sound', exact: true }).locator('option:checked')).toHaveText('UserFiller (1 s)');
@@ -1091,7 +1200,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     expect(writes.some(call => call.path === '/api/fillers' && call.method === 'POST')).toBe(false);
     expect(writes.filter(call => call.path === '/api/media/uploads' && call.method === 'POST')).toHaveLength(0);
     expect(writes.some(call => call.method === 'PUT' && call.path.startsWith('/api/routines/'))).toBe(true);
-    expect((await (await author.request.get('/api/fillers')).json()).fillers).toEqual([]);
+    expect((await (await author.request.get('/api/fillers')).json()).fillers).toEqual([recording]);
 
     expire();
     expect((await author.request.get('/api/auth/session')).status()).toBe(401);
@@ -1105,7 +1214,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await device.close();
   }, true));
 
-  test('UserFiller shares across authors, uses two-tap downloaded preview and remains published/playable after archive', () => withHosted(async ({ page, browser, origin, calls }) => {
+  test('UserFiller shares across authors, uses two-tap downloaded preview and blocks deletion while published/playable', () => withHosted(async ({ page, browser, origin, calls }) => {
     const wav = fillerWav();
     const observe = async (target: Page) => target.addInitScript(() => {
       const probe = { starts: 0, stops: 0 };
@@ -1124,14 +1233,13 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     const library = (target: Page) => target.getByRole('region', { name: 'Filler library', exact: true });
     await observe(page); await login(page); await demo(page);
     await page.getByRole('tab', { name: 'Settings', exact: true }).click();
-    await library(page).getByLabel('Recording audio file', { exact: true }).setInputFiles({ name: 'UserFiller.wav', mimeType: 'audio/wav', buffer: wav });
+    const manager = page.locator('.media-library');
+    await manager.locator('summary').first().click(); await manager.getByRole('tab', { name: 'Fillers', exact: true }).click();
     const writesBefore = calls.filter(call => call.method === 'POST').length;
-    page.once('dialog', dialog => dialog.dismiss());
-    await library(page).getByRole('button', { name: 'Upload recording to Cloud', exact: true }).click();
+    await manager.getByLabel('Choose audio files', { exact: true }).setInputFiles({ name: 'UserFiller.wav', mimeType: 'audio/wav', buffer: wav });
     expect(calls.filter(call => call.method === 'POST')).toHaveLength(writesBefore);
-    page.once('dialog', async dialog => { expect(dialog.message()).toContain('UserFiller'); await dialog.accept(); });
-    await library(page).getByRole('button', { name: 'Upload recording to Cloud', exact: true }).click();
-    await browserExpect(library(page).locator('.filler-library-feedback')).toHaveText('Recording saved to the Cloud filler library.');
+    await manager.getByRole('button', { name: 'Upload fillers', exact: true }).click();
+    await browserExpect(manager.locator('.media-status')).toHaveText('Upload batch completed.');
     const catalog = await (await page.request.get('/api/fillers')).json();
     const recording = catalog.fillers[0] as FillerRecording;
     expect(recording).toMatchObject({ name: 'UserFiller', duration: 1 });
@@ -1139,11 +1247,15 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
       'Lo-fi instrumental (CC0): 120 BPM', 'Synthetic soft: 100 BPM', 'Synthetic bright: 100 BPM', 'Synthetic drums: 100 BPM',
     ]);
     const analysisPath = `/api/fillers/${recording.id}/analysis`;
+    await library(page).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller (1 s)' });
+    await browserExpect(library(page).getByLabel('Recording BPM', { exact: true })).toBeEnabled();
     await library(page).getByLabel('Recording BPM', { exact: true }).fill('120');
     expect((await (await page.request.get(analysisPath)).json()).analysis).toBeNull();
     await library(page).getByRole('button', { name: 'Apply BPM metadata', exact: true }).click();
     await browserExpect(library(page).locator('.filler-library-feedback')).toHaveText('BPM metadata saved');
     expect((await (await page.request.get(analysisPath)).json()).analysis).toEqual({ bpm: 120, analyzer: 'manual', sha256: recording.asset.sha256 });
+    await library(page).getByRole('button', { name: 'Preview filler', exact: true }).click();
+    await browserExpect(library(page).locator('.filler-library-feedback')).toHaveText('Recording ready. Tap Preview filler to play.');
     await library(page).getByRole('button', { name: 'Preview filler', exact: true }).click();
     await browserExpect.poll(async () => (await probe(page)).starts).toBe(1);
     await library(page).getByRole('button', { name: 'Stop filler preview', exact: true }).click();
@@ -1154,6 +1266,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await author.getByRole('button', { name: 'New routine', exact: true }).click();
     await browserExpect(author.getByRole('combobox', { name: 'Filler sound', exact: true }).locator('option').filter({ hasText: /^UserFiller \(1 s\)$/ })).toHaveCount(1);
     await author.getByRole('tab', { name: 'Settings', exact: true }).click();
+    await author.locator('.media-library > summary').click();
     await browserExpect(library(author).getByRole('button', { name: 'Refresh filler library', exact: true })).toBeEnabled();
     await library(author).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller (1 s)' });
     await browserExpect(library(author).getByLabel('Recording BPM', { exact: true })).toHaveValue('120');
@@ -1190,11 +1303,14 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await page.getByRole('tab', { name: 'Settings', exact: true }).click();
     await browserExpect(library(page).getByRole('button', { name: 'Refresh filler library', exact: true })).toBeEnabled();
     await library(page).getByRole('combobox', { name: 'Custom recordings', exact: true }).selectOption({ label: 'UserFiller (1 s)' });
-    await library(page).getByRole('button', { name: 'Remove recording', exact: true }).click();
-    await browserExpect(library(page).locator('.filler-library-feedback')).toContainText('Recording removed');
+    await manager.getByRole('button', { name: 'Delete audio', exact: true }).click();
+    const deletion = manager.getByRole('dialog', { name: 'Delete audio', exact: true });
+    await browserExpect(deletion).toContainText('In use. Deletion is blocked.');
+    await browserExpect(deletion.getByRole('button', { name: 'Delete audio', exact: true })).toBeDisabled();
+    await deletion.getByRole('button', { name: 'Cancel', exact: true }).click();
     expect(await probe(page)).toEqual(playing);
     await library(author).getByRole('button', { name: 'Refresh filler library', exact: true }).click();
-    await browserExpect(library(author).getByRole('combobox', { name: 'Custom recordings', exact: true }).locator('option')).toHaveCount(1);
+    await browserExpect(library(author).getByRole('combobox', { name: 'Custom recordings', exact: true }).locator('option')).toHaveCount(2);
     const clock = await page.locator('.class-clock').textContent();
     await page.route('**/api/fillers', route => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'forbidden' }) }));
     await library(page).getByRole('button', { name: 'Refresh filler library', exact: true }).click();
