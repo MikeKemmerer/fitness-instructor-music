@@ -64,6 +64,11 @@ describe('unified review source guards', () => {
     expect(source('editor.ts')).not.toMatch(/timePreview\.textContent\s*=/);
     expect(source('draft-protection.ts')).toContain("feedback.show(t('recoveryFailed'))");
   });
+  it('excludes visually hidden inputs from full-width form sizing', () => {
+    const css = source('styles.css');
+    expect(css).toContain("input:not([type='checkbox']):not([type='range']):not(.visually-hidden), select, textarea");
+    expect(css).toMatch(/\.visually-hidden \{[^}]*inline-size: 1px;[^}]*block-size: 1px;[^}]*min-inline-size: 0;[^}]*min-block-size: 0;[^}]*padding: 0;/);
+  });
   it('records staged attempts before committing and retains the final local CAS check', () => {
     const saver = source('routine-save.ts');
     expect(saver).toContain('sameSavedContent(head, attempt.envelope)');

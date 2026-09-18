@@ -778,6 +778,13 @@ test('playlist workspace Open Close Save and import Undo preserve independent ro
     expect(await panel.locator('.playlist-editor').boundingBox()).toEqual(bounds); expect(await page.evaluate(() => window.scrollY)).toBe(scroll);
     await page.screenshot({ path: `test-results/playlist-chooser-${viewport.width}.png`, fullPage: true });
     await chooser.getByRole('button', { name: 'Close playlist chooser', exact: true }).click(); await expect(opener).toBeFocused();
+    for (const selector of ['#app > input[type=file]', '#panel-playlists input[type=file]']) {
+      const dimensions = await page.locator(selector).evaluate(node => {
+        const bounds = node.getBoundingClientRect();
+        return { width: bounds.width, height: bounds.height };
+      });
+      expect(dimensions, selector).toEqual({ width: 1, height: 1 });
+    }
     const pageWidth = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,
       viewportWidth: window.innerWidth,

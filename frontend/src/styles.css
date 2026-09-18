@@ -326,7 +326,7 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .editor-section h2 { margin-block-end: 18px; }
 .field { display: flex; flex-direction: column; gap: 8px; min-inline-size: 0; font-size: .9rem; }
 .field-label { font-size: .78rem; font-weight: 500; color: var(--muted); }
-input:not([type='checkbox']):not([type='range']), select, textarea { inline-size: 100%; min-inline-size: 0; min-block-size: 44px; border: 1px solid var(--control-border); border-radius: 4px; background: var(--surface); padding: 10px; }
+input:not([type='checkbox']):not([type='range']):not(.visually-hidden), select, textarea { inline-size: 100%; min-inline-size: 0; min-block-size: 44px; border: 1px solid var(--control-border); border-radius: 4px; background: var(--surface); padding: 10px; }
 textarea { resize: vertical; line-height: 1.45; min-block-size: 68px; }
 input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 16px; }
@@ -447,7 +447,7 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
 .validation { margin-block-end: 20px; padding: 16px; background: var(--error-surface); }
 .validation h2 { font-size: .95rem; }
 .validation ul { padding-inline-start: 20px; font-size: .85rem; line-height: 1.7; margin-block-end: 0; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.visually-hidden { position: absolute; inline-size: 1px; block-size: 1px; min-inline-size: 0; min-block-size: 0; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 @media (min-width: 640px) {
   .app-shell { padding-inline: 32px; }
   .moves { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; gap: 32px; }
