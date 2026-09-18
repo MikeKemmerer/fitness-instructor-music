@@ -2367,7 +2367,7 @@ describe('pending filler import recovery', () => {
 });
 
 describe('real IndexedDB filler cancellation', () => {
-  it('archives only the pending import after Cancel, leave, lost context or dispose while retaining both audio blobs', async () => {
+  it('prevents cancelled imports from committing and archives only a committed stale-context import', async () => {
     const { createServer } = await import('../frontend/node_modules/vite/dist/node/index.js');
     const { chromium } = await import('@playwright/test');
     const { resolve } = await import('node:path');
@@ -2431,20 +2431,40 @@ describe('real IndexedDB filler cancellation', () => {
           release();
           return existing.id;
         }, { interruption, addLabel: t('addFiller'), cancelLabel: t('cancelFillerOperation') });
-        await expect.poll(() => page.evaluate(() => (window as unknown as { fillerCleanup: string[] }).fillerCleanup.length)).toBe(1);
+        await expect.poll(() => page.evaluate(() =>
+          document.querySelector('.filler-library')?.getAttribute('aria-busy'))).toBe('false');
         const result = await page.evaluate(async () => {
           const api = (globalThis as unknown as { fillerTest: typeof import('../frontend/src/offline') }).fillerTest;
           const cleanup = (window as unknown as { fillerCleanup: string[] }).fillerCleanup;
           const catalog = await api.listFillerRecordings();
-          const retained = await api.getTrackBlob(`filler-${cleanup[0]}`);
-          return { ids: catalog.map(recording => recording.id), cleanup,
+          const counts = await new Promise<{ fillers: number; tracks: number }>((accept, reject) => {
+            const request = indexedDB.open('fitness-rehearsal'); request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+              const database = request.result; const transaction = database.transaction(['fillerRecordings', 'tracks']);
+              const fillers = transaction.objectStore('fillerRecordings').count();
+              const tracks = transaction.objectStore('tracks').count();
+              transaction.oncomplete = () => { accept({ fillers: fillers.result, tracks: tracks.result }); database.close(); };
+              transaction.onabort = () => reject(transaction.error);
+            };
+          });
+          const retained = cleanup[0] ? await api.getTrackBlob(`filler-${cleanup[0]}`) : undefined;
+          return { ids: catalog.map(recording => recording.id), cleanup, counts,
             retained: retained?.size, existing: (await api.getFillerRecordingBlob(catalog[0]!))?.size };
         });
         expect(result.ids).toEqual([oldId]);
-        expect(result.cleanup).toHaveLength(1);
-        expect(result.cleanup).not.toContain(oldId);
-        expect(result.retained).toBeGreaterThan(44);
-        expect(result.existing).toBe(result.retained);
+        expect(result.counts.fillers).toBe(1);
+        if (interruption === 'context') {
+          expect(result.cleanup).toHaveLength(1);
+          expect(result.cleanup).not.toContain(oldId);
+          expect(result.counts.tracks).toBe(2);
+          expect(result.retained).toBeGreaterThan(44);
+          expect(result.existing).toBe(result.retained);
+        } else {
+          expect(result.cleanup).toEqual([]);
+          expect(result.counts.tracks).toBe(1);
+          expect(result.retained).toBeUndefined();
+          expect(result.existing).toBeGreaterThan(44);
+        }
         await context.close();
       }
     } finally { await browser.close(); await server.close(); }
