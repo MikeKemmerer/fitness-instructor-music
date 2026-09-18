@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { requiredHostedCaseNames, requiredHostedTests, requiredLocalTests } from './report-policy.mjs';
 
@@ -62,5 +63,14 @@ test('rejects unrelated skips, failures, missing results and duplicate optional 
     const report = fixture();
     mutate(report);
     assert.throws(() => requiredHostedTests(report));
+  }
+});
+
+// Every other case here builds fixtures from the manifest, so only reading the real spec catches a rename.
+test('required coverage names still exist in the hosted browser spec', () => {
+  const source = readFileSync(new URL('../tests/hosted-browser.test.ts', import.meta.url), 'utf8');
+  for (const name of requiredHostedCaseNames) {
+    const declared = name.replace(/ \(\d+ channels, \d+ comment bytes\)$/, ' (%i channels, %i comment bytes)');
+    assert(source.includes(`'${declared}'`), `Renamed or removed required hosted case: ${name}`);
   }
 });
