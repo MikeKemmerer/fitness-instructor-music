@@ -2400,8 +2400,10 @@ describe('real IndexedDB filler cancellation', () => {
           const file = new File([blob], 'Loop.wav', { type: 'audio/wav' });
           const existing = await api.addFillerRecording(file, 'Existing');
           let current = true;
+          Object.assign(window, { fillerWorking: false });
           const panel = api.createFillerLibrary({ hosted: false, cloud: api.createCloudLibrary(),
-            preview: api.createAudioPreview(), isCurrent: () => current, changed: () => {} });
+            preview: api.createAudioPreview(), isCurrent: () => current, changed: () => {},
+            working: value => { (window as unknown as { fillerWorking: boolean }).fillerWorking = value; } });
           document.body.append(panel.element);
           await panel.refresh();
           let release!: () => void;
@@ -2432,7 +2434,7 @@ describe('real IndexedDB filler cancellation', () => {
           return existing.id;
         }, { interruption, addLabel: t('addFiller'), cancelLabel: t('cancelFillerOperation') });
         await expect.poll(() => page.evaluate(() =>
-          document.querySelector('.filler-library')?.getAttribute('aria-busy'))).toBe('false');
+          (window as unknown as { fillerWorking: boolean }).fillerWorking)).toBe(false);
         const result = await page.evaluate(async () => {
           const api = (globalThis as unknown as { fillerTest: typeof import('../frontend/src/offline') }).fillerTest;
           const cleanup = (window as unknown as { fillerCleanup: string[] }).fillerCleanup;
