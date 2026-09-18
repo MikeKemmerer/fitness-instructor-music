@@ -2447,6 +2447,7 @@ void (async () => {
       await syncPending(transfer);
       await playlistEditor?.syncPending(transfer);
     });
+    // A tab selection while startup is busy skips its usual filler refresh.
     if (!hostedPilot && fillerLibraryCurrent()) void fillerLibrary.refresh();
     if (routineOpen) requestPreparation();
   }
