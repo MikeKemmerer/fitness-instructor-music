@@ -163,7 +163,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
       try {
         if (!pending) {
           errors.show(t('preparingAudio', { name: chosen.name }), false);
-          const recording = await addFillerRecording(chosen, label);
+          const recording = await addFillerRecording(chosen, label, transfer.signal);
           pending = { file: chosen, name: label, recording, assertIdentity };
           imported = pending;
         }

@@ -2288,6 +2288,33 @@ describe('pending filler import recovery', () => {
     vi.unstubAllGlobals();
   });
 
+  it('aborts legacy local filler conversion when its operation is cancelled', async () => {
+    vi.resetModules(); vi.resetAllMocks(); nodes.length = 0; stubDocument();
+    const { createFillerLibrary } = await import('../frontend/src/filler-library');
+    const { createCloudLibrary } = await import('../frontend/src/cloud-library');
+    let rejectImport!: (error: Error) => void;
+    const importing = new Promise<FillerRecording>((_resolve, reject) => { rejectImport = reject; });
+    mocks.addFillerRecording.mockReturnValue(importing);
+    const panel = createFillerLibrary({ hosted: false, cloud: createCloudLibrary(),
+      preview: mocks.preview as unknown as AudioPreview, isCurrent: () => true, changed: () => {} });
+    const picker = nodes.find(node => node.tag === 'input' && node.type === 'file')!;
+    picker.files = [new File([new Uint8Array(128)], 'Loop.wav', { type: 'audio/wav' })];
+    picker.dispatchEvent(new Event('change'));
+    const add = nodes.find(node => node.tag === 'button' && node.title === t('addFiller'))!;
+    add.click();
+    await vi.waitFor(() => expect(mocks.addFillerRecording).toHaveBeenCalledOnce());
+    const signal = mocks.addFillerRecording.mock.calls[0]![2] as AbortSignal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+    nodes.find(node => node.tag === 'button' && node.title === t('cancelFillerOperation'))!.click();
+    expect(signal.aborted).toBe(true);
+    rejectImport(new Error('conversion_aborted'));
+    await vi.waitFor(() => expect(add.disabled).toBe(false));
+    expect(panel.choices()).toEqual([]);
+    panel.dispose();
+    vi.unstubAllGlobals();
+  });
+
   it.each(['500', '503', 'network', '400', 'cancel'] as const)('reuses only recoverable %s imports and never reuses cancelled or archived metadata', async failure => {
     vi.resetModules(); vi.resetAllMocks(); nodes.length = 0; stubDocument();
     vi.stubGlobal('confirm', vi.fn(() => true));
@@ -3397,7 +3424,7 @@ describe('UI persistence and transport wiring', () => {
     importing.resolve();
     await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
     expect(feedback.textContent).toBe(t('fillerAdded'));
-    expect(mocks.addFillerRecording).toHaveBeenCalledWith(picker.files[0], 'Device loop');
+    expect(mocks.addFillerRecording).toHaveBeenCalledWith(picker.files[0], 'Device loop', expect.any(AbortSignal));
     expect(mocks.editorSession.refreshFillers).toHaveBeenCalled();
     const preview = panel.querySelectorAll('button').find(node => node.title === t('previewFiller'))!;
     preview.click();

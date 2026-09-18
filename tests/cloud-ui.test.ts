@@ -2914,7 +2914,7 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     reading.resolve(app.data.blob);
     await vi.waitFor(() => expect(feedback.textContent).toBe(t('audioBatchDone')));
     await vi.waitFor(() => expect(button(t('refreshFillers')).disabled).toBe(false));
-    expect(appMocks.addFillerRecording).toHaveBeenCalledWith(expect.any(File), 'My_loop');
+    expect(appMocks.addFillerRecording).toHaveBeenCalledWith(expect.any(File), 'My_loop', expect.any(AbortSignal));
     expect(appMocks.removeFillerRecording).not.toHaveBeenCalled();
     const authoritative = app.server.fillers[0]!;
     expect(authoritative.id).toBe('household-filler');
