@@ -195,6 +195,8 @@ function notify(message: string, error = false): void {
 
 function selectTab(tab: typeof activeTab): void {
   const previous = activeTab;
+  // A confirmation describes the workspace that produced it; leaving retires it so the next one is its own.
+  if (previous !== tab && !notice.classList.contains('notice-error')) noticeDisplay.dismiss();
   if (activeTab !== tab) cancelCueDrag();
   if (tab !== 'teach') { cueEditing = false; cueTimeInvalid = false; }
   if (activeTab === 'edit' && tab !== 'edit') { fillerLibrary.leave(); stopEditorAudio(); }
