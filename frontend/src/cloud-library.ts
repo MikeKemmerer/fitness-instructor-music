@@ -1,4 +1,4 @@
-import type { CloudAsset, CloudRoutine, CloudRoutineSummary, FillerAnalysis } from '../../shared/cloud-contract';
+import type { CloudAsset, CloudRoutine, CloudRoutineSummary, FillerAnalysis, LibraryMetadata, ManagedAudioItem, ManagedAudioPage, LibraryUsagePage, LibraryDeleteResult } from '../../shared/cloud-contract';
 import { allRoutineFillers, allRoutineTracks, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import { cloudClient, CLOUD_CHUNK_BYTES, CloudRequestError, type CloudClient } from './cloud-client';
 import { cacheCloudRoutine, cacheCloudTrack, cacheFillerRecording, getFillerRecordingBlob, getTrackBlob } from './offline';
@@ -7,6 +7,26 @@ export const MAX_CLOUD_MEDIA_BYTES = 128 * 1024 * 1024;
 const CLOUD_DOWNLOAD_CONCURRENCY = 2;
 const downloadQueue: Array<() => void> = [];
 let activeDownloads = 0;
+
+export function isLibraryIntakeFilename(filename: unknown): filename is string {
+  return typeof filename === 'string' && filename.length <= 300 && !!filename.trim()
+    && !/[\\/:\x00-\x1f\x7f]/.test(filename) && filename !== '.' && filename !== '..';
+}
+
+export function validateLibraryIntakeFilename(filename: unknown): asserts filename is string {
+  if (!isLibraryIntakeFilename(filename)) throw new Error('invalid_audio');
+}
+
+export function validateLibraryIntakeDuration(kind: ManagedAudioItem['kind'], duration: unknown): asserts duration is number {
+  if (!Number.isFinite(duration) || (duration as number) <= 0 || (duration as number) > (kind === 'song' ? 1200 : 360)) {
+    throw new Error('invalid_audio');
+  }
+}
+
+export function validateLibraryIntake(kind: ManagedAudioItem['kind'], filename: unknown, duration: unknown): void {
+  validateLibraryIntakeFilename(filename);
+  validateLibraryIntakeDuration(kind, duration);
+}
 
 function withDownloadSlot(action: () => Promise<void>, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -154,6 +174,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
   const knownRemoteAssets = new Set<string>();
   const knownRecordings = new Map<string, FillerRecording>();
   const addedRecordings = new Map<string, FillerRecording>();
+  const pendingRecordings = new Map<string, CloudAsset>();
   const attempts = new Map<string, UploadAttempt>();
   const activeUploads = new Set<string>();
   let uploadOwner = '';
@@ -163,7 +184,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     const user = client.getUser()!;
     const owner = JSON.stringify([user.id, user.authVersion, user.role]);
     if (owner !== uploadOwner) {
-      uploaded.clear(); attempts.clear(); knownRemoteAssets.clear(); knownRecordings.clear(); addedRecordings.clear(); uploadOwner = owner;
+      uploaded.clear(); attempts.clear(); knownRemoteAssets.clear(); knownRecordings.clear(); addedRecordings.clear(); pendingRecordings.clear(); uploadOwner = owner;
     }
     const assert = () => {
       assertIdentity();
@@ -526,17 +547,28 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     const key = JSON.stringify(recording);
     let result = addedRecordings.get(key);
     if (!result) {
-      const asset = await uploadAsset(blob, transfer);
+      const pendingAsset = pendingRecordings.get(key);
+      if (pendingAsset) {
+        const recordings = await listFillers(transfer); assert();
+        const matches = recordings.filter(candidate => candidate.name === recording.name && candidate.duration === recording.duration && sameAsset(candidate.asset, pendingAsset));
+        if (matches.length !== 1) throw new Error('cloud_head_required');
+        result = matches[0]!;
+      }
+      const asset = pendingAsset ?? await uploadAsset(blob, transfer);
       assert();
-      result = recordingDescriptor(await client.request('/api/fillers', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: transfer.signal,
-        body: JSON.stringify({ name: recording.name, duration: recording.duration, asset }),
-      }));
+      if (!result) {
+        pendingRecordings.set(key, asset);
+        result = recordingDescriptor(await client.request('/api/fillers', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: transfer.signal,
+          body: JSON.stringify({ name: recording.name, duration: recording.duration, asset }),
+        }));
+      }
       assert();
       if (result.name !== recording.name || result.duration !== recording.duration || !sameAsset(result.asset, asset)) {
         throw new Error('cloud_invalid_response');
       }
       addedRecordings.set(key, result);
+      pendingRecordings.delete(key);
       knownRecordings.set(result.id, structuredClone(result));
     }
     assert();
@@ -727,5 +759,89 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       || typeof analysis.analyzer !== 'string' || !analysis.analyzer || (analysis.confidence !== undefined && (!Number.isFinite(analysis.confidence) || analysis.confidence < 0 || analysis.confidence > 1)))) throw new Error('cloud_invalid_response');
     return structuredClone(analysis);
   };
-  return { list, open, readHead, download, downloadTracks, stage, commit, save, replace, command, uploadAsset, audioPage, fillerAnalysis, listFillers, addFiller, removeFiller, ensureFiller, prepareFiller };
+  const libraryPath = (kind: ManagedAudioItem['kind'], id?: string) => {
+    if (!['song', 'filler'].includes(kind) || (id !== undefined && !safeId(id))) throw new Error('cloud_invalid_response');
+    return `/api/library/${kind === 'song' ? 'songs' : 'fillers'}${id === undefined ? '' : `/${encodeURIComponent(id)}`}`;
+  };
+  const metadataValue = (value: LibraryMetadata): LibraryMetadata => {
+    if (!value || !Number.isSafeInteger(value.revision) || value.revision < 0
+      || typeof value.title !== 'string' || value.title.length > 300 || typeof value.artist !== 'string' || value.artist.length > 300
+      || (value.bpm !== undefined && (!Number.isFinite(value.bpm) || value.bpm < 40 || value.bpm > 220))
+      || (value.filename !== undefined && !isLibraryIntakeFilename(value.filename))
+      || (value.duration !== undefined && (!Number.isFinite(value.duration) || value.duration <= 0 || value.duration > 1200))) throw new Error('cloud_invalid_response');
+    return structuredClone(value);
+  };
+  const pageCursor = (cursor?: string) => {
+    if (cursor !== undefined && (typeof cursor !== 'string' || !cursor || cursor.length > 4096)) throw new Error('cloud_invalid_response');
+    return cursor ? `?${new URLSearchParams({ cursor })}` : '';
+  };
+  const managedPage = async (kind: ManagedAudioItem['kind'], cursor?: string, transfer: CloudTransfer = {}): Promise<ManagedAudioPage> => {
+    const assert = operation(transfer, true);
+    const page = await client.request<ManagedAudioPage>(libraryPath(kind) + pageCursor(cursor), { signal: transfer.signal });
+    assert(); pageCursor(page.cursor);
+    if (!Array.isArray(page.items) || page.items.length > 512) throw new Error('cloud_invalid_response');
+    const items = page.items.map(item => {
+      if (!safeId(item.id) || item.kind !== kind) throw new Error('cloud_invalid_response');
+      const asset = assetDescriptor(item.asset);
+      const metadata = metadataValue(item.metadata);
+      const recording = kind === 'filler' ? recordingDescriptor(item.recording) : undefined;
+      if ((kind === 'song' && item.id !== asset.id) || (recording && (recording.id !== item.id || !sameAsset(recording.asset, asset)
+        || (metadata.duration !== undefined && metadata.duration > 360)))) throw new Error('cloud_invalid_response');
+      return { id: item.id, kind, asset, metadata, ...(recording ? { recording } : {}) };
+    });
+    if (new Set(items.map(item => item.id)).size !== items.length) throw new Error('cloud_invalid_response');
+    return { items, ...(page.cursor ? { cursor: page.cursor } : {}) };
+  };
+  const libraryMetadata = async (kind: ManagedAudioItem['kind'], id: string, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {
+    const assert = operation(transfer, true);
+    const result = await client.request<{ metadata: LibraryMetadata }>(`${libraryPath(kind, id)}/metadata`, { signal: transfer.signal });
+    assert(); return metadataValue(result.metadata);
+  };
+  const putLibraryMetadata = async (kind: ManagedAudioItem['kind'], id: string, revision: number,
+    value: Pick<LibraryMetadata, 'title' | 'artist' | 'bpm'>, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {
+    const assert = operation(transfer, true);
+    metadataValue({ ...value, revision });
+    const body = { title: value.title, artist: value.artist, ...(value.bpm === undefined ? {} : { bpm: value.bpm }) };
+    const result = await client.request<{ metadata: LibraryMetadata }>(`${libraryPath(kind, id)}/metadata`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': `"${revision}"` }, body: JSON.stringify(body), signal: transfer.signal,
+    });
+    assert();
+    const metadata = metadataValue(result.metadata);
+    if (metadata.revision !== revision + 1) throw new Error('cloud_invalid_response');
+    return metadata;
+  };
+  const recordLibraryIntake = async (kind: ManagedAudioItem['kind'], id: string, filename: string, duration: number, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {
+    const assert = operation(transfer, true);
+    validateLibraryIntake(kind, filename, duration);
+    const result = await client.request<{ metadata: LibraryMetadata }>(`${libraryPath(kind, id)}/intake`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'If-Match': '"0"' }, body: JSON.stringify({ filename, duration }), signal: transfer.signal });
+    assert();
+    const metadata = metadataValue(result.metadata);
+    if (metadata.revision !== 1 || metadata.filename !== filename || metadata.duration !== duration) throw new Error('cloud_invalid_response');
+    return metadata;
+  };
+  const libraryUsage = async (kind: ManagedAudioItem['kind'], id: string, cursor?: string, transfer: CloudTransfer = {}): Promise<LibraryUsagePage> => {
+    const assert = operation(transfer, true);
+    const result = await client.request<LibraryUsagePage>(`${libraryPath(kind, id)}/usage${pageCursor(cursor)}`, { signal: transfer.signal });
+    assert(); pageCursor(result.cursor);
+    if (typeof result.complete !== 'boolean' || !Array.isArray(result.references) || result.references.length > 512
+      || result.references.some(reference => !['routine', 'playlist', 'class', 'filler'].includes(reference.kind) || !safeId(reference.id)
+        || typeof reference.name !== 'string' || reference.name.length > 300
+        || (reference.revision !== undefined && (!Number.isSafeInteger(reference.revision) || reference.revision < 1)))) throw new Error('cloud_invalid_response');
+    return structuredClone(result);
+  };
+  const deleteLibraryItem = async (kind: ManagedAudioItem['kind'], id: string, revision: number, transfer: CloudTransfer = {}): Promise<LibraryDeleteResult> => {
+    const assert = operation(transfer, true);
+    if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('cloud_invalid_response');
+    const result = await client.requestJson<LibraryDeleteResult>(libraryPath(kind, id), {
+      method: 'DELETE', headers: { 'If-Match': `"${revision}"` }, signal: transfer.signal,
+    });
+    assert();
+    if (!result.body || typeof result.body !== 'object') throw new Error('cloud_invalid_response');
+    if (result.status === 200 && 'deleted' in result.body && result.body.deleted === true && result.body.bytesRetained === true) return result.body;
+    if (result.status === 202 && 'pending' in result.body && result.body.pending === true) return result.body;
+    throw new Error('cloud_invalid_response');
+  };
+  return { list, open, readHead, download, downloadTracks, stage, commit, save, replace, command, uploadAsset, audioPage, fillerAnalysis, listFillers, addFiller, removeFiller, ensureFiller, prepareFiller,
+    managedPage, libraryMetadata, putLibraryMetadata, recordLibraryIntake, libraryUsage, deleteLibraryItem };
 }

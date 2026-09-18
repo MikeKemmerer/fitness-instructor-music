@@ -10,6 +10,39 @@ Household music is never bundled. The exception is the specifically licensed pub
 - Original recorded pitch and tempo retained; not tempo-matched or pitch-shifted. A conditioned repeat is not a guarantee of perfect phrase alignment for every song. Audition before teaching.
 - Existing saved synthetic sounds are retained; choose **Lo-fi instrumental (CC0)** explicitly for an existing routine. Future revisions of this recording require a new asset ID, never overwriting these bytes.
 
+## Filler Production Recommendation
+
+For the requested upbeat instrumental house/dance loops, use
+[SuperCollider](https://github.com/supercollider/supercollider) as a separate
+production tool, then audition and render finished loops before importing them.
+It is an established open-source audio server and composition language with
+synthesis, sampling, effects and non-realtime rendering. Its GPL-3.0 software
+license is distinct from the rights to any composition, sample or preset used.
+An engine alone does not compose, arrange or mix a convincing dance track.
+
+[Tone.js](https://github.com/Tonejs/Tone.js) is the MIT-licensed alternative for
+interactive browser sequencing and sample-based instruments.
+[LMMS](https://github.com/LMMS/lmms) is a GPL-licensed desktop DAW for composing
+and mixing finished loops manually. These are recommendations, not newly added
+runtime dependencies, and popularity is not a guarantee of musical quality.
+
+For this player, prefer pre-rendered eight- or sixteen-bar loops with a clear
+groove, stable tempo, no vocals, a checked loop boundary, measured loudness/peaks
+and room for instructor speech. Audition on the actual class speakers before
+choosing a default. Keep synthesis and rendering off this resource-limited
+workstation during application verification; do not add another real-time clock
+or music engine to the class playback path.
+
+No replacement tracks are bundled by this change. A future public loop pack
+needs track-by-track rights allowing sample redistribution in the application,
+source URL, license evidence, attribution where required, source/derived hashes,
+transformation notes and a listening review. A "royalty-free" production license
+does not necessarily permit shipping the raw loop as a reusable app asset.
+Samples and supplied compositions need separate review even with open-source
+software. Preserve existing synthetic sound IDs for saved routines; introducing
+new recordings must not silently change their playback. The existing CC0 lo-fi
+loop remains available. No ambient-streamer files or deployment are changed here.
+
 ## PDF Font
 
 Noto Sans Regular from [Noto Fonts](https://github.com/notofonts/noto-fonts), distributed under SIL Open Font License 1.1. The unmodified font includes its upstream metadata; the full license ships in `frontend/public/licenses/NotoSans-LICENSE.txt` and the production distribution. PDF generation embeds this font; the font's license does not apply to the generated document.

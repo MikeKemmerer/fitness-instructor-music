@@ -41,6 +41,37 @@ export interface CloudAudioPage {
   cursor?: string;
 }
 
+export interface LibraryMetadata {
+  revision: number;
+  title: string;
+  artist: string;
+  bpm?: number;
+  filename?: string;
+  duration?: number;
+}
+
+export interface ManagedAudioItem {
+  id: string;
+  kind: 'song' | 'filler';
+  asset: CloudAsset;
+  metadata: LibraryMetadata;
+  recording?: import('./routine').FillerRecording;
+}
+
+export interface ManagedAudioPage {
+  items: ManagedAudioItem[];
+  cursor?: string;
+}
+
+export interface LibraryUsagePage {
+  references: Array<{ kind: 'routine' | 'playlist' | 'class' | 'filler'; id: string; name: string; revision?: number }>;
+  complete: boolean;
+  cursor?: string;
+}
+
+export type LibraryDeleteResult = { deleted: true; bytesRetained: true }
+  | { pending: true };
+
 export interface FillerAnalysis {
   bpm: number;
   confidence?: number;

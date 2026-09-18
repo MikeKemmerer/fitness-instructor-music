@@ -1,5 +1,5 @@
 import { Check, CloudUpload, Play, Plus, RefreshCw, ScanLine, Square, Trash2, X } from 'lucide';
-import type { FillerAnalysis } from '../../shared/cloud-contract';
+import type { FillerAnalysis, ManagedAudioItem } from '../../shared/cloud-contract';
 import type { Filler, FillerRecording } from '../../shared/routine';
 import type { AudioPreview, LoudnessEstimate } from '../../shared/preview-contract';
 import { addFillerRecording, getFillerRecordingBlob, listFillerRecordings, removeFillerRecording } from './offline';
@@ -14,6 +14,9 @@ import { element, field, iconButton, transientText } from './ui';
 
 interface FillerLibraryContext {
   hosted: boolean;
+  managed?: boolean;
+  busy?(): boolean;
+  working?(value: boolean): void;
   cloud: ReturnType<typeof createCloudLibrary>;
   preview: AudioPreview;
   analyzeLoudness?: (trackId: string) => Promise<LoudnessEstimate>;
@@ -64,15 +67,18 @@ export function createFillerLibrary(context: FillerLibraryContext) {
   const clippingWarning = element('p', 'preview-status clipping-warning');
   clippingWarning.setAttribute('role', 'status'); clippingWarning.hidden = true;
   let recordings: FillerRecording[] = [];
+  const catalogTitles = new Map<string, string>();
   let controller: AbortController | null = null;
   let disposed = false;
+  let refreshRequested = false;
+  let refreshQueued = false;
   let identity = '';
   let imported: { file: File; name: string; recording: FillerRecording; assertIdentity: () => void } | null = null;
   const ready = new Set<string>();
   const key = (recording: FillerRecording) => JSON.stringify(recording);
   const mutable = () => !context.hosted || ['owner', 'editor'].includes(getCloudRole() ?? '');
   const selected = () => recordings.find(recording => recording.id === selection.value);
-  const available = () => !disposed && context.isCurrent() && mutable() && !controller;
+  const available = () => !disposed && context.isCurrent() && mutable() && !controller && !context.busy?.();
   const connected = () => !context.hosted || getCloudContext().access === 'online';
   const report = (error: unknown) => { errors.show(context.hosted ? cloudErrorMessage(error) : errorMessage(error)); };
   const discardImport = async (entry: NonNullable<typeof imported>) => {
@@ -88,17 +94,20 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     placeholder.value = '';
     selection.append(placeholder);
     for (const recording of recordings) {
-      const option = element('option', '', fillerSoundLabel({ mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording }));
+      const title = catalogTitles.get(recording.id);
+      const option = element('option', '', title ? t('soundDuration', { name: title, seconds: formatNumber(recording.duration) })
+        : fillerSoundLabel({ mode: 'hold', seconds: 0, bpm: 100, sound: 'recording', recording }));
       option.value = recording.id;
       selection.append(option);
     }
     selection.value = recordings.some(recording => recording.id === current) ? current : '';
     sync();
   };
-  const run = async (action: (transfer: CloudTransfer, assert: () => void, assertIdentity: () => void) => Promise<void>, auditionOnly = false) => {
-    if (disposed || !context.isCurrent() || controller || (!auditionOnly && !mutable())) return;
+  const run = async (action: (transfer: CloudTransfer, assert: () => void, assertIdentity: () => void) => Promise<void>, auditionOnly = false, metadataOnly = false) => {
+    if (disposed || !context.isCurrent() || controller || context.busy?.() || (!auditionOnly && !mutable())) return;
     const current = new AbortController();
     controller = current;
+    if (!metadataOnly) context.working?.(true);
     errors.show(t('busy'), false);
     let assertIdentity = () => {};
     const assert = () => {
@@ -121,24 +130,30 @@ export function createFillerLibrary(context: FillerLibraryContext) {
       }
     } finally {
       if (controller === current) controller = null;
+      if (!metadataOnly) context.working?.(false);
       progress.hidden = true;
       if (!disposed) sync();
     }
   };
-  const refresh = () => run(async (transfer, assert) => {
-    if (context.hosted && getCloudContext().access !== 'online') await refreshCloudSession();
-    assert();
-    const result = context.hosted ? await context.cloud.listFillers(transfer) : await listFillerRecordings();
-    assert();
-    recordings = structuredClone(result);
-    render();
-    context.changed();
-    errors.show(t('fillerRefreshed'), false);
-  });
+  const refresh = async () => {
+    refreshRequested = true;
+    if (!available()) return;
+    refreshRequested = false;
+    await run(async (transfer, assert) => {
+      if (context.hosted && getCloudContext().access !== 'online') await refreshCloudSession();
+      assert();
+      const result = context.hosted ? await context.cloud.listFillers(transfer) : await listFillerRecordings();
+      assert();
+      recordings = structuredClone(result);
+      render();
+      context.changed();
+      errors.show(t('fillerRefreshed'), false);
+    }, false, true);
+  };
   const refreshButton = iconButton(t('refreshFillers'), RefreshCw, () => { void refresh(); });
   const add = iconButton(t(context.hosted ? 'uploadFiller' : 'addFiller'), context.hosted ? CloudUpload : Plus, () => {
     const chosen = file.files?.[0];
-    if (!available() || !connected() || !chosen) return;
+    if (context.managed || !available() || !connected() || !chosen) return;
     if (!chosen.size || chosen.size > 32 * 1024 * 1024) { errors.show(t('audioByteLimit')); return; }
     const label = (name.value.trim() || chosen.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim()).slice(0, 160);
     if (context.hosted && !confirm(t('confirmUploadFiller', { name: label }))) return;
@@ -148,7 +163,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
       try {
         if (!pending) {
           errors.show(t('preparingAudio', { name: chosen.name }), false);
-          const recording = await addFillerRecording(chosen, label);
+          const recording = await addFillerRecording(chosen, label, transfer.signal);
           pending = { file: chosen, name: label, recording, assertIdentity };
           imported = pending;
         }
@@ -188,7 +203,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
   }, true);
   const remove = iconButton(t('removeFiller'), Trash2, () => {
     const recording = selected();
-    if (!available() || !connected() || !recording || !confirm(t('confirmRemoveFiller', { name: recording.name }))) return;
+    if (context.managed || !available() || !connected() || !recording || !confirm(t('confirmRemoveFiller', { name: recording.name }))) return;
     void run(async (transfer, assert) => {
       if (context.hosted) await context.cloud.removeFiller(recording.id, transfer);
       else await removeFillerRecording(recording.id);
@@ -200,7 +215,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     });
   });
   const audition = async (filler: Filler): Promise<void> => {
-    if (disposed || !context.isCurrent() || controller) return;
+    if (disposed || !context.isCurrent() || controller || context.busy?.()) return;
     const snapshot = structuredClone(filler);
     const recording = snapshot.recording;
     if (recording && !ready.has(key(recording))) {
@@ -299,7 +314,10 @@ export function createFillerLibrary(context: FillerLibraryContext) {
   actions.append(play, stop, analyze, analyzeBpm, applyBpm, remove);
   const heading = element('div', 'section-heading');
   heading.append(element('h2', '', t('fillerLibrary')), refreshButton, cancel);
-  management.append(status, field(t('fillerRecordingName'), name), field(t('fillerFile'), file), add,
+  const nameField = field(t('fillerRecordingName'), name);
+  const fileField = field(t('fillerFile'), file);
+  nameField.hidden = fileField.hidden = add.hidden = remove.hidden = !!context.managed;
+  management.append(status, nameField, fileField, add,
     field(t('customFillers'), selection), details, actions, levelResult, clippingWarning,
     field(t('fillerBpmMetadata'), bpmInput), bpmResult, progress, feedback);
   const builtins = element('ul', 'filler-builtins');
@@ -328,7 +346,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     const owner = JSON.stringify(user ? [user.id, user.authVersion, user.role] : null);
     if (owner !== identity) {
       identity = owner;
-      controller?.abort(); recordings = []; ready.clear(); imported = null;
+      controller?.abort(); recordings = []; ready.clear(); catalogTitles.clear(); imported = null;
       file.value = ''; name.value = ''; selection.replaceChildren(); errors.dismiss();
       levelResult.textContent = '';
       clippingWarning.hidden = true; clippingWarning.textContent = ''; suggestedBpm = null;
@@ -353,15 +371,26 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     cancel.disabled = controller?.signal.aborted ?? false;
     const recording = selected();
     details.textContent = recording ? t('fillerRecordingDetails', { duration: formatTime(recording.duration), id: recording.id }) : '';
+    if (refreshRequested && available() && !refreshQueued) {
+      refreshQueued = true;
+      queueMicrotask(() => {
+        refreshQueued = false;
+        if (!disposed && refreshRequested) void refresh();
+      });
+    }
   }
   sync();
   return {
     element: root, refresh, sync, audition,
+    catalog(items: ManagedAudioItem[]) {
+      for (const item of items) if (item.kind === 'filler') catalogTitles.set(item.id, item.metadata.title);
+      render();
+    },
     choices: () => structuredClone(recordings),
     leave: () => { controller?.abort(); if (!controller && imported) void discardImport(imported); },
     dispose: () => {
       errors.dispose(); bpmErrors.dispose();
-      disposed = true; controller?.abort(); recordings = []; ready.clear();
+      disposed = true; refreshRequested = false; controller?.abort(); recordings = []; ready.clear();
       if (!controller && imported) void discardImport(imported);
     },
   };

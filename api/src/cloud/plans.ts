@@ -4,6 +4,7 @@ import type { CloudAsset, CloudRoutine } from '../../../shared/cloud-contract';
 import type { Filler } from '../../../shared/routine';
 import { ServiceError } from '../errors';
 import { parseFiller, parseRoutineContent, strictRecord, text } from '../validation';
+import type { ReferenceClaims } from './admission';
 import { CloudAuth } from './auth';
 import { ApiError, safeId } from './config';
 import { boundedContent, fillerAssetIds, resolveFillers, resolveMedia } from './content';
@@ -46,7 +47,7 @@ export class CloudPlaylists extends CloudDocuments<CloudMusicPlaylist, MusicPlay
   entity(body: CloudMusicPlaylist): MusicPlaylist { return body.playlist; }
   withEntity(body: CloudMusicPlaylist, playlist: MusicPlaylist): CloudMusicPlaylist { return { ...body, playlist }; }
 
-  async parse(input: unknown): Promise<CloudMusicPlaylist> {
+  async parse(input: unknown, _headers?: Headers, claims?: ReferenceClaims): Promise<CloudMusicPlaylist> {
     const envelope = strictRecord(input, ['playlist', 'media']);
     const record = strictRecord(envelope.playlist, [...stateKeys, 'tracks']);
     if (record.schemaVersion !== 1 && record.schemaVersion !== 2) throw new ApiError(400, 'invalid_input');
@@ -55,7 +56,7 @@ export class CloudPlaylists extends CloudDocuments<CloudMusicPlaylist, MusicPlay
       filler: { mode: 'none', seconds: 0, bpm: 100, sound: 'soft' }, crossfade: 0, beepEvery: 0, beepRemaining: 0 });
     if (tracks.some(track => !safeId(track.id))) throw new ApiError(400, 'invalid_id');
     if (tracks.some(track => track.cues.length !== 0 || track.after !== undefined)) throw new ApiError(400, 'playlist_choreography_forbidden');
-    return boundedContent({ playlist: { ...metadata, tracks }, media: await resolveMedia(envelope.media, tracks, this.media) });
+    return boundedContent({ playlist: { ...metadata, tracks }, media: await resolveMedia(envelope.media, tracks, this.media, claims) });
   }
 
   validatePublication(body: CloudMusicPlaylist): void {
@@ -92,7 +93,7 @@ export class CloudClasses extends CloudDocuments<CloudClassSetup, ClassSetup> {
   entity(body: CloudClassSetup): ClassSetup { return body.setup; }
   withEntity(body: CloudClassSetup, setup: ClassSetup): CloudClassSetup { return { ...body, setup }; }
 
-  async parse(input: unknown, headers: Headers): Promise<CloudClassSetup> {
+  async parse(input: unknown, headers: Headers, claims?: ReferenceClaims): Promise<CloudClassSetup> {
     let setup: ClassSetup;
     try {
       const envelope = strictRecord(input, ['setup']);
@@ -111,8 +112,13 @@ export class CloudClasses extends CloudDocuments<CloudClassSetup, ClassSetup> {
       if (error instanceof ApiError || error instanceof ServiceError) throw error;
       throw new ApiError(400, 'invalid_input');
     }
-    await this.resolve(headers, setup);
-    await resolveFillers(announcements(setup), this.fillers);
+    const resolved = await this.resolve(headers, setup);
+    if (claims) {
+      await this.routines.parse(resolved.routine, headers, claims);
+      if (resolved.walkIn) await this.playlists.parse(resolved.walkIn, headers, claims);
+      if (resolved.walkOut) await this.playlists.parse(resolved.walkOut, headers, claims);
+    }
+    await resolveFillers(announcements(setup), this.fillers, claims);
     return boundedContent({ setup });
   }
 

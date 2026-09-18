@@ -75,6 +75,71 @@ export function createClassLibrary(client: CloudClient = cloudClient, media = cr
     assert(); exact(value.playlist, reference);
     return value;
   };
+  const remoteAssets = new Set<string>();
+  const readPlaylistHead = async (id: string, transfer: CloudTransfer = {}): Promise<CloudMusicPlaylist> => {
+    const assert = guard(transfer, true);
+    const result = parseCloudPlaylist(await client.request(path('playlists', id), { signal: transfer.signal }));
+    assert();
+    if (result.playlist.id !== id || result.playlist.published) throw new Error('cloud_invalid_response');
+    for (const asset of Object.values(result.media)) remoteAssets.add(asset.id);
+    return result;
+  };
+  const stagePlaylist = async (playlist: MusicPlaylist, knownMedia: Record<string, AudioAsset> = {},
+    transfer: CloudTransfer = {}): Promise<CloudMusicPlaylist> => {
+    const assert = guard(transfer, true); assert();
+    if (validateMusicPlaylist(playlist).length) throw new Error('invalid_playlist');
+    if (playlist.published || playlist.locked) throw new Error('cloud_head_required');
+    const snapshot = structuredClone(playlist);
+    const assets: Record<string, AudioAsset> = {};
+    for (const track of snapshot.tracks) {
+      const blob = await offline.getTrackBlob(track.id); assert();
+      if (!blob) throw new Error('missing_audio');
+      const known = knownMedia[track.id];
+      let reusable = !!known && known.bytes === blob.size && known.contentType === canonicalAudioType(blob.type)
+        && known.sha256 === await cloudHash(blob);
+      assert();
+      const changedBytes = !!known && !reusable;
+      if (reusable) {
+        try {
+          const response = await client.request<{ asset: AudioAsset }>(`/api/media/${encodeURIComponent(known!.id)}`, { signal: transfer.signal });
+          assert();
+          const actual = response.asset;
+          if (!actual || actual.id !== known!.id || actual.sha256 !== known!.sha256 || actual.bytes !== known!.bytes
+            || actual.contentType !== known!.contentType) throw new Error('track_integrity_failed');
+          remoteAssets.add(actual.id);
+        } catch (error) {
+          assert();
+          if (!(error instanceof CloudRequestError && error.status === 404)
+            || known!.id !== track.id || remoteAssets.has(known!.id)) throw error;
+          reusable = false;
+        }
+      }
+      if (reusable) assets[track.id] = structuredClone(known!);
+      else {
+        const asset = await media.uploadAsset(blob, transfer); assert();
+        remoteAssets.add(asset.id);
+        if (changedBytes) { track.id = crypto.randomUUID(); await offline.cacheCloudTrack(track.id, blob, asset.sha256); assert(); }
+        assets[track.id] = asset;
+      }
+    }
+    return { playlist: snapshot, media: assets };
+  };
+  const commitPlaylist = async (envelope: CloudMusicPlaylist, baseRevision: number | null,
+    transfer: CloudTransfer = {}): Promise<CloudMusicPlaylist> => {
+    const assert = guard(transfer, true); assert();
+    const snapshot = parseCloudPlaylist(envelope);
+    if (snapshot.playlist.locked || snapshot.playlist.published || baseRevision !== null
+      && (!Number.isSafeInteger(baseRevision) || baseRevision < 1 || snapshot.playlist.revision !== baseRevision)) throw new Error('cloud_head_required');
+    if (baseRevision === null) snapshot.playlist.revision = 1;
+    const result = parseCloudPlaylist(await client.request(baseRevision === null ? '/api/playlists' : path('playlists', snapshot.playlist.id), {
+      method: baseRevision === null ? 'POST' : 'PUT', signal: transfer.signal,
+      headers: { 'Content-Type': 'application/json', ...(baseRevision === null ? {} : { 'If-Match': `"${baseRevision}"` }) },
+      body: JSON.stringify(snapshot),
+    }));
+    assert();
+    if (result.playlist.id !== snapshot.playlist.id || result.playlist.revision !== (baseRevision ?? 0) + 1) throw new Error('cloud_invalid_response');
+    return result;
+  };
   const savePlaylist = async (playlist: MusicPlaylist, previous: CloudMusicPlaylist | null,
     action: LibraryAction = 'save', transfer: CloudTransfer = {}, reusableMedia: Record<string, AudioAsset> = {}): Promise<CloudMusicPlaylist> => {
     const assert = guard(transfer, true);
@@ -220,5 +285,5 @@ export function createClassLibrary(client: CloudClient = cloudClient, media = cr
     for (const phase of ['walkIn', 'walkOut'] as const) if (!resolved.audio[phase]?.tracks.length) delete resolved.audio[phase];
     return resolved;
   };
-  return { listPlaylists, listClasses, readPlaylist, savePlaylist, saveClass, prepare, legacy };
+  return { listPlaylists, listClasses, readPlaylist, readPlaylistHead, stagePlaylist, commitPlaylist, savePlaylist, saveClass, prepare, legacy };
 }

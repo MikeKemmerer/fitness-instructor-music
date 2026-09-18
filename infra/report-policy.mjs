@@ -13,8 +13,8 @@ export const requiredHostedCaseNames = Object.freeze([
   'household Practice cue Save keeps the current prepared revision paused without autoplay or media downloads',
   'class authors prepare cold drafts and players restore exact published setups after source republish offline',
   'real PCM upload/publish/download reaches a player-only Edit selection view without author controls or private writes',
-  'cold Prepare preserves playing audio on failure, then a fresh local draft reuses the archived exact ID without filler allocation',
-  'UserFiller shares across authors, uses two-tap downloaded preview and remains published/playable after archive',
+  'cold Prepare preserves playing audio on failure, then a fresh local draft reuses the referenced exact ID without filler allocation',
+  'UserFiller shares across authors, uses two-tap downloaded preview and blocks deletion while published/playable',
   'session invalidation cancels a pending actual PDF before its delayed font response resolves',
 ]);
 

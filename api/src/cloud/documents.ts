@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { strictRecord } from '../validation';
+import { admitted, type ReferenceClaims } from './admission';
 import { CloudAuth, type Authenticated } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
 import { QuotaBudget } from './quota';
@@ -28,14 +29,14 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
     this.budget = new QuotaBudget(store);
   }
 
-  abstract parse(input: unknown, headers: Headers): Promise<Body>;
+  abstract parse(input: unknown, headers: Headers, claims?: ReferenceClaims): Promise<Body>;
   abstract entity(body: Body): Entity;
   abstract withEntity(body: Body, entity: Entity): Body;
   abstract copy(body: Body): Body;
   abstract validatePublication(body: Body): void;
 
   saved(body: Body): Body { return body; }
-  validateReplacement(_previous: Body, _next: Body): void {}
+  validateReplacement(_previous: Body, _next: unknown): void {}
 
   get root(): string { return this.kind === 'class' ? 'classes' : `${this.kind}s`; }
   get indexPrefix(): string { return this.kind === 'routine' ? 'heads/' : `${this.root}/index/`; }
@@ -188,63 +189,66 @@ export abstract class CloudDocuments<Body, Entity extends DocumentState> {
 
   async create(headers: Headers, input: unknown): Promise<Body> {
     const actor = await this.auth.authenticate(headers, true, true);
-    const body = this.saved(await this.parse(input, headers));
-    const entity = this.entity(body);
-    if (entity.revision !== 1 || entity.locked || entity.published) throw new ApiError(400, `invalid_${this.kind}_state`);
-    const id = entity.id;
-    if (await readJson(this.store, this.headKey(id), HEAD_BYTES)) throw new ApiError(409, `${this.kind}_exists`);
-    const key = `${this.snapshotPrefix(id)}${randomUUID()}`;
-    const head = this.boundedHead({ draft: this.pointer(key, body), deleted: false, history: [{ revision: 1, draft: key }] });
-    await this.budget.charge(encode(body).length + HEAD_BYTES + 4096, { routine: true });
-    await this.store.put(key, encode(body), null);
-    try { await this.store.put(`${this.indexPrefix}${id}`, encode({ id }), null); }
-    catch (error) { if (!(error instanceof BlobConflict)) throw error; }
-    await this.recheck(headers, actor);
-    try { await this.store.put(this.headKey(id), head, null); }
-    catch (error) { if (error instanceof BlobConflict) throw new ApiError(412, 'revision_conflict'); throw error; }
-    return body;
+    return admitted(this.store, async claims => {
+      const body = this.saved(await this.parse(input, headers, claims));
+      const entity = this.entity(body);
+      if (entity.revision !== 1 || entity.locked || entity.published) throw new ApiError(400, `invalid_${this.kind}_state`);
+      const id = entity.id;
+      if (await readJson(this.store, this.headKey(id), HEAD_BYTES)) throw new ApiError(409, `${this.kind}_exists`);
+      const key = `${this.snapshotPrefix(id)}${randomUUID()}`;
+      const head = this.boundedHead({ draft: this.pointer(key, body), deleted: false, history: [{ revision: 1, draft: key }] });
+      await this.budget.charge(encode(body).length + HEAD_BYTES + 4096, { routine: true });
+      claims.uncertain = true;
+      await this.store.put(key, encode(body), null);
+      try { await this.store.put(`${this.indexPrefix}${id}`, encode({ id }), null); }
+      catch (error) { if (!(error instanceof BlobConflict)) throw error; }
+      await this.recheck(headers, actor);
+      try { await this.store.put(this.headKey(id), head, null); }
+      catch (error) { if (error instanceof BlobConflict) throw new ApiError(412, 'revision_conflict'); throw error; }
+      return body;
+    });
   }
 
   async mutate(headers: Headers, id: string, action: Mutation, input?: unknown): Promise<Body> {
     const actor = await this.auth.authenticate(headers, true, true);
-    if (!['save', 'lock', 'unlock', 'publish', 'delete'].includes(action) || (input !== undefined && action !== 'save' && action !== 'lock')) {
-      throw new ApiError(400, 'invalid_input');
-    }
-    const expected = revisionHeader(headers.get('if-match'));
-    const { value: oldHead, etag } = await this.head(id);
-    if (oldHead.draft.locked && action !== 'unlock' && !(action === 'lock' && input === undefined)) throw new ApiError(423, `${this.kind}_locked`);
-    if (oldHead.draft.revision !== expected) throw new ApiError(412, 'revision_conflict');
-    if (expected >= Number.MAX_SAFE_INTEGER) throw new ApiError(412, 'revision_exhausted');
-    const history = this.history(oldHead);
-    if (history.length >= HISTORY_LIMIT) throw new ApiError(409, 'revision_limit_reached');
-    const previous = await this.snapshot(oldHead.draft);
-    let body: Body = input === undefined ? previous : await this.parse(input, headers);
-    if (input !== undefined) this.validateReplacement(previous, body);
-    const entity = this.entity(body);
-    if (entity.id !== id || entity.revision !== expected || entity.locked !== oldHead.draft.locked || entity.published) {
-      throw new ApiError(400, `invalid_${this.kind}_state`);
-    }
-    if (action === 'publish') {
-      body = await this.parse(body, headers);
-      this.validatePublication(body);
-    }
-    if (input !== undefined || action === 'save') body = this.saved(body);
-    body = this.withEntity(body, { ...this.entity(body), revision: expected + 1,
-      locked: action === 'lock' ? true : action === 'unlock' ? false : entity.locked, published: false });
-    const publication = action === 'publish' ? this.withEntity(body, { ...this.entity(body), published: true }) : undefined;
-    const key = `${this.snapshotPrefix(id)}${randomUUID()}`;
-    const publicationKey = publication ? `${this.snapshotPrefix(id, true)}${randomUUID()}` : undefined;
-    history.push({ revision: expected + 1, draft: key, ...(publicationKey ? { published: publicationKey } : {}) });
-    const head = this.boundedHead({ draft: this.pointer(key, body),
-      published: publicationKey && publication ? this.pointer(publicationKey, publication) : oldHead.published,
-      deleted: action === 'delete', history });
-    await this.budget.charge(encode(body).length + (publication ? encode(publication).length : 0) + HEAD_BYTES);
-    await this.store.put(key, encode(body), null);
-    if (publicationKey && publication) await this.store.put(publicationKey, encode(publication), null);
-    await this.recheck(headers, actor);
-    try { await this.store.put(this.headKey(id), head, etag); }
-    catch (error) { if (error instanceof BlobConflict) throw new ApiError(412, 'revision_conflict'); throw error; }
-    return publication ?? body;
+    return admitted(this.store, async claims => {
+      if (!['save', 'lock', 'unlock', 'publish', 'delete'].includes(action) || (input !== undefined && action !== 'save' && action !== 'lock')) {
+        throw new ApiError(400, 'invalid_input');
+      }
+      const expected = revisionHeader(headers.get('if-match'));
+      const { value: oldHead, etag } = await this.head(id);
+      if (oldHead.draft.locked && action !== 'unlock' && !(action === 'lock' && input === undefined)) throw new ApiError(423, `${this.kind}_locked`);
+      if (oldHead.draft.revision !== expected) throw new ApiError(412, 'revision_conflict');
+      if (expected >= Number.MAX_SAFE_INTEGER) throw new ApiError(412, 'revision_exhausted');
+      const history = this.history(oldHead);
+      if (history.length >= HISTORY_LIMIT) throw new ApiError(409, 'revision_limit_reached');
+      const previous = await this.snapshot(oldHead.draft);
+      if (input !== undefined) this.validateReplacement(previous, input);
+      let body: Body = await this.parse(input === undefined ? previous : input, headers, claims);
+      const entity = this.entity(body);
+      if (entity.id !== id || entity.revision !== expected || entity.locked !== oldHead.draft.locked || entity.published) {
+        throw new ApiError(400, `invalid_${this.kind}_state`);
+      }
+      if (action === 'publish') this.validatePublication(body);
+      if (input !== undefined || action === 'save') body = this.saved(body);
+      body = this.withEntity(body, { ...this.entity(body), revision: expected + 1,
+        locked: action === 'lock' ? true : action === 'unlock' ? false : entity.locked, published: false });
+      const publication = action === 'publish' ? this.withEntity(body, { ...this.entity(body), published: true }) : undefined;
+      const key = `${this.snapshotPrefix(id)}${randomUUID()}`;
+      const publicationKey = publication ? `${this.snapshotPrefix(id, true)}${randomUUID()}` : undefined;
+      history.push({ revision: expected + 1, draft: key, ...(publicationKey ? { published: publicationKey } : {}) });
+      const head = this.boundedHead({ draft: this.pointer(key, body),
+        published: publicationKey && publication ? this.pointer(publicationKey, publication) : oldHead.published,
+        deleted: action === 'delete', history });
+      await this.budget.charge(encode(body).length + (publication ? encode(publication).length : 0) + HEAD_BYTES);
+      claims.uncertain = true;
+      await this.store.put(key, encode(body), null);
+      if (publicationKey && publication) await this.store.put(publicationKey, encode(publication), null);
+      await this.recheck(headers, actor);
+      try { await this.store.put(this.headKey(id), head, etag); }
+      catch (error) { if (error instanceof BlobConflict) throw new ApiError(412, 'revision_conflict'); throw error; }
+      return publication ?? body;
+    });
   }
 
   async duplicate(headers: Headers, id: string, published: boolean, revision?: number): Promise<Body> {

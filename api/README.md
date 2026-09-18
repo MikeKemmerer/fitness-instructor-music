@@ -1,5 +1,119 @@
 # Cloud HTTP API
 
+## Uploaded Audio Management
+
+September 17 source implementation; deployment status is recorded separately.
+Public response interfaces are `LibraryMetadata`,
+`ManagedAudioItem`, `ManagedAudioPage`, `LibraryUsagePage`, `LibraryDeleteResult`
+in `shared/cloud-contract.ts`.
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/library/{songs,fillers}?cursor=...` | Author-only completed, non-deleted metadata page. |
+| `GET /api/library/{songs,fillers}/{id}/metadata` | `{metadata}`, quoted metadata ETag; unknown initial revision 0. |
+| `PUT .../{id}/metadata` | Exactly `{title,artist,bpm?}`, quoted If-Match; returns `{metadata}`. |
+| `PUT .../{id}/intake` | Exactly `{filename,duration}`, If-Match `"0"`, only before metadata exists; returns revision 1. |
+| `GET .../{id}/usage?cursor=...` | Bounded references, completeness and optional cursor; informational only. |
+| `DELETE .../{id}` | Empty body, metadata If-Match; 200 `{deleted:true,bytesRetained:true}`, 202 `{pending:true}`, or explicit failure. |
+
+Owner/editor, current-account, cookie, same-origin, CSRF and private/no-store
+protections apply. Unknown/duplicate/inapplicable query parameters and unsupported
+methods fail closed. No force or purge route. Upload remains the existing explicit
+chunk/hash/signature-verified media protocol; intake cannot publish arbitrary media.
+Title/artist permit unknown empty strings, max300 characters; optional BPM40..220.
+Metadata JSON is capped at4KiB. Intake requires basename-only filename max300,
+finite duration >0..1200 songs or >0..360 fillers. Duration is client-measured,
+validated against a completed catalog asset, not independently measured by API.
+Metadata writes preserve intake facts and never modify snapshots or recording
+name/duration/hash. Initial title/duration/BPM fallback uses only verified current
+routine/playlist references in one bounded scan; unavailable facts remain unknown.
+Unknown legacy history blocks deletion, not description of a valid current draft. Edited titles
+and BPM apply to future Add-track selection, not saved drafts/publications.
+
+Songs deliberately includes every completed asset, even assets also used by filler
+recordings. Fillers uses recording IDs and `kind:'filler'`; songs uses asset IDs and
+`kind:'song'`. Thus overlap is explicit and unreferenced uploads are never hidden.
+Deleting a song is blocked by retained filler descriptors. Filler deletion ignores
+only its own descriptor, blocks other uses of the underlying asset, writes a
+separate filler tombstone and retains the song asset. Legacy archived descriptors
+remain readable, but legacy `DELETE /api/fillers/{id}` now requires metadata
+If-Match and the SAME unused-only check (200 `{archived:true}` compatibility body,
+202 pending). It cannot archive referenced audio anymore.
+
+### Admission And Activation Gate
+
+`library/gates/{assetId}` is a durable per-asset CAS record. Each new reference
+claims that record before authoritative media/filler resolution, retains the claim
+through immutable staging and the document head/filler record commit, and releases
+only after definitive success. Save, save-and-lock, lock/unlock, duplicate, publish,
+document deletion, every routine phase and filler, playlists, exact class-reference
+assets and filler creation participate. Metadata writes also participate to fence
+the DELETE metadata revision. Claim acquisition and closure compete on the SAME
+ETag: either a writer is admitted and DELETE sees a blocker, or DELETE closes
+admission and the writer cannot resolve/commit the new reference. Historical reads
+do not consult admission; completed-upload replay cannot clear a tombstone.
+
+**Operator gate is required; no configuration-free mixed-version barrier exists
+in this BlobStore abstraction.** DELETE returns503 `library_delete_unconfigured`
+until private control record `control/library-admission-v1` is exactly
+`{"version":1,"exclusiveWriters":true}`. The API never creates this record and has
+no activation endpoint. A separately authorized operator must first drain ALL old
+workers/in-flight writers, establish that every writer uses this protocol, audit
+retained discovery/head/history consistency, and only then attest activation.
+No private records/settings were inspected or changed in this implementation.
+The initial release intentionally leaves this activation gate unset. Listing,
+upload, preview and metadata editing remain available; media Delete does not.
+Routine deletion is a separate existing operation and remains available.
+Rollback to an old writer requires disabling DELETE and draining checking work
+first. Do not set this marker merely because one new worker is healthy.
+
+Ambiguous writes, crashes and staged-but-uncommitted writes retain durable claims;
+no timed expiry or automatic reconciliation. They return409
+`reference_write_pending`, possibly indefinitely. Reconciliation requires an
+operator to prove the writer is stopped and all staged/committed references are
+known; no unsafe claim-clear HTTP route exists. Conservative quota exhaustion can
+also retain a blocker. A safety gate is not a distributed transaction or lease.
+
+With admission closed, DELETE scans retained routine/playlist/class heads (including
+tombstoned heads), all linked drafts/publications, exact legacy class references
+and retained filler descriptors. Unknown/gapped history, dangling indexes, missing
+snapshots, descriptor mismatches and malformed storage return503
+`reference_scan_uncertain`, retaining closure. Known use returns409 `media_in_use`
+and reopens admission. Checkpoints are persisted in the gate; only the same
+kind/ID/metadata revision can continue. Filler finalization first CAS-marks scan
+completion, then writes its permanent tombstone before reopening asset admission.
+No logical deletion path invokes physical `BlobStore.delete`; no storage refund,
+purge or reclamation. Unsynced drafts on other devices are unknowable to Cloud;
+new saves using deleted audio fail without changing those local drafts.
+
+Finite limits:32 storage keys per manager page (including empty chunk-only pages),
+128 keys per existing Add-track page, at most8 snapshot reads/8MiB payload/20seconds
+per reference scan,32 scan steps,512 combined documents,128 retained revisions per
+head and512 fillers. Gate is16KiB/max128 simultaneous claims per asset; each writer
+claims at most256 unique assets. Metadata/gate writes use existing conservative
+5GiB/20,000-operation quota controls. Completed catalogs remain bounded by4096
+assets. Cursor size is4KiB for lists and8KiB for usage/checkpoints. Lists are not
+transactional snapshots; usage GET is never authorization to delete.
+
+### Validation
+
+Run checks serially with Node22.12+ from the repository root. CI owns browser
+verification; do not start local browser suites on the resource-limited workstation.
+
+```sh
+NODE_OPTIONS=--max-old-space-size=512 npm --prefix api test -- --pool=threads --maxWorkers=1 -t 'uploaded audio'
+NODE_OPTIONS=--max-old-space-size=768 npm --prefix api test -- --pool=threads --maxWorkers=1 --bail=1
+NODE_OPTIONS=--max-old-space-size=512 npm --prefix api run typecheck
+NODE_OPTIONS=--max-old-space-size=512 npm --prefix api run build
+```
+
+New describe groups: `uploaded audio management HTTP (synthetic Blob store)`,
+`uploaded audio durable admission races (two instances)`, and
+`uploaded audio retained history and finite scans`. Existing shared-filler tests
+now seed legacy archives explicitly for historical-read compatibility and test
+current unused-only deletion separately. All are synthetic domain/HTTP-adapter
+tests; they do not establish deployed ingress security or production activation.
+
 ## Approved Class Workflow
 
 September 15 implementation: independent playlists and class setups use the real

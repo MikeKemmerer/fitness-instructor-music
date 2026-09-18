@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPTransaction } from 'idb';
-import { allRoutineFillers, allRoutineTracks, newRoutine, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import { allRoutineFillers, allRoutineTracks, newRoutine, validFillerRecording, validateRoutine, type AudioAsset, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { CloudRoutine } from '../../shared/cloud-contract';
 import { AAC_IMPORT } from '../../shared/audio-import';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from './hosted-session';
@@ -19,6 +19,7 @@ interface StoredTrack {
 }
 
 interface RehearsalDatabase extends DBSchema {
+  playlistWorkingCopies: { key: string; value: PlaylistWorkingCopy };
   routineWorkingCopies: { key: string; value: RoutineWorkingCopy };
   cloudRoutineEnvelopes: { key: string; value: CloudRoutine };
   draftRecovery: { key: string; value: DraftRecovery };
@@ -39,6 +40,7 @@ interface RehearsalDatabase extends DBSchema {
 
 interface MutationSession {
   assert(): void;
+  signal?: AbortSignal;
 }
 
 let hostedGeneration = 0;
@@ -93,7 +95,7 @@ function captureMutationSession(): MutationSession | undefined {
 
 async function database(session = captureMutationSession()) {
   session?.assert();
-  const connection = await openDB<RehearsalDatabase>('fitness-rehearsal', 7, {
+  const connection = await openDB<RehearsalDatabase>('fitness-rehearsal', 8, {
     upgrade(connection, oldVersion, _newVersion, transaction) {
       try { session?.assert(); }
       catch { transaction.abort(); return; }
@@ -105,6 +107,7 @@ async function database(session = captureMutationSession()) {
       if (oldVersion < 3) connection.createObjectStore('cloudRoutines');
       if (oldVersion < 4) connection.createObjectStore('fillerRecordings');
       if (oldVersion < 6) connection.createObjectStore('draftRecovery');
+      if (oldVersion < 8) connection.createObjectStore('playlistWorkingCopies');
       if (oldVersion < 7) {
         connection.createObjectStore('routineWorkingCopies');
         connection.createObjectStore('cloudRoutineEnvelopes');
@@ -133,7 +136,7 @@ async function database(session = captureMutationSession()) {
   return connection;
 }
 
-type StoreName = 'routineWorkingCopies' | 'cloudRoutineEnvelopes' | 'draftRecovery' | 'tracks' | 'routines' | 'cloudRoutines' | 'fillerRecordings' | 'meta' | 'routineHistory' |
+type StoreName = 'playlistWorkingCopies' | 'routineWorkingCopies' | 'cloudRoutineEnvelopes' | 'draftRecovery' | 'tracks' | 'routines' | 'cloudRoutines' | 'fillerRecordings' | 'meta' | 'routineHistory' |
   'cloudRoutineHistory' | 'musicPlaylists' | 'musicPlaylistHistory' | 'cloudMusicPlaylists' |
   'classSetups' | 'classSetupHistory' | 'cloudClassSetups';
 
@@ -147,6 +150,7 @@ async function mutate<Stores extends StoreName[], Result>(
     const transaction = connection.transaction(stores, 'readwrite');
     const abort = () => { try { transaction.abort(); } catch {} };
     if (session) pendingMutations.add(abort);
+    session?.signal?.addEventListener('abort', abort, { once: true });
     void transaction.done.catch(() => undefined);
     try {
       session?.assert();
@@ -162,6 +166,7 @@ async function mutate<Stores extends StoreName[], Result>(
       throw error;
     } finally {
       pendingMutations.delete(abort);
+      session?.signal?.removeEventListener('abort', abort);
     }
   } finally {
     connection.close();
@@ -182,6 +187,258 @@ export interface DraftRecovery {
   baseRevision: number | null;
   media: Record<string, import('../../shared/routine').AudioAsset>;
   updatedAt: number;
+}
+
+type LocalAudioReference = { kind: 'routine' | 'playlist' | 'class' | 'filler'; id: string; name: string; revision?: number };
+const audioReferenceStores = ['routines', 'routineHistory', 'cloudRoutines', 'cloudRoutineHistory',
+  'cloudRoutineEnvelopes', 'routineWorkingCopies', 'musicPlaylists', 'musicPlaylistHistory',
+  'cloudMusicPlaylists', 'playlistWorkingCopies', 'classSetups', 'classSetupHistory',
+  'cloudClassSetups', 'draftRecovery', 'fillerRecordings', 'tracks'] as const;
+
+export async function inspectLocalAudioReferences(asset: AudioAsset, recordingId?: string): Promise<{
+  references: Array<{ kind: 'routine' | 'playlist' | 'class' | 'filler'; id: string; name: string; revision?: number }>;
+  complete: boolean;
+}> {
+  const session = captureMutationSession();
+  const references: LocalAudioReference[] = [];
+  let complete = true;
+  let connection: Awaited<ReturnType<typeof database>> | undefined;
+  let transaction: IDBPTransaction<RehearsalDatabase, Array<typeof audioReferenceStores[number]>, 'readonly'> | undefined;
+  type Node = { reference: LocalAudioReference; key: string; tracks: string[]; matched: boolean; dependencies: string[] };
+  type Legacy = { matched: boolean; complete: boolean; blob?: Blob };
+  const nodes: Node[] = [];
+  const exact = new Map<string, Node[]>();
+  const descriptors = new Map<string, Map<string, boolean>>();
+  const legacy = new Map<string, Legacy>();
+  let metadataBytes = 0;
+  let trackReferences = 0;
+  let hashBytes = 0;
+  let hashCount = 0;
+  let reads = 0;
+  const limit = (): never => { throw new Error('local_audio_inspection_limit'); };
+  const keyFor = (kind: string, value: RevisionReference, cloud: boolean) =>
+    JSON.stringify([cloud, kind, value.id, value.revision, value.published]);
+  const matches = (value: AudioAsset): boolean => {
+    if (!validFillerRecording({ id: 'descriptor', name: 'Descriptor', duration: 1, asset: value })) {
+      throw new Error('invalid_audio_descriptor');
+    }
+    return value.id === asset.id || value.sha256 === asset.sha256;
+  };
+  const addDocument = (kind: 'routine' | 'playlist' | 'class', value: Routine | MusicPlaylist | ClassSetup,
+    cloud: boolean, retained: boolean, media?: Record<string, AudioAsset>) => {
+    if (kind === 'routine') {
+      const routine = value as Routine;
+      checkRoutine(routine);
+      const fields = (record: object, allowed: string[]) => {
+        if (Object.keys(record).some(field => !allowed.includes(field))) complete = false;
+      };
+      fields(routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
+        'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'sequence', 'savedAt']);
+      for (const track of allRoutineTracks(routine)) {
+        fields(track, ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
+        if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
+        for (const cue of track.cues) {
+          fields(cue, ['id', 'anchor', 'note', 'beep']);
+          fields(cue.anchor, cue.anchor.kind === 'count' ? ['kind', 'count'] : ['kind', 'seconds']);
+        }
+      }
+      for (const filler of allRoutineFillers(routine)) {
+        fields(filler, ['mode', 'seconds', 'bpm', 'sound', 'gain', 'recording']);
+        if (filler.recording) {
+          fields(filler.recording, ['id', 'name', 'duration', 'asset']);
+          fields(filler.recording.asset, ['id', 'sha256', 'bytes', 'contentType']);
+        }
+      }
+    }
+    else if (kind === 'playlist') checkedMusicPlaylist(value as MusicPlaylist);
+    else checkedClassSetup(value as ClassSetup);
+    const node: Node = { reference: { kind, id: value.id, name: value.name, revision: value.revision },
+      key: keyFor(kind, value, cloud), tracks: [], matched: false, dependencies: [] };
+    nodes.push(node);
+    if (retained && kind !== 'class') {
+      const versions = exact.get(node.key) ?? [];
+      versions.push(node);
+      exact.set(node.key, versions);
+    }
+    const tracks = kind === 'routine' ? allRoutineTracks(value as Routine) : kind === 'playlist' ? (value as MusicPlaylist).tracks : [];
+    trackReferences += tracks.length;
+    if (trackReferences > 20000) limit();
+    if (media !== undefined) {
+      if (!media || typeof media !== 'object' || Array.isArray(media)) throw new Error('invalid_audio_descriptors');
+      const known = retained ? descriptors.get(node.key) ?? new Map<string, boolean>() : undefined;
+      for (const [id, descriptor] of Object.entries(media)) {
+        const matched = matches(descriptor);
+        node.matched ||= matched;
+        known?.set(id, matched || known.get(id) === true);
+      }
+      if (known) descriptors.set(node.key, known);
+    }
+    for (const track of tracks) {
+      if (track.id === asset.id) node.matched = true;
+      if (media === undefined || !Object.hasOwn(media, track.id)) node.tracks.push(track.id);
+    }
+    const fillers = kind === 'routine' ? allRoutineFillers(value as Routine) : kind === 'class' ?
+      [(value as ClassSetup).before, (value as ClassSetup).after] : [];
+    for (const filler of fillers) {
+      if (filler?.recording !== undefined) {
+        if (!validFillerRecording(filler.recording)) throw new Error('invalid_filler_recording');
+        node.matched = matches(filler.recording.asset) || node.matched || filler.recording.id === recordingId;
+      }
+    }
+    if (kind === 'class') {
+      const setup = value as ClassSetup;
+      node.dependencies.push(keyFor('routine', setup.routine, cloud));
+      for (const reference of [setup.walkIn, setup.walkOut]) {
+        if (reference) node.dependencies.push(keyFor('playlist', reference, cloud));
+      }
+    }
+  };
+  const addEnvelope = (kind: 'routine' | 'playlist', value: CloudRoutine | CloudMusicPlaylist, cloud: boolean, retained: boolean) => {
+    if (kind === 'routine') {
+      const envelope = checkedWorkingEnvelope(value as CloudRoutine);
+      addDocument(kind, envelope.routine, cloud, retained, envelope.media);
+    } else {
+      const envelope = checkedCloudPlaylist(value as CloudMusicPlaylist);
+      addDocument(kind, envelope.playlist, cloud, retained, envelope.media);
+    }
+  };
+  try {
+    matches(asset);
+    connection = await openDB<RehearsalDatabase>('fitness-rehearsal', undefined, {
+      upgrade(_connection, _oldVersion, _newVersion, upgrade) { upgrade.abort(); },
+      blocking(_current, _next, event) { (event.target as IDBDatabase).close(); },
+    });
+    session?.assert();
+    if (audioReferenceStores.some(name => !connection!.objectStoreNames.contains(name)) ||
+      Array.from(connection.objectStoreNames).some(name => name !== 'meta' && !audioReferenceStores.includes(name))) {
+      throw new Error('unknown_audio_reference_store');
+    }
+    transaction = connection.transaction([...audioReferenceStores], 'readonly');
+    void transaction.done.catch(() => undefined);
+    let records = 0;
+    for (const name of audioReferenceStores) {
+      records += await transaction.objectStore(name).count();
+      session?.assert();
+      if (records > 10000) limit();
+    }
+    for (const name of audioReferenceStores) {
+      if (name === 'tracks') continue;
+      let cursor = await transaction.objectStore(name).openCursor();
+      while (cursor) {
+        session?.assert();
+        if (++reads > 10000) limit();
+        const value = cursor.value;
+        const bytes = JSON.stringify(value).length * 2;
+        metadataBytes += bytes;
+        if (bytes > 1024 * 1024 || metadataBytes > 16 * 1024 * 1024) limit();
+        try {
+          if (name === 'routineWorkingCopies' || name === 'playlistWorkingCopies') {
+            const record = value as RoutineWorkingCopy | PlaylistWorkingCopy;
+            const kind = name === 'routineWorkingCopies' ? 'routine' : 'playlist';
+            const cloud = record.pendingCloud || record.cloudBaseRevision !== null;
+            addEnvelope(kind, record.envelope, cloud, false);
+            if (record.cloudAttempt !== undefined) addEnvelope(kind, record.cloudAttempt.envelope, true, false);
+          } else if (name === 'cloudRoutineEnvelopes' || name === 'cloudMusicPlaylists') {
+            addEnvelope(name === 'cloudRoutineEnvelopes' ? 'routine' : 'playlist', value as CloudRoutine | CloudMusicPlaylist, true, true);
+          } else if (name === 'draftRecovery') {
+            const recovery = value as DraftRecovery;
+            if (!['routine', 'playlist', 'class'].includes(recovery.kind) || !['local', 'household'].includes(recovery.source)) {
+              throw new Error('invalid_recovery');
+            }
+            addDocument(recovery.kind, recovery.value, recovery.source === 'household', false, recovery.media);
+          } else if (name === 'fillerRecordings') {
+            const recording = value as FillerRecording;
+            if (!validFillerRecording(recording)) throw new Error('invalid_filler_recording');
+            if (!(recordingId !== undefined && cursor.primaryKey === recordingId && recording.id === recordingId && recording.asset.id === asset.id &&
+              recording.asset.sha256 === asset.sha256 && recording.asset.bytes === asset.bytes && recording.asset.contentType === asset.contentType)) {
+              nodes.push({ reference: { kind: 'filler', id: recording.id, name: recording.name }, key: '', tracks: [],
+                dependencies: [], matched: matches(recording.asset) || recording.id === recordingId });
+            }
+          } else {
+            const kind = name === 'classSetups' || name === 'classSetupHistory' || name === 'cloudClassSetups' ? 'class' :
+              name === 'musicPlaylists' || name === 'musicPlaylistHistory' ? 'playlist' : 'routine';
+            addDocument(kind, value as Routine | MusicPlaylist | ClassSetup, name.startsWith('cloud'), true);
+          }
+        } catch (error) {
+          complete = false;
+          if (error instanceof Error && error.message === 'local_audio_inspection_limit') throw error;
+        }
+        cursor = await cursor.continue();
+      }
+    }
+    for (const node of nodes) {
+      for (const id of node.tracks) {
+        const known = descriptors.get(node.key);
+        if (known?.has(id)) { node.matched ||= known.get(id)!; continue; }
+        if (legacy.has(id)) continue;
+        if (++reads > 10000) limit();
+        const stored = await transaction.objectStore('tracks').get(id);
+        session?.assert();
+        const result: Legacy = { matched: id === asset.id, complete: false };
+        legacy.set(id, result);
+        if (!stored || !(stored.blob instanceof Blob) || !Number.isSafeInteger(stored.bytes) ||
+          stored.bytes < 44 || stored.bytes > MAX_CLOUD_TRACK_BYTES || stored.bytes !== stored.blob.size) continue;
+        if (stored.sha256 !== undefined) {
+          if (!/^[a-f0-9]{64}$/.test(stored.sha256)) continue;
+          result.matched ||= stored.sha256 === asset.sha256;
+          result.complete = true;
+        } else if (stored.bytes !== asset.bytes) result.complete = true;
+        else if (stored.bytes <= 8 * 1024 * 1024 && hashBytes + stored.bytes <= 32 * 1024 * 1024 && hashCount < 16) {
+          hashBytes += stored.bytes;
+          hashCount++;
+          result.blob = stored.blob;
+        }
+      }
+    }
+    await transaction.done;
+    transaction = undefined;
+    connection.close();
+    connection = undefined;
+    for (const result of legacy.values()) {
+      session?.assert();
+      if (result.blob) {
+        try {
+          const hash = await digest(result.blob);
+          result.complete = hash !== undefined;
+          result.matched ||= hash === asset.sha256;
+        } catch { result.complete = false; }
+        delete result.blob;
+      }
+    }
+    for (const node of nodes) {
+      for (const id of node.tracks) {
+        if (descriptors.get(node.key)?.has(id)) continue;
+        const result = legacy.get(id);
+        if (!result?.complete) complete = false;
+        node.matched ||= result?.matched === true;
+      }
+    }
+    for (const node of nodes) {
+      for (const dependency of node.dependencies) {
+        const versions = exact.get(dependency);
+        if (!versions?.length) complete = false;
+        node.matched ||= versions?.some(value => value.matched) === true;
+      }
+    }
+  } catch { complete = false; }
+  finally {
+    if (transaction) {
+      try { transaction.abort(); } catch {}
+      await transaction.done.catch(() => undefined);
+    }
+    connection?.close();
+  }
+  const seen = new Set<string>();
+  for (const node of nodes) {
+    if (!node.matched) continue;
+    const key = JSON.stringify([node.reference.kind, node.reference.id, node.reference.revision]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (references.length === 256) { complete = false; break; }
+    references.push(node.reference);
+  }
+  session?.assert();
+  return { references, complete };
 }
 
 export async function saveDraftRecovery(record: DraftRecovery): Promise<void> {
@@ -228,6 +485,65 @@ function checkRoutine(routine: Routine): void {
 
 const revisionKey = (id: string, revision: number, published?: boolean) => JSON.stringify(published === undefined ? [id, revision] : [id, revision, published]);
 const deletedKey = (kind: 'routine' | 'playlist' | 'class', id: string) => JSON.stringify(['deleted', kind, id]);
+
+export interface PlaylistWorkingCopy {
+  envelope: CloudMusicPlaylist;
+  localVersion: number;
+  cloudBaseRevision: number | null;
+  pendingCloud: boolean;
+  savedAt: number;
+  cloudAttempt?: { envelope: CloudMusicPlaylist; localVersion: number; baseRevision: number | null };
+}
+
+export interface ActivePlaylistSelection {
+  id: string;
+  source: 'local' | 'household';
+  published: boolean;
+  revision?: number;
+}
+
+function checkedPlaylistSelection(value: ActivePlaylistSelection): ActivePlaylistSelection {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).some(key => !['id', 'source', 'published', 'revision'].includes(key)) ||
+    typeof value.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(value.id) ||
+    !['local', 'household'].includes(value.source) || typeof value.published !== 'boolean' ||
+    (value.published || value.revision !== undefined) && (!Number.isSafeInteger(value.revision) || value.revision! < 1)) {
+    throw new Error('playlist_conflict');
+  }
+  return structuredClone(value);
+}
+
+export async function getActivePlaylistSelection(): Promise<ActivePlaylistSelection | null> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['meta']);
+    const meta = transaction.objectStore('meta');
+    const raw = await meta.get('activePlaylistSelection');
+    const selection = raw === undefined ? null : checkedPlaylistSelection(JSON.parse(raw));
+    const hidden = selection && await meta.get(deletedKey('playlist', selection.id));
+    await transaction.done;
+    session?.assert();
+    return hidden ? null : selection;
+  } finally { connection.close(); }
+}
+
+export async function setActivePlaylistSelection(value: ActivePlaylistSelection): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = checkedPlaylistSelection(value);
+  await mutate(session, ['meta'], async transaction => {
+    const meta = transaction.objectStore('meta');
+    if (await meta.get(deletedKey('playlist', snapshot.id))) throw new Error('playlist_conflict');
+    await meta.put(JSON.stringify(snapshot), 'activePlaylistSelection');
+  });
+}
+
+export async function clearActivePlaylistSelection(): Promise<void> {
+  const session = captureMutationSession();
+  await mutate(session, ['meta'], async transaction => {
+    await transaction.objectStore('meta').delete('activePlaylistSelection');
+  });
+}
 
 export interface RoutineWorkingCopy {
   envelope: CloudRoutine;
@@ -821,13 +1137,14 @@ type ClassAction = 'save' | 'lock' | 'unlock' | 'publish';
 type VersionedClassEntity = MusicPlaylist | ClassSetup;
 const classStores = ['musicPlaylists', 'musicPlaylistHistory', 'classSetups', 'classSetupHistory',
   'routines', 'routineHistory', 'cloudRoutines', 'cloudRoutineHistory', 'cloudMusicPlaylists', 'cloudClassSetups', 'meta'] as const;
-type ClassTransaction = IDBPTransaction<RehearsalDatabase, Array<typeof classStores[number]>, 'readonly' | 'readwrite'>;
 
 function entityContent(value: VersionedClassEntity): string {
   return JSON.stringify({ ...value, revision: 0, locked: false, published: false });
 }
 
-async function exactReference(transaction: ClassTransaction, kind: 'routine' | 'playlist', reference: RevisionReference, cloud = false) {
+async function exactReference<Stores extends StoreName[], Mode extends 'readonly' | 'readwrite'>(
+  transaction: IDBPTransaction<RehearsalDatabase, Stores, Mode>, kind: 'routine' | 'playlist', reference: RevisionReference, cloud = false,
+) {
   const key = revisionKey(reference.id, reference.revision);
   let value: Routine | MusicPlaylist | undefined;
   if (kind === 'routine') {
@@ -850,11 +1167,12 @@ async function saveClassEntity<Value extends VersionedClassEntity>(kind: 'playli
   expectedRevision: number | null, action: ClassAction): Promise<Value> {
   const session = captureMutationSession();
   const snapshot = (kind === 'playlist' ? checkedMusicPlaylist(value as MusicPlaylist) : checkedClassSetup(value as ClassSetup)) as Value;
-  return mutate(session, [...classStores], async transaction => {
+  return mutate(session, [...classStores, 'playlistWorkingCopies', 'tracks'], async transaction => {
     const records = transaction.objectStore(kind === 'playlist' ? 'musicPlaylists' : 'classSetups');
     const history = transaction.objectStore(kind === 'playlist' ? 'musicPlaylistHistory' : 'classSetupHistory');
     const previous = await records.get(snapshot.id);
     const prefix = kind === 'playlist' ? 'playlist' : 'class_setup';
+    if (kind === 'playlist') checkPlaylistDowngrade(previous as MusicPlaylist | undefined, snapshot as MusicPlaylist);
     if (await transaction.objectStore('meta').get(deletedKey(kind, snapshot.id)) ||
       expectedRevision !== (previous?.revision ?? null)) throw new Error(`${prefix}_conflict`);
     if (!['save', 'lock', 'unlock', 'publish'].includes(action)) throw new Error(`invalid_${prefix}_action`);
@@ -872,8 +1190,33 @@ async function saveClassEntity<Value extends VersionedClassEntity>(kind: 'playli
       }
     }
     snapshot.revision = (previous?.revision ?? 0) + 1;
+    if (!Number.isSafeInteger(snapshot.revision)) throw new Error(`${prefix}_conflict`);
     snapshot.locked = action === 'lock';
     snapshot.published = action === 'publish';
+    if (kind === 'playlist') {
+      const stored = await transaction.objectStore('playlistWorkingCopies').get(snapshot.id);
+      const working = stored && checkedPlaylistWorkingCopy(stored);
+      if (working && working.cloudBaseRevision === null) {
+        if (working.pendingCloud || working.cloudAttempt || !previous ||
+          working.envelope.playlist.revision !== previous.revision ||
+          canonicalJson(working.envelope.playlist) !== canonicalJson(previous)) throw new Error('playlist_conflict');
+        const playlist = { ...snapshot, published: false } as MusicPlaylist;
+        const media: CloudMusicPlaylist['media'] = {};
+        for (const track of playlist.tracks) {
+          const retained = Object.hasOwn(working.envelope.media, track.id) ? working.envelope.media[track.id] : undefined;
+          if (retained) media[track.id] = retained;
+          else {
+            const audio = await transaction.objectStore('tracks').get(track.id);
+            if (!audio?.sha256 || audio.bytes !== audio.blob.size || Math.abs(audio.duration - track.duration) > 0.1) {
+              throw new Error('playlist_conflict');
+            }
+            media[track.id] = { id: track.id, sha256: audio.sha256, bytes: audio.bytes, contentType: audio.blob.type };
+          }
+        }
+        await putPlaylistWorkingCopy(transaction, { ...working, envelope: checkedCloudPlaylist({ playlist, media }),
+          localVersion: working.localVersion + 1, savedAt: Date.now() });
+      }
+    }
     if (previous && !await history.get(revisionKey(previous.id, previous.revision))) await history.put(previous, revisionKey(previous.id, previous.revision));
     await history.put(snapshot, revisionKey(snapshot.id, snapshot.revision));
     await history.put(snapshot, revisionKey(snapshot.id, snapshot.revision, snapshot.published));
@@ -892,7 +1235,7 @@ export function saveClassSetup(value: ClassSetup, expectedRevision: number | nul
 }
 
 export function deleteMusicPlaylist(id: string, expectedRevision: number): Promise<void> {
-  return deleteLocalEntity('playlist', id, expectedRevision);
+  return deletePlaylistRecords(id, undefined, expectedRevision);
 }
 
 export function deleteClassSetup(id: string, expectedRevision: number): Promise<void> {
@@ -938,6 +1281,44 @@ export async function listMusicPlaylists(): Promise<MusicPlaylist[]> {
   } finally { connection.close(); }
 }
 
+export async function listMusicPlaylistPublications(): Promise<MusicPlaylist[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['musicPlaylistHistory', 'musicPlaylists', 'meta']);
+    const records = [...await transaction.objectStore('musicPlaylistHistory').getAll(),
+      ...await transaction.objectStore('musicPlaylists').getAll()];
+    const publications = new Map<string, MusicPlaylist>();
+    for (const value of records) {
+      const playlist = checkedMusicPlaylist(value);
+      if (playlist.published && !await transaction.objectStore('meta').get(deletedKey('playlist', playlist.id))) {
+        publications.set(revisionKey(playlist.id, playlist.revision, true), playlist);
+      }
+    }
+    await transaction.done;
+    session?.assert();
+    return [...publications.values()];
+  } finally { connection.close(); }
+}
+
+export async function listCachedMusicPlaylists(): Promise<CloudMusicPlaylist[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['cloudMusicPlaylists', 'meta']);
+    const heads = new Map<string, CloudMusicPlaylist>();
+    for (const record of await transaction.objectStore('cloudMusicPlaylists').getAll()) {
+      const value = checkedCloudPlaylist(record);
+      if (await transaction.objectStore('meta').get(deletedKey('playlist', value.playlist.id))) continue;
+      const key = JSON.stringify([value.playlist.id, value.playlist.published]);
+      if (value.playlist.revision > (heads.get(key)?.playlist.revision ?? 0)) heads.set(key, value);
+    }
+    await transaction.done;
+    session?.assert();
+    return [...heads.values()];
+  } finally { connection.close(); }
+}
+
 export async function listClassSetups(): Promise<ClassSetup[]> {
   const session = captureMutationSession();
   const connection = await database(session);
@@ -973,28 +1354,309 @@ export async function listCachedClassSetups(): Promise<ClassSetup[]> {
 
 function checkedCloudPlaylist(value: CloudMusicPlaylist): CloudMusicPlaylist {
   try {
-    if (!value || Object.keys(value).some(key => !['playlist', 'media'].includes(key))) throw new Error('invalid_playlist');
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).some(key => !['playlist', 'media'].includes(key))) throw new Error('invalid_playlist');
     const playlist = checkedMusicPlaylist(value.playlist);
+    if (!Number.isSafeInteger(playlist.revision)) throw new Error('invalid_playlist');
     const media = structuredClone(value.media);
     if (!media || typeof media !== 'object' || Array.isArray(media) || Object.keys(media).length !== playlist.tracks.length) throw new Error('invalid_media');
+    const assets = new Map<string, string>();
     for (const track of playlist.tracks) {
-      const asset = media[track.id];
+      const asset = Object.hasOwn(media, track.id) ? media[track.id] : undefined;
       if (!asset || Object.keys(asset).some(key => !['id', 'sha256', 'bytes', 'contentType'].includes(key)) ||
         !validFillerRecording({ id: 'descriptor', name: 'Descriptor', duration: Math.min(track.duration, 360), asset })) throw new Error('invalid_media');
+      const identity = canonicalJson(asset);
+      if (assets.has(asset.id) && assets.get(asset.id) !== identity) throw new Error('invalid_media');
+      assets.set(asset.id, identity);
     }
     return { playlist, media };
   } catch { throw new Error('invalid_cloud_playlist'); }
+}
+
+const playlistWorkingStores = ['playlistWorkingCopies', 'musicPlaylists', 'musicPlaylistHistory', 'cloudMusicPlaylists', 'meta'] as const;
+type PlaylistWorkingTransaction = IDBPTransaction<RehearsalDatabase, Array<typeof playlistWorkingStores[number]>, 'readwrite'>;
+type PlaylistEnvelopeStore = IDBPTransaction<RehearsalDatabase, ['cloudMusicPlaylists'], 'readwrite'>['store'];
+
+function validPlaylistRevision(value: number | null): boolean {
+  return value === null || Number.isSafeInteger(value) && value > 0;
+}
+
+function playlistWorkingContent(value: CloudMusicPlaylist): string {
+  return canonicalJson({ ...value, playlist: { ...value.playlist, revision: 0, locked: false, published: false } });
+}
+
+function checkPlaylistDowngrade(previous: MusicPlaylist | undefined, next: MusicPlaylist): void {
+  if (previous) checkedMusicPlaylist(previous);
+  if (previous?.schemaVersion === 2 && next.schemaVersion === 1) throw new Error('playlist_conflict');
+}
+
+function checkedPlaylistWorkingCopy(value: PlaylistWorkingCopy): PlaylistWorkingCopy {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+    Object.keys(value).some(key => !['envelope', 'localVersion', 'cloudBaseRevision', 'pendingCloud', 'savedAt', 'cloudAttempt'].includes(key)) ||
+    !Number.isSafeInteger(value.localVersion) || value.localVersion < 1 || !validPlaylistRevision(value.cloudBaseRevision) ||
+    typeof value.pendingCloud !== 'boolean' || !Number.isSafeInteger(value.savedAt) || value.savedAt < 0) throw new Error('invalid_playlist_working_copy');
+  const envelope = checkedCloudPlaylist(value.envelope);
+  if (envelope.playlist.published || value.cloudBaseRevision !== null && envelope.playlist.revision !== value.cloudBaseRevision) {
+    throw new Error('invalid_playlist_working_copy');
+  }
+  const attempt = value.cloudAttempt;
+  if (attempt !== undefined) {
+    if (!attempt || typeof attempt !== 'object' || Array.isArray(attempt) ||
+      Object.keys(attempt).some(key => !['envelope', 'localVersion', 'baseRevision'].includes(key)) ||
+      !Number.isSafeInteger(attempt.localVersion) || attempt.localVersion < 1 || attempt.localVersion > value.localVersion ||
+      !value.pendingCloud || attempt.baseRevision !== value.cloudBaseRevision) throw new Error('invalid_playlist_working_copy');
+    const submitted = checkedCloudPlaylist(attempt.envelope);
+    if (submitted.playlist.id !== envelope.playlist.id || submitted.playlist.locked || submitted.playlist.published ||
+      submitted.playlist.revision !== (attempt.baseRevision ?? 1) ||
+      attempt.localVersion === value.localVersion && playlistWorkingContent(submitted) !== playlistWorkingContent(envelope)) {
+      throw new Error('invalid_playlist_working_copy');
+    }
+  }
+  return structuredClone({ ...value, envelope });
+}
+
+async function putPlaylistWorkingCopy<Stores extends StoreName[]>(
+  transaction: IDBPTransaction<RehearsalDatabase, Stores, 'readwrite'>, value: PlaylistWorkingCopy,
+): Promise<void> {
+  const record = checkedPlaylistWorkingCopy(value);
+  const store = transaction.objectStore('playlistWorkingCopies');
+  const size = (item: PlaylistWorkingCopy) => new TextEncoder().encode(JSON.stringify(item)).byteLength;
+  const records = (await store.getAll()).map(checkedPlaylistWorkingCopy)
+    .filter(item => item.envelope.playlist.id !== record.envelope.playlist.id);
+  if (size(record) > 256 * 1024 || records.length >= 64 ||
+    records.reduce((total, item) => total + size(item), size(record)) > 4 * 1024 * 1024) throw new Error('playlist_working_copy_limit');
+  await store.put(record, record.envelope.playlist.id);
+}
+
+async function playlistDraftHead(store: PlaylistEnvelopeStore, id: string): Promise<CloudMusicPlaylist | undefined> {
+  return (await store.getAll()).filter(value => value.playlist.id === id).map(checkedCloudPlaylist)
+    .filter(value => !value.playlist.published).sort((left, right) => right.playlist.revision - left.playlist.revision)[0];
+}
+
+async function cachePlaylistEnvelope(store: PlaylistEnvelopeStore, snapshot: CloudMusicPlaylist): Promise<void> {
+  const key = revisionKey(snapshot.playlist.id, snapshot.playlist.revision, snapshot.playlist.published);
+  const previous = await store.get(key);
+  if (previous && canonicalJson(checkedCloudPlaylist(previous)) !== canonicalJson(snapshot)) throw new Error('playlist_conflict');
+  if (!previous) await store.put(snapshot, key);
+}
+
+export async function getPlaylistWorkingCopy(id: string): Promise<PlaylistWorkingCopy | null> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['playlistWorkingCopies', 'meta']);
+    const value = await transaction.objectStore('playlistWorkingCopies').get(id);
+    const hidden = await transaction.objectStore('meta').get(deletedKey('playlist', id));
+    await transaction.done;
+    session?.assert();
+    return value && !hidden ? checkedPlaylistWorkingCopy(value) : null;
+  } finally { connection.close(); }
+}
+
+export async function listPlaylistWorkingCopies(): Promise<PlaylistWorkingCopy[]> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  try {
+    const transaction = connection.transaction(['playlistWorkingCopies', 'meta']);
+    const values = [];
+    for (const value of await transaction.objectStore('playlistWorkingCopies').getAll()) {
+      const record = checkedPlaylistWorkingCopy(value);
+      if (!await transaction.objectStore('meta').get(deletedKey('playlist', record.envelope.playlist.id))) values.push(record);
+    }
+    await transaction.done;
+    session?.assert();
+    return values.sort((left, right) => right.savedAt - left.savedAt);
+  } finally { connection.close(); }
+}
+
+async function retainLocalPlaylist(transaction: PlaylistWorkingTransaction, snapshot: MusicPlaylist, previous?: MusicPlaylist): Promise<void> {
+  const history = transaction.objectStore('musicPlaylistHistory');
+  for (const playlist of [previous, snapshot]) {
+    if (!playlist) continue;
+    for (const key of [revisionKey(playlist.id, playlist.revision), revisionKey(playlist.id, playlist.revision, playlist.published)]) {
+      const existing = await history.get(key);
+      if (!existing) await history.put(playlist, key);
+      else if (playlist === snapshot && canonicalJson(key === revisionKey(playlist.id, playlist.revision) ?
+        { ...existing, published: playlist.published } : existing) !== canonicalJson(playlist)) throw new Error('playlist_conflict');
+    }
+  }
+  await transaction.objectStore('musicPlaylists').put(snapshot, snapshot.id);
+}
+
+export async function savePlaylistWorkingCopy(envelope: CloudMusicPlaylist, options: {
+  expectedLocalVersion: number | null; cloud: boolean; cloudBaseRevision: number | null;
+}): Promise<PlaylistWorkingCopy> {
+  const session = captureMutationSession();
+  const snapshot = checkedCloudPlaylist(envelope);
+  const { expectedLocalVersion, cloud, cloudBaseRevision } = options;
+  if (!validPlaylistRevision(expectedLocalVersion) || !validPlaylistRevision(cloudBaseRevision) || typeof cloud !== 'boolean' ||
+    cloudBaseRevision !== null && snapshot.playlist.revision !== cloudBaseRevision) throw new Error('playlist_conflict');
+  if (snapshot.playlist.published) throw new Error('playlist_published');
+  if (snapshot.playlist.locked) throw new Error('playlist_locked');
+  return mutate(session, [...playlistWorkingStores], async transaction => {
+    const id = snapshot.playlist.id;
+    const stored = await transaction.objectStore('playlistWorkingCopies').get(id);
+    const previous = stored && checkedPlaylistWorkingCopy(stored);
+    const meta = transaction.objectStore('meta');
+    if (expectedLocalVersion !== (previous?.localVersion ?? null) || await meta.get(deletedKey('playlist', id))) throw new Error('playlist_conflict');
+    const local = await transaction.objectStore('musicPlaylists').get(id);
+    const head = await playlistDraftHead(transaction.objectStore('cloudMusicPlaylists'), id);
+    checkPlaylistDowngrade(previous?.envelope.playlist, snapshot.playlist);
+    if (previous && previous.cloudBaseRevision !== cloudBaseRevision &&
+      (previous.pendingCloud || previous.cloudAttempt || cloudBaseRevision === null ||
+        cloudBaseRevision < (previous.cloudBaseRevision ?? 0) || head?.playlist.revision !== cloudBaseRevision)) throw new Error('playlist_conflict');
+    const household = cloud || cloudBaseRevision !== null || previous?.pendingCloud === true;
+    const authority = cloudBaseRevision !== null ?
+      head && head.playlist.revision >= cloudBaseRevision ? head.playlist : previous?.envelope.playlist : local ?? previous?.envelope.playlist;
+    checkPlaylistDowngrade(authority, snapshot.playlist);
+    if (authority?.locked) throw new Error('playlist_locked');
+    if (household && head && head.playlist.revision > (cloudBaseRevision ?? 0)) throw new Error('playlist_conflict');
+    if (cloudBaseRevision === null && local && local.revision !== snapshot.playlist.revision) throw new Error('playlist_conflict');
+    const localVersion = (previous?.localVersion ?? 0) + 1;
+    if (!Number.isSafeInteger(localVersion)) throw new Error('playlist_conflict');
+    if (!household) {
+      snapshot.playlist.revision = (local?.revision ?? 0) + 1;
+      if (!Number.isSafeInteger(snapshot.playlist.revision)) throw new Error('playlist_conflict');
+      await retainLocalPlaylist(transaction, snapshot.playlist, local);
+    }
+    const record: PlaylistWorkingCopy = { envelope: snapshot, localVersion, cloudBaseRevision,
+      pendingCloud: cloud || previous?.pendingCloud === true, savedAt: Date.now(),
+      ...(previous?.cloudAttempt ? { cloudAttempt: previous.cloudAttempt } : {}) };
+    await putPlaylistWorkingCopy(transaction, record);
+    await meta.put(JSON.stringify({ id, source: household ? 'household' : 'local', published: false } satisfies ActivePlaylistSelection), 'activePlaylistSelection');
+    return record;
+  });
+}
+
+export async function recordPlaylistSyncAttempt(
+  id: string, localVersion: number, envelope: CloudMusicPlaylist, baseRevision: number | null,
+): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = checkedCloudPlaylist(envelope);
+  if (snapshot.playlist.id !== id || !Number.isSafeInteger(localVersion) || localVersion < 1 ||
+    !validPlaylistRevision(baseRevision) || snapshot.playlist.revision !== (baseRevision ?? 1) ||
+    snapshot.playlist.locked || snapshot.playlist.published) throw new Error('playlist_conflict');
+  await mutate(session, [...playlistWorkingStores], async transaction => {
+    const stored = await transaction.objectStore('playlistWorkingCopies').get(id);
+    const current = stored && checkedPlaylistWorkingCopy(stored);
+    if (!current || current.localVersion !== localVersion || !current.pendingCloud || current.cloudBaseRevision !== baseRevision ||
+      await transaction.objectStore('meta').get(deletedKey('playlist', id)) ||
+      playlistWorkingContent(current.envelope) !== playlistWorkingContent(snapshot)) throw new Error('playlist_conflict');
+    const cloudAttempt = { envelope: snapshot, localVersion, baseRevision };
+    if (current.cloudAttempt && canonicalJson(current.cloudAttempt) !== canonicalJson(cloudAttempt)) throw new Error('playlist_conflict');
+    const head = await playlistDraftHead(transaction.objectStore('cloudMusicPlaylists'), id);
+    if (head && head.playlist.revision >= (baseRevision ?? 0) && head.playlist.locked) throw new Error('playlist_locked');
+    if (head && head.playlist.revision > (baseRevision ?? 0)) throw new Error('playlist_conflict');
+    await putPlaylistWorkingCopy(transaction, { ...current, cloudAttempt });
+  });
+}
+
+export async function acknowledgePlaylistWorkingCopy(id: string, localVersion: number, envelope: CloudMusicPlaylist): Promise<void> {
+  const session = captureMutationSession();
+  const snapshot = checkedCloudPlaylist(envelope);
+  if (snapshot.playlist.id !== id || !Number.isSafeInteger(localVersion) || localVersion < 1 ||
+    snapshot.playlist.locked || snapshot.playlist.published) throw new Error('playlist_conflict');
+  await mutate(session, [...playlistWorkingStores], async transaction => {
+    const stored = await transaction.objectStore('playlistWorkingCopies').get(id);
+    const current = stored && checkedPlaylistWorkingCopy(stored);
+    if (!current || !current.pendingCloud || localVersion > current.localVersion ||
+      await transaction.objectStore('meta').get(deletedKey('playlist', id))) throw new Error('playlist_conflict');
+    const attempt = current.cloudAttempt ?? { envelope: current.envelope, localVersion: current.localVersion, baseRevision: current.cloudBaseRevision };
+    if (attempt.localVersion !== localVersion || attempt.baseRevision !== current.cloudBaseRevision ||
+      snapshot.playlist.revision !== (attempt.baseRevision ?? 0) + 1 ||
+      playlistWorkingContent(checkedCloudPlaylist(attempt.envelope)) !== playlistWorkingContent(snapshot)) throw new Error('playlist_conflict');
+    checkPlaylistDowngrade(current.envelope.playlist, snapshot.playlist);
+    const mirrors = transaction.objectStore('cloudMusicPlaylists');
+    const head = await playlistDraftHead(mirrors, id);
+    if (head && head.playlist.revision > snapshot.playlist.revision) throw new Error('playlist_conflict');
+    await cachePlaylistEnvelope(mirrors, snapshot);
+    const { cloudAttempt: _attempt, ...retained } = current;
+    await putPlaylistWorkingCopy(transaction, { ...retained,
+      envelope: current.localVersion === localVersion ? snapshot : { ...current.envelope,
+        playlist: { ...current.envelope.playlist, revision: snapshot.playlist.revision } },
+      cloudBaseRevision: snapshot.playlist.revision, pendingCloud: current.localVersion !== localVersion });
+  });
+}
+
+export async function reconcilePlaylistWorkingCopy(envelope: CloudMusicPlaylist): Promise<PlaylistWorkingCopy | null> {
+  const session = captureMutationSession();
+  const snapshot = checkedCloudPlaylist(envelope);
+  if (snapshot.playlist.published) throw new Error('playlist_published');
+  return mutate(session, [...playlistWorkingStores], async transaction => {
+    const id = snapshot.playlist.id;
+    const stored = await transaction.objectStore('playlistWorkingCopies').get(id);
+    const current = stored && checkedPlaylistWorkingCopy(stored);
+    if (!current || await transaction.objectStore('meta').get(deletedKey('playlist', id))) return null;
+    if (current.pendingCloud || current.cloudAttempt) throw new Error('playlist_conflict');
+    if (current.cloudBaseRevision === null) {
+      const local = await transaction.objectStore('musicPlaylists').get(id);
+      if (local && canonicalJson(checkedMusicPlaylist(local)) === canonicalJson(snapshot.playlist) &&
+        canonicalJson(snapshot) === canonicalJson(current.envelope)) return current;
+      throw new Error('playlist_conflict');
+    }
+    if (snapshot.playlist.revision < current.cloudBaseRevision || snapshot.playlist.revision === current.cloudBaseRevision &&
+      canonicalJson(snapshot) !== canonicalJson(current.envelope)) throw new Error('playlist_conflict');
+    checkPlaylistDowngrade(current.envelope.playlist, snapshot.playlist);
+    const mirrors = transaction.objectStore('cloudMusicPlaylists');
+    const head = await playlistDraftHead(mirrors, id);
+    if (head && head.playlist.revision > snapshot.playlist.revision) throw new Error('playlist_conflict');
+    await cachePlaylistEnvelope(mirrors, snapshot);
+    if (canonicalJson(snapshot) === canonicalJson(current.envelope)) return current;
+    const refreshed = { ...current, envelope: snapshot, cloudBaseRevision: snapshot.playlist.revision };
+    await putPlaylistWorkingCopy(transaction, refreshed);
+    return refreshed;
+  });
+}
+
+async function deletePlaylistRecords(id: string, expectedLocalVersion?: number, expectedRevision?: number | null): Promise<void> {
+  const session = captureMutationSession();
+  if (expectedLocalVersion === undefined && expectedRevision === undefined ||
+    expectedLocalVersion !== undefined && (!Number.isSafeInteger(expectedLocalVersion) || expectedLocalVersion < 1) ||
+    expectedRevision !== undefined && (!validPlaylistRevision(expectedRevision) || expectedRevision === null && expectedLocalVersion === undefined)) {
+    throw new Error('playlist_conflict');
+  }
+  await mutate(session, [...playlistWorkingStores], async transaction => {
+    const store = transaction.objectStore('playlistWorkingCopies');
+    const stored = await store.get(id);
+    const working = stored && checkedPlaylistWorkingCopy(stored);
+    const previous = await transaction.objectStore('musicPlaylists').get(id);
+    if (previous) checkedMusicPlaylist(previous);
+    const meta = transaction.objectStore('meta');
+    if (await meta.get(deletedKey('playlist', id))) throw new Error(expectedLocalVersion === undefined ? 'playlist_not_found' : 'playlist_conflict');
+    if (expectedLocalVersion === undefined && !previous) throw new Error('playlist_not_found');
+    if (expectedLocalVersion !== undefined && working?.localVersion !== expectedLocalVersion ||
+      expectedRevision !== undefined && (previous?.revision ?? null) !== expectedRevision) throw new Error('playlist_conflict');
+    const matchesLocal = working && previous && working.cloudBaseRevision === null && !working.pendingCloud && !working.cloudAttempt &&
+      canonicalJson(working.envelope.playlist) === canonicalJson(previous);
+    if (expectedLocalVersion === undefined && working && !matchesLocal ||
+      expectedRevision === undefined && previous && !matchesLocal) throw new Error('playlist_conflict');
+    if (previous?.locked || working?.envelope.playlist.locked) throw new Error('playlist_locked');
+    if (previous?.published || working?.envelope.playlist.published) throw new Error('playlist_published');
+    if (previous) await retainLocalPlaylist(transaction, previous);
+    const revision = Math.max(previous?.revision ?? 0, working?.cloudBaseRevision ?? working?.envelope.playlist.revision ?? 0) + 1;
+    if (!Number.isSafeInteger(revision)) throw new Error('playlist_conflict');
+    await store.delete(id);
+    await meta.put(String(revision), deletedKey('playlist', id));
+    const raw = await meta.get('activePlaylistSelection');
+    if (raw && checkedPlaylistSelection(JSON.parse(raw)).id === id) await meta.delete('activePlaylistSelection');
+  });
+}
+
+export function deletePlaylistWorkingCopy(id: string, expectedLocalVersion: number): Promise<void> {
+  return deletePlaylistRecords(id, expectedLocalVersion);
+}
+
+export function deletePlaylistAndWorkingCopy(
+  id: string, expectedPlaylistRevision: number | null, expectedLocalVersion: number,
+): Promise<void> {
+  return deletePlaylistRecords(id, expectedLocalVersion, expectedPlaylistRevision);
 }
 
 export async function cacheMusicPlaylist(value: CloudMusicPlaylist): Promise<void> {
   const session = captureMutationSession();
   const snapshot = checkedCloudPlaylist(value);
   await mutate(session, ['cloudMusicPlaylists'], async transaction => {
-    const store = transaction.objectStore('cloudMusicPlaylists');
-    const key = revisionKey(snapshot.playlist.id, snapshot.playlist.revision, snapshot.playlist.published);
-    const previous = await store.get(key);
-    if (previous && JSON.stringify(previous) !== JSON.stringify(snapshot)) throw new Error('playlist_conflict');
-    await store.put(snapshot, key);
+    await cachePlaylistEnvelope(transaction.objectStore('cloudMusicPlaylists'), snapshot);
   });
 }
 
@@ -1014,11 +1676,15 @@ export async function getCachedMusicPlaylist(id: string, revision?: number, publ
   const session = captureMutationSession();
   const connection = await database(session);
   try {
-    const value = revision === undefined ? (await connection.getAll('cloudMusicPlaylists')).filter(item => item.playlist.id === id &&
+    const transaction = connection.transaction(['cloudMusicPlaylists', 'meta']);
+    const store = transaction.objectStore('cloudMusicPlaylists');
+    const hidden = revision === undefined && await transaction.objectStore('meta').get(deletedKey('playlist', id));
+    const value = hidden ? undefined : revision === undefined ? (await store.getAll()).filter(item => item.playlist.id === id &&
       (published === undefined || item.playlist.published === published))
       .sort((first, second) => second.playlist.revision - first.playlist.revision)[0] :
-      await connection.get('cloudMusicPlaylists', revisionKey(id, revision, published ?? true)) ??
-      (published === undefined ? await connection.get('cloudMusicPlaylists', revisionKey(id, revision, false)) : undefined);
+      await store.get(revisionKey(id, revision, published ?? true)) ??
+      (published === undefined ? await store.get(revisionKey(id, revision, false)) : undefined);
+    await transaction.done;
     session?.assert();
     return value ? checkedCloudPlaylist(value) : null;
   } finally { connection.close(); }
@@ -1132,14 +1798,17 @@ export async function removeFillerRecording(id: string): Promise<void> {
 
 export async function removeTrack(id: string): Promise<void> {
   const session = captureMutationSession();
-  await mutate(session, ['tracks', 'fillerRecordings', 'routineWorkingCopies', 'draftRecovery', ...classStores], async transaction => {
+  await mutate(session, ['tracks', 'fillerRecordings', 'routineWorkingCopies', 'playlistWorkingCopies', 'draftRecovery', ...classStores], async transaction => {
     const routines = await transaction.objectStore('routines').getAll();
     const cloudRoutines = await transaction.objectStore('cloudRoutines').getAll();
     const historicalRoutines = await transaction.objectStore('routineHistory').getAll();
     const historicalCloudRoutines = await transaction.objectStore('cloudRoutineHistory').getAll();
+    const playlistEnvelopes = [...await transaction.objectStore('cloudMusicPlaylists').getAll(),
+      ...(await transaction.objectStore('playlistWorkingCopies').getAll()).map(checkedPlaylistWorkingCopy)
+        .flatMap(value => [value.envelope, ...(value.cloudAttempt ? [value.cloudAttempt.envelope] : [])])];
     const playlists = [...await transaction.objectStore('musicPlaylists').getAll(),
       ...await transaction.objectStore('musicPlaylistHistory').getAll(),
-      ...(await transaction.objectStore('cloudMusicPlaylists').getAll()).map(value => value.playlist)];
+      ...playlistEnvelopes.map(value => checkedCloudPlaylist(value).playlist)];
     const setups = [...await transaction.objectStore('classSetups').getAll(),
       ...await transaction.objectStore('classSetupHistory').getAll(), ...await transaction.objectStore('cloudClassSetups').getAll()];
     const recordings = await transaction.objectStore('fillerRecordings').getAll();
@@ -1156,6 +1825,8 @@ export async function removeTrack(id: string): Promise<void> {
       [...routines, ...cloudRoutines, ...historicalRoutines, ...historicalCloudRoutines, ...working].some(routine =>
         allRoutineTracks(routine).some(track => track.id === id) || allRoutineFillers(routine).some(fillerReferences)) ||
       playlists.some(playlist => playlist.tracks.some(track => track.id === id)) ||
+      playlistEnvelopes.some(value => Object.values(value.media).some(asset => asset.id === id)) ||
+      recoveries.some(value => value.kind === 'playlist' && Object.values(value.media).some(asset => asset.id === id)) ||
       setups.some(setup => fillerReferences(setup.before) || fillerReferences(setup.after))) {
       await transaction.done;
       throw new Error('track_referenced');
@@ -1693,7 +2364,8 @@ async function validateM4aBlob(blob: Blob): Promise<ContainerAudio> {
 }
 
 async function convertTrack(
-  file: File, session: MutationSession | undefined, expectedDuration?: number, expectedChannels?: number,
+  file: File, session: MutationSession | undefined, signal: AbortSignal,
+  expectedDuration?: number, expectedChannels?: number,
 ): Promise<{ blob: Blob; duration: number }> {
   session?.assert();
   const controller = new AbortController();
@@ -1704,6 +2376,7 @@ async function convertTrack(
     if (controller.signal.aborted) throw new Error('conversion_aborted');
   };
   activeConversionControllers.add(controller);
+  signal.addEventListener('abort', abort, { once: true });
   lifecycle?.addEventListener('pagehide', abort);
   lifecycle?.addEventListener(hostedInvalidationEvent, abort);
   try {
@@ -1732,13 +2405,14 @@ async function convertTrack(
     throw error;
   } finally {
     activeConversionControllers.delete(controller);
+    signal.removeEventListener('abort', abort);
     lifecycle?.removeEventListener('pagehide', abort);
     lifecycle?.removeEventListener(hostedInvalidationEvent, abort);
   }
 }
 
 async function prepareTrack(
-  file: File, session: MutationSession | undefined, preserveBytes = false,
+  file: File, session: MutationSession | undefined, signal: AbortSignal, preserveBytes = false,
 ): Promise<StoredTrack> {
   session?.assert();
   const byteLimit = preserveBytes ? MAX_CLOUD_TRACK_BYTES : MAX_TRACK_BYTES;
@@ -1775,7 +2449,7 @@ async function prepareTrack(
   }
   session?.assert();
   if ((oggOpus || declaredOpus || container?.opus) && !preserveBytes) {
-    ({ blob, duration } = await convertTrack(file, session, opusDuration, channels));
+    ({ blob, duration } = await convertTrack(file, session, signal, opusDuration, channels));
   } else {
     let sourceDuration: number | undefined;
     try {
@@ -1785,7 +2459,7 @@ async function prepareTrack(
       session?.assert();
       if (preserveBytes || !(error instanceof Error) ||
         (!error.message.startsWith('unsupported_audio:') && error.message !== 'audio_metadata_timeout')) throw error;
-      ({ blob, duration } = await convertTrack(file, session, sourceDuration, channels));
+      ({ blob, duration } = await convertTrack(file, session, signal, sourceDuration, channels));
     }
   }
   session?.assert();
@@ -1794,8 +2468,8 @@ async function prepareTrack(
   return { blob, bytes: blob.size, duration, sha256 };
 }
 
-async function importTrack(file: File, session: MutationSession | undefined): Promise<Track> {
-  const record = await prepareTrack(file, session);
+async function importTrack(file: File, session: MutationSession | undefined, signal: AbortSignal): Promise<Track> {
+  const record = await prepareTrack(file, session, signal);
   const track: Track = {
     id: crypto.randomUUID(), title: file.name.slice(0, 300), duration: record.duration,
     firstBeat: 0, cues: [], bodyArea: '',
@@ -1808,24 +2482,35 @@ async function importTrack(file: File, session: MutationSession | undefined): Pr
 
 let importQueue: Promise<unknown> = Promise.resolve();
 
-function enqueueImport<Result>(session: MutationSession | undefined, operation: (session: MutationSession | undefined) => Promise<Result>): Promise<Result> {
+function enqueueImport<Result>(
+  session: MutationSession | undefined, signal: AbortSignal | undefined,
+  operation: (session: MutationSession, signal: AbortSignal) => Promise<Result>,
+): Promise<Result> {
   const lifecycle = !session && typeof window !== 'undefined' ? window : undefined;
-  let invalidated = false;
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
   const abort = () => {
-    invalidated = true;
+    cancel();
     for (const controller of activeConversionControllers) controller.abort();
     for (const cancel of pendingMutations) cancel();
   };
-  const captured = session ?? (lifecycle ? {
-    assert() { if (invalidated) throw new Error('conversion_aborted'); },
-  } : undefined);
+  const captured: MutationSession = {
+    signal: controller.signal,
+    assert() {
+      session?.assert();
+      if (controller.signal.aborted) throw new Error('conversion_aborted');
+    },
+  };
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
   lifecycle?.addEventListener('pagehide', abort);
   lifecycle?.addEventListener(hostedInvalidationEvent, abort);
   const result = importQueue.then(() => {
-    captured?.assert();
+    captured.assert();
     if (nativeDecodePending) throw new Error('audio_decoder_busy');
-    return operation(captured);
+    return operation(captured, controller.signal);
   }).finally(() => {
+    signal?.removeEventListener('abort', cancel);
     lifecycle?.removeEventListener('pagehide', abort);
     lifecycle?.removeEventListener(hostedInvalidationEvent, abort);
   });
@@ -1833,17 +2518,17 @@ function enqueueImport<Result>(session: MutationSession | undefined, operation: 
   return result;
 }
 
-export async function storeTrack(file: File): Promise<Track> {
+export async function storeTrack(file: File, signal?: AbortSignal): Promise<Track> {
   const session = captureMutationSession();
-  return enqueueImport(session, captured => importTrack(file, captured));
+  return enqueueImport(session, signal, (captured, activeSignal) => importTrack(file, captured, activeSignal));
 }
 
-export async function addFillerRecording(file: File, name?: string): Promise<FillerRecording> {
+export async function addFillerRecording(file: File, name?: string, signal?: AbortSignal): Promise<FillerRecording> {
   const session = captureMutationSession();
   const title = name ?? file.name.slice(0, 160);
   if (typeof title !== 'string' || !title.trim() || title.length > 160) throw new Error('invalid_filler_recording');
-  return enqueueImport(session, async session => {
-    const record = await prepareTrack(file, session);
+  return enqueueImport(session, signal, async (session, activeSignal) => {
+    const record = await prepareTrack(file, session, activeSignal);
     if (!record.sha256) throw new Error('track_integrity_failed');
     const aliases: Record<string, string> = {
       'audio/mp3': 'audio/mpeg', 'audio/x-m4a': 'audio/mp4', 'audio/wave': 'audio/wav',
@@ -1893,12 +2578,12 @@ async function cacheTrack(
   if (typeof trackId !== 'string' || !trackId.trim()) throw new Error('invalid_track_id');
   if (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error('invalid_track_hash');
   if (!(blob instanceof Blob) || !blob.size || blob.size > MAX_CLOUD_TRACK_BYTES) throw new Error('audio_byte_limit');
-  return enqueueImport(session, async session => {
+  return enqueueImport(session, undefined, async (session, signal) => {
     session?.assert();
     const sha256 = await digest(blob);
     session?.assert();
     if (sha256 !== expectedSha256) throw new Error('track_integrity_failed');
-    const record = await prepareTrack(new File([blob], 'cloud-audio', { type: blob.type }), session, true);
+    const record = await prepareTrack(new File([blob], 'cloud-audio', { type: blob.type }), session, signal, true);
     if (record.sha256 !== expectedSha256) throw new Error('track_integrity_failed');
     if (recording && Math.abs(record.duration - recording.duration) > 0.1) throw new Error('audio_duration_mismatch');
     const connection = await database(session);
