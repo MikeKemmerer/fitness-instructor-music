@@ -1530,7 +1530,7 @@ test('UserFiller imports, previews, loops, archives without stopping class, and 
   await page.goto('/');
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
   await automaticReady(page);
-  expect(await page.evaluate(async () => (await indexedDB.databases()).find(database => database.name === 'fitness-rehearsal')?.version)).toBe(7);
+  expect(await page.evaluate(async () => (await indexedDB.databases()).find(database => database.name === 'fitness-rehearsal')?.version)).toBe(8);
   await context.setOffline(true);
   await page.reload();
   const failures: string[] = [];

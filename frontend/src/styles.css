@@ -201,7 +201,8 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .cue-note-cell { white-space: pre-wrap; }
 .edit-panel { max-inline-size: 1040px; }
 .playlists-panel { max-inline-size: 1040px; }
-.playlist-workspace, .playlist-workspace .editor-heading-copy { min-inline-size: 0; }
+.playlist-workspace { min-inline-size: 0; max-inline-size: 100%; overflow-x: clip; }
+.playlist-workspace .editor-heading-copy { min-inline-size: 0; }
 .playlist-workspace h1 { overflow-wrap: anywhere; }
 .playlist-workspace .recovery-library { margin-block: 8px 16px; }
 .playlist-workspace .editor-actions { margin-block-end: 20px; }

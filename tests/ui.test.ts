@@ -55,6 +55,7 @@ describe('unified review source guards', () => {
     expect(css).toMatch(/html \{[^}]*scrollbar-gutter: stable;/);
     expect(css).toContain('.routine-chooser-open { overflow: hidden; }');
     expect(css).toContain('.editor-heading-actions .export-section { position: static; }');
+    expect(css).toMatch(/\.playlist-workspace \{[^}]*max-inline-size: 100%;[^}]*overflow-x: clip;/);
   });
   it('routes owned inline errors through deadline-aware helpers without direct error writes', () => {
     expect(source('filler-library.ts')).toContain("errors.show(t('audioByteLimit'))");
