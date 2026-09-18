@@ -553,7 +553,8 @@ export function createPlaylistEditor(context: PlaylistContext) {
         t(source === 'household' ? 'householdDestination' : 'localDestination'), t(playlist.locked ? 'locked' : 'unlocked')]) metadata.append(element('span', 'identity-value', value));
       metadata.append(element('span', 'identity-id', `ID ${playlist.id}`));
     }
-    status.textContent = [dirty ? t('unsaved') : '', copy?.pendingCloud ? t('savedPending') : !dirty ? t('saved') : ''].filter(Boolean).join(' / ');
+    status.textContent = [dirty ? t('unsaved') : '', copy?.pendingCloud ? t('savedPending')
+      : !dirty ? t(source === 'household' && persisted ? 'cloudSavedStatus' : 'saved') : ''].filter(Boolean).join(' / ');
     total.textContent = t('playlistTotal', { time: formatTime((playlist?.tracks ?? []).reduce((sum, track) => sum + track.duration, 0)) });
   }
   function sync() {

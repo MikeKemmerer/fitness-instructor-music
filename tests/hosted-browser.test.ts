@@ -905,7 +905,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await panel.getByRole('button', { name: 'Import audio', exact: true }).click();
     await (await choosingFiles).setFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
     await panel.getByRole('button', { name: 'Save', exact: true }).click();
-    await browserExpect(panel.locator('.playlist-save-status')).toHaveText('Saved');
+    await browserExpect(panel.locator('.playlist-save-status')).toHaveText('Saved to Cloud');
     await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to cloud.');
     await page.getByRole('tab', { name: 'Routines', exact: true }).click();
     const sequence = page.getByRole('region', { name: 'Class sequence', exact: true });
