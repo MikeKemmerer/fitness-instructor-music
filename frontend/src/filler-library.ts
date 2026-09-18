@@ -70,6 +70,8 @@ export function createFillerLibrary(context: FillerLibraryContext) {
   const catalogTitles = new Map<string, string>();
   let controller: AbortController | null = null;
   let disposed = false;
+  let refreshRequested = false;
+  let refreshQueued = false;
   let identity = '';
   let imported: { file: File; name: string; recording: FillerRecording; assertIdentity: () => void } | null = null;
   const ready = new Set<string>();
@@ -133,16 +135,21 @@ export function createFillerLibrary(context: FillerLibraryContext) {
       if (!disposed) sync();
     }
   };
-  const refresh = () => run(async (transfer, assert) => {
-    if (context.hosted && getCloudContext().access !== 'online') await refreshCloudSession();
-    assert();
-    const result = context.hosted ? await context.cloud.listFillers(transfer) : await listFillerRecordings();
-    assert();
-    recordings = structuredClone(result);
-    render();
-    context.changed();
-    errors.show(t('fillerRefreshed'), false);
-  }, false, true);
+  const refresh = async () => {
+    refreshRequested = true;
+    if (!available()) return;
+    refreshRequested = false;
+    await run(async (transfer, assert) => {
+      if (context.hosted && getCloudContext().access !== 'online') await refreshCloudSession();
+      assert();
+      const result = context.hosted ? await context.cloud.listFillers(transfer) : await listFillerRecordings();
+      assert();
+      recordings = structuredClone(result);
+      render();
+      context.changed();
+      errors.show(t('fillerRefreshed'), false);
+    }, false, true);
+  };
   const refreshButton = iconButton(t('refreshFillers'), RefreshCw, () => { void refresh(); });
   const add = iconButton(t(context.hosted ? 'uploadFiller' : 'addFiller'), context.hosted ? CloudUpload : Plus, () => {
     const chosen = file.files?.[0];
@@ -364,6 +371,13 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     cancel.disabled = controller?.signal.aborted ?? false;
     const recording = selected();
     details.textContent = recording ? t('fillerRecordingDetails', { duration: formatTime(recording.duration), id: recording.id }) : '';
+    if (refreshRequested && available() && !refreshQueued) {
+      refreshQueued = true;
+      queueMicrotask(() => {
+        refreshQueued = false;
+        if (!disposed && refreshRequested) void refresh();
+      });
+    }
   }
   sync();
   return {
@@ -376,7 +390,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     leave: () => { controller?.abort(); if (!controller && imported) void discardImport(imported); },
     dispose: () => {
       errors.dispose(); bpmErrors.dispose();
-      disposed = true; controller?.abort(); recordings = []; ready.clear();
+      disposed = true; refreshRequested = false; controller?.abort(); recordings = []; ready.clear();
       if (!controller && imported) void discardImport(imported);
     },
   };

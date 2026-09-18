@@ -2008,6 +2008,7 @@ function syncAvailability(): void {
   classPanel?.sync();
   playlistEditor?.sync();
   mediaLibrary?.sync();
+  fillerLibrary.sync();
   composition?.sync();
   if (composition && !routineOpen) composition.controls.hidden = true;
   protection.sync();

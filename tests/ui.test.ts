@@ -2121,6 +2121,26 @@ describe('offline shell status', () => {
 });
 
 describe('pending filler import recovery', () => {
+  it('queues a requested refresh until the owning editor lifecycle becomes available', async () => {
+    vi.resetModules(); vi.resetAllMocks(); nodes.length = 0; stubDocument();
+    const { createFillerLibrary } = await import('../frontend/src/filler-library');
+    const { createCloudLibrary } = await import('../frontend/src/cloud-library');
+    const recording: FillerRecording = { id: 'stored-filler', name: 'UserFiller', duration: 1,
+      asset: { id: 'stored-asset', bytes: 128, sha256: 'b'.repeat(64), contentType: 'audio/wav' } };
+    mocks.listFillerRecordings.mockResolvedValue([recording]);
+    let busy = true;
+    const panel = createFillerLibrary({ hosted: false, cloud: createCloudLibrary(),
+      preview: mocks.preview as unknown as AudioPreview, busy: () => busy, isCurrent: () => true, changed: () => {} });
+    await panel.refresh();
+    expect(mocks.listFillerRecordings).not.toHaveBeenCalled();
+    busy = false;
+    panel.sync();
+    await vi.waitFor(() => expect(panel.choices()).toEqual([recording]));
+    expect(mocks.listFillerRecordings).toHaveBeenCalledOnce();
+    panel.dispose();
+    vi.unstubAllGlobals();
+  });
+
   it.each(['500', '503', 'network', '400', 'cancel'] as const)('reuses only recoverable %s imports and never reuses cancelled or archived metadata', async failure => {
     vi.resetModules(); vi.resetAllMocks(); nodes.length = 0; stubDocument();
     vi.stubGlobal('confirm', vi.fn(() => true));

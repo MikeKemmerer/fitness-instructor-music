@@ -106,7 +106,7 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   const clockStart = new Date('2026-01-01T12:00:00Z');
   await page.clock.install({ time: clockStart });
   await page.clock.pauseAt(new Date(clockStart.getTime() + 1000));
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
+  await page.locator('#app > input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
   await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(29_999); await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(1); await expect(page.locator('.notice.notice-error')).toBeHidden();
@@ -239,7 +239,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
   await demo(page);
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({
+  await page.locator('#app > input[type=file][aria-label="Import audio"]').setInputFiles({
     name: 'Synthetic third track.wav', mimeType: 'audio/wav', buffer: syntheticWav(20),
   });
   await expect(page.locator('details[data-track-id]')).toHaveCount(3);
@@ -993,7 +993,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   await page.goto('/'); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Synthetic full class');
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles([
+  await page.locator('#app > input[type=file][aria-label="Import audio"]').setInputFiles([
     { name: 'Routine A.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
     { name: 'Routine B.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
   ]);
@@ -1665,7 +1665,7 @@ test('editor acceptance workflow preserves 1:05.5, analyzed levels and bounded t
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('My fitness routine');
   const wav = syntheticWav(70);
-  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
+  await page.locator('#app > input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
   const song = page.locator('details[data-track-id]').first();
   await expect(song).toBeVisible();
   if (!await song.evaluate(node => (node as HTMLDetailsElement).open)) await song.locator(':scope > summary').click();
