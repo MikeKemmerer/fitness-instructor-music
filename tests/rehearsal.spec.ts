@@ -106,7 +106,7 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   const clockStart = new Date('2026-01-01T12:00:00Z');
   await page.clock.install({ time: clockStart });
   await page.clock.pauseAt(new Date(clockStart.getTime() + 1000));
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'invalid.wav', mimeType: 'audio/wav', buffer: Buffer.alloc(10) });
   await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(29_999); await expect(page.locator('.notice.notice-error')).toBeVisible();
   await page.clock.runFor(1); await expect(page.locator('.notice.notice-error')).toBeHidden();
@@ -239,7 +239,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
   await demo(page);
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({
     name: 'Synthetic third track.wav', mimeType: 'audio/wav', buffer: syntheticWav(20),
   });
   await expect(page.locator('details[data-track-id]')).toHaveCount(3);
@@ -286,7 +286,7 @@ test('track reorder: three-track mouse drop preserves cues, levels and audio acr
   await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
   await page.mouse.down();
   await page.mouse.move(start.x + start.width / 2, target.y + target.height - 10, { steps: 10 });
-  await expect(page.locator('.track-insertion-line')).toBeVisible();
+  await expect(page.locator('#panel-edit .track-insertion-line')).toBeVisible();
   await expect(grip).toHaveAttribute('aria-pressed', 'true');
   expect(await trackOrder(page)).toEqual(original);
   expect(await oldNode!.evaluate(node => node.isConnected)).toBe(true);
@@ -367,7 +367,7 @@ test('track reorder: Escape, outside release and small grip clicks never change 
   const inputBounds = (await titleInput.boundingBox())!;
   await page.mouse.move(inputBounds.x + 10, inputBounds.y + inputBounds.height / 2);
   await page.mouse.down(); await page.mouse.move(inputBounds.x + 40, inputBounds.y + inputBounds.height / 2);
-  await expect(page.locator('.track-insertion-line')).toBeHidden(); await page.mouse.up();
+  await expect(page.locator('#panel-edit .track-insertion-line')).toBeHidden(); await page.mouse.up();
   await first.getByRole('button', { name: 'Play preview', exact: true }).click();
   const seek = first.getByRole('slider', { name: 'Seek preview', exact: true });
   await expect(seek).toBeEnabled();
@@ -375,7 +375,7 @@ test('track reorder: Escape, outside release and small grip clicks never change 
   const seekBounds = (await seek.boundingBox())!;
   await page.mouse.move(seekBounds.x + seekBounds.width / 4, seekBounds.y + seekBounds.height / 2);
   await page.mouse.down(); await page.mouse.move(seekBounds.x + seekBounds.width / 2, seekBounds.y + seekBounds.height / 2);
-  await expect(page.locator('.track-insertion-line')).toBeHidden(); await page.mouse.up();
+  await expect(page.locator('#panel-edit .track-insertion-line')).toBeHidden(); await page.mouse.up();
   expect(Number(await seek.inputValue())).toBeGreaterThan(1);
   await first.getByRole('button', { name: 'Pause preview', exact: true }).click();
   expect(await trackOrder(page)).toEqual(original);
@@ -396,7 +396,7 @@ test('track reorder: Escape, outside release and small grip clicks never change 
     if (cancellation === 'Escape') await page.keyboard.press('Escape');
     if (cancellation === 'outside') await page.mouse.move(list.x - 5, target.y + target.height - 10);
     await page.mouse.up();
-    await expect(page.locator('.track-insertion-line')).toBeHidden();
+    await expect(page.locator('#panel-edit .track-insertion-line')).toBeHidden();
     expect(await trackOrder(page)).toEqual(original);
     await expect(first).toHaveJSProperty('open', false);
     await expect(page.locator('.draft-status')).toHaveText(status!);
@@ -429,7 +429,7 @@ test('track reorder: actual touch pointers work in portrait and landscape with a
       const targetY = target.y + target.height - 10;
       await touch('touchStart', start.x + start.width / 2, startY);
       for (let step = 1; step <= 8; step++) await touch('touchMove', start.x + start.width / 2, startY + (targetY - startY) * step / 8);
-      await expect(page.locator('.track-insertion-line')).toBeVisible();
+      await expect(page.locator('#panel-edit .track-insertion-line')).toBeVisible();
       await expect(grip).toHaveAttribute('aria-pressed', 'true');
       expect(await trackOrder(page)).toEqual(original);
       await page.screenshot({ path: testInfo.outputPath(`track-touch-${viewport.width}.png`) });
@@ -470,7 +470,7 @@ test('track reorder: actual touch pointers work in portrait and landscape with a
     for (let step = 1; step <= 10; step++) await touch('touchMove', list.x + 6, 600 - step * 30);
     await touch('touchEnd');
     await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(scroll);
-    await expect(page.locator('.track-insertion-line')).toBeHidden();
+    await expect(page.locator('#panel-edit .track-insertion-line')).toBeHidden();
     expect(errors).toEqual([]);
   } finally { await cdp.detach(); }
 });
@@ -502,7 +502,7 @@ test('track reorder: locked drafts block forced pointer, grip arrows and both mo
     const button = page.getByRole('button', { name, exact: true }).first();
     await expect(button).toBeDisabled(); await button.dispatchEvent('click');
   }
-  await expect(page.locator('.track-insertion-line')).toBeHidden();
+  await expect(page.locator('#panel-edit .track-insertion-line')).toBeHidden();
   expect(await trackOrder(page)).toEqual(original);
   expect(await savedTracks(page)).toEqual(saved);
   await expect(page.locator('.draft-status')).toHaveText(status!);
@@ -753,7 +753,7 @@ test('playlist workspace Open Close Save and import Undo preserve independent ro
   await panel.getByRole('button', { name: 'Undo edit', exact: true }).click(); await expect(panel.locator('.playlist-entry')).toHaveCount(0);
   await panel.getByRole('button', { name: 'Redo edit', exact: true }).click(); await expect(panel.locator('.playlist-entry')).toHaveCount(2);
   await panel.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(panel.locator('.playlist-save-status')).toHaveText('Saved');
+  await expect(panel.locator('.playlist-save-status')).toHaveText('Saved on this device');
   await expect(panel.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   const readCopies = () => page.evaluate(async () => new Promise<import('../frontend/src/offline').PlaylistWorkingCopy[]>((accept, reject) => {
     const request = indexedDB.open('fitness-rehearsal'); request.onerror = () => reject(request.error);
@@ -879,7 +879,7 @@ test('independent local playlist copied into one routine prepares silently and r
   await setupLibrary.getByRole('button', { name: 'New music playlist', exact: true }).click();
   await setupLibrary.getByLabel('Playlist name', { exact: true }).fill('Lobby');
   await setupLibrary.locator('summary[aria-label="Add track"]').click();
-  await expect(setupLibrary.getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
+  await expect(setupLibrary.locator('button[aria-label="Import audio"]')).toBeVisible();
   await setupLibrary.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: syntheticWav(8) });
   await setupLibrary.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Playlist saved on this device.');
@@ -993,7 +993,7 @@ test('full class workflow uses saved references, silent practice and real audio 
   await page.goto('/'); await page.getByRole('tab', { name: 'Routines', exact: true }).click();
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await page.getByRole('textbox', { name: 'Routine name', exact: true }).fill('Synthetic full class');
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles([
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles([
     { name: 'Routine A.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
     { name: 'Routine B.wav', mimeType: 'audio/wav', buffer: syntheticWav(9) },
   ]);
@@ -1665,7 +1665,7 @@ test('editor acceptance workflow preserves 1:05.5, analyzed levels and bounded t
   await page.getByRole('button', { name: 'New routine', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Routine name', exact: true })).toHaveValue('My fitness routine');
   const wav = syntheticWav(70);
-  await page.locator('input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
+  await page.locator('#panel-edit input[type=file][aria-label="Import audio"]').setInputFiles({ name: 'Synthetic seventy seconds.wav', mimeType: 'audio/wav', buffer: wav });
   const song = page.locator('details[data-track-id]').first();
   await expect(song).toBeVisible();
   if (!await song.evaluate(node => (node as HTMLDetailsElement).open)) await song.locator(':scope > summary').click();

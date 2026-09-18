@@ -1464,12 +1464,13 @@ disableDemosInput.addEventListener('change', () => {
 });
 disableDemosLabel.append(disableDemosInput, element('span', '', t('disableDemos')));
 demoSettings.append(element('h2', '', t('demoSettings')), disableDemosLabel);
+const fillerLibraryCurrent = () => !appDisposed && (activeTab === 'settings' || activeTab === 'edit') && !shell.classList.contains('class-mode');
 const fillerLibrary = createFillerLibrary({ hosted: hostedPilot, cloud: cloudLibrary, preview: audioPreview,
   managed: hostedPilot,
   busy: () => editorBusy || retryingPending || transportOperation.pending,
   working: value => { editorBusy = value; syncAvailability(); },
   analyzeLoudness: analyzeTrackLoudness,
-  isCurrent: () => !appDisposed && (activeTab === 'settings' || activeTab === 'edit') && !shell.classList.contains('class-mode'),
+  isCurrent: fillerLibraryCurrent,
   changed: () => editorSession?.refreshFillers(),
   message: (message, error) => { if (activeTab === 'edit') notify(message, error); },
 });
@@ -2446,6 +2447,7 @@ void (async () => {
       await syncPending(transfer);
       await playlistEditor?.syncPending(transfer);
     });
+    if (!hostedPilot && fillerLibraryCurrent()) void fillerLibrary.refresh();
     if (routineOpen) requestPreparation();
   }
 })();
