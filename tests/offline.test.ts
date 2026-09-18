@@ -4562,6 +4562,65 @@ describe('bounded file import', () => {
     expect(await retained.arrayBuffer()).toEqual(await previous.arrayBuffer());
   });
 
+  it.each(['song', 'filler'] as const)(
+    'propagates caller cancellation through %s conversion and prevents a late upload or local commit', async kind => {
+      const began = deferred<void>();
+      const converted = deferred<{ blob: Blob; duration: number }>();
+      conversion.mockImplementationOnce((_file, options) => {
+        began.resolve();
+        expect(options?.signal).toBeDefined();
+        return converted.promise;
+      });
+      const controller = new AbortController();
+      const upload = vi.fn();
+      const operation = (async () => {
+        const local = kind === 'song'
+          ? await storeTrack(opusFile(), controller.signal)
+          : await addFillerRecording(opusFile(), 'Synthetic filler', controller.signal);
+        upload(local);
+      })();
+      await began.promise;
+      const conversionSignal = conversion.mock.calls[0][1]!.signal!;
+      controller.abort();
+      expect(conversionSignal.aborted).toBe(true);
+      converted.resolve({ blob: mockM4aContainer(), duration: (9600 - 312) / 48000 });
+      await expect(operation).rejects.toThrow('conversion_aborted');
+      expect(upload).not.toHaveBeenCalled();
+      expect(stores.tracks.size).toBe(0);
+      expect(stores.fillerRecordings.size).toBe(0);
+      expect(storage.opens).toBe(0);
+    },
+  );
+
+  it.each(['song', 'filler'] as const)(
+    'aborts the %s IndexedDB transaction when caller cancellation races its commit', async kind => {
+      const began = deferred<void>();
+      const resume = deferred<void>();
+      storage.onRequest = async (_store, method) => {
+        if (method !== 'put') return;
+        began.resolve();
+        await resume.promise;
+      };
+      const controller = new AbortController();
+      const operation = kind === 'song'
+        ? storeTrack(opusFile(), controller.signal)
+        : addFillerRecording(opusFile(), 'Synthetic filler', controller.signal);
+      await began.promise;
+      controller.abort();
+      resume.resolve();
+      await expect(operation).rejects.toThrow('conversion_aborted');
+      expect(stores.tracks.size).toBe(0);
+      expect(stores.fillerRecordings.size).toBe(0);
+      expect(storage.aborts).toBe(1);
+    },
+  );
+
+  it('threads the manager transfer signal into both local import paths before cloud upload', () => {
+    const source = readFileSync(new URL('../frontend/src/media-library.ts', import.meta.url), 'utf8');
+    expect(source).toContain('offline.storeTrack(entry.file, transfer.signal)');
+    expect(source).toContain("offline.addFillerRecording(entry.file, filename.replace(/\\.[^.]+$/, '').slice(0, 160), transfer.signal)");
+  });
+
   it.each(['song', 'filler'].flatMap(kind => ['hash', 'commit'].map(stage => [kind, stage])))(
     'retains standalone %s cancellation through post-conversion %s and rejects previously queued imports', async (kind, stage) => {
       const events = new EventTarget();

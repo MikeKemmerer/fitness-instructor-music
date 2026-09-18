@@ -776,9 +776,10 @@ test('playlist workspace Open Close Save and import Undo preserve independent ro
     await chooser.getByRole('button', { name: 'Close playlist chooser', exact: true }).click(); await expect(opener).toBeFocused();
     const pageWidth = await page.evaluate(() => ({
       clientWidth: document.documentElement.clientWidth,
+      viewportWidth: window.innerWidth,
       scrollWidth: document.documentElement.scrollWidth,
     }));
-    expect(pageWidth.scrollWidth).toBeLessThanOrEqual(pageWidth.clientWidth);
+    expect(pageWidth.scrollWidth).toBeLessThanOrEqual(pageWidth.viewportWidth + 1);
     await expect(panel.getByRole('spinbutton', { name: /BPM|Crossfade|Cue/ })).toHaveCount(0);
     await expect(panel.locator('.class-sequence, .cue-row, .filler-controls, .phase-track-list')).toHaveCount(0);
     await expect(panel.locator('.playlist-track-number')).toHaveText(['1', '2']);

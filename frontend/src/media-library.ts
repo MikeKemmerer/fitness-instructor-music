@@ -345,7 +345,7 @@ export function createMediaLibrary(context: MediaLibraryContext) {
       if (entry.phase === 'asset') {
         if (entry.kind === 'song') {
           if (!entry.track) {
-            try { entry.track = await offline.storeTrack(entry.file); }
+            try { entry.track = await offline.storeTrack(entry.file, transfer.signal); }
             catch (error) { batch = []; files.value = ''; throw error; }
           }
           assert();
@@ -361,7 +361,7 @@ export function createMediaLibrary(context: MediaLibraryContext) {
           entry.committed = { id: asset.id, kind: 'song', asset, metadata: { revision: 0, title: '', artist: '' } };
         } else {
           if (!entry.recording) {
-            try { entry.recording = await offline.addFillerRecording(entry.file, filename.replace(/\.[^.]+$/, '').slice(0, 160)); }
+            try { entry.recording = await offline.addFillerRecording(entry.file, filename.replace(/\.[^.]+$/, '').slice(0, 160), transfer.signal); }
             catch (error) { batch = []; files.value = ''; throw error; }
           }
           assert();

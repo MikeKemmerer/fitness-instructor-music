@@ -40,6 +40,7 @@ interface RehearsalDatabase extends DBSchema {
 
 interface MutationSession {
   assert(): void;
+  signal?: AbortSignal;
 }
 
 let hostedGeneration = 0;
@@ -149,6 +150,7 @@ async function mutate<Stores extends StoreName[], Result>(
     const transaction = connection.transaction(stores, 'readwrite');
     const abort = () => { try { transaction.abort(); } catch {} };
     if (session) pendingMutations.add(abort);
+    session?.signal?.addEventListener('abort', abort, { once: true });
     void transaction.done.catch(() => undefined);
     try {
       session?.assert();
@@ -164,6 +166,7 @@ async function mutate<Stores extends StoreName[], Result>(
       throw error;
     } finally {
       pendingMutations.delete(abort);
+      session?.signal?.removeEventListener('abort', abort);
     }
   } finally {
     connection.close();
@@ -2361,7 +2364,8 @@ async function validateM4aBlob(blob: Blob): Promise<ContainerAudio> {
 }
 
 async function convertTrack(
-  file: File, session: MutationSession | undefined, expectedDuration?: number, expectedChannels?: number,
+  file: File, session: MutationSession | undefined, signal: AbortSignal,
+  expectedDuration?: number, expectedChannels?: number,
 ): Promise<{ blob: Blob; duration: number }> {
   session?.assert();
   const controller = new AbortController();
@@ -2372,6 +2376,7 @@ async function convertTrack(
     if (controller.signal.aborted) throw new Error('conversion_aborted');
   };
   activeConversionControllers.add(controller);
+  signal.addEventListener('abort', abort, { once: true });
   lifecycle?.addEventListener('pagehide', abort);
   lifecycle?.addEventListener(hostedInvalidationEvent, abort);
   try {
@@ -2400,13 +2405,14 @@ async function convertTrack(
     throw error;
   } finally {
     activeConversionControllers.delete(controller);
+    signal.removeEventListener('abort', abort);
     lifecycle?.removeEventListener('pagehide', abort);
     lifecycle?.removeEventListener(hostedInvalidationEvent, abort);
   }
 }
 
 async function prepareTrack(
-  file: File, session: MutationSession | undefined, preserveBytes = false,
+  file: File, session: MutationSession | undefined, signal: AbortSignal, preserveBytes = false,
 ): Promise<StoredTrack> {
   session?.assert();
   const byteLimit = preserveBytes ? MAX_CLOUD_TRACK_BYTES : MAX_TRACK_BYTES;
@@ -2443,7 +2449,7 @@ async function prepareTrack(
   }
   session?.assert();
   if ((oggOpus || declaredOpus || container?.opus) && !preserveBytes) {
-    ({ blob, duration } = await convertTrack(file, session, opusDuration, channels));
+    ({ blob, duration } = await convertTrack(file, session, signal, opusDuration, channels));
   } else {
     let sourceDuration: number | undefined;
     try {
@@ -2453,7 +2459,7 @@ async function prepareTrack(
       session?.assert();
       if (preserveBytes || !(error instanceof Error) ||
         (!error.message.startsWith('unsupported_audio:') && error.message !== 'audio_metadata_timeout')) throw error;
-      ({ blob, duration } = await convertTrack(file, session, sourceDuration, channels));
+      ({ blob, duration } = await convertTrack(file, session, signal, sourceDuration, channels));
     }
   }
   session?.assert();
@@ -2462,8 +2468,8 @@ async function prepareTrack(
   return { blob, bytes: blob.size, duration, sha256 };
 }
 
-async function importTrack(file: File, session: MutationSession | undefined): Promise<Track> {
-  const record = await prepareTrack(file, session);
+async function importTrack(file: File, session: MutationSession | undefined, signal: AbortSignal): Promise<Track> {
+  const record = await prepareTrack(file, session, signal);
   const track: Track = {
     id: crypto.randomUUID(), title: file.name.slice(0, 300), duration: record.duration,
     firstBeat: 0, cues: [], bodyArea: '',
@@ -2476,24 +2482,35 @@ async function importTrack(file: File, session: MutationSession | undefined): Pr
 
 let importQueue: Promise<unknown> = Promise.resolve();
 
-function enqueueImport<Result>(session: MutationSession | undefined, operation: (session: MutationSession | undefined) => Promise<Result>): Promise<Result> {
+function enqueueImport<Result>(
+  session: MutationSession | undefined, signal: AbortSignal | undefined,
+  operation: (session: MutationSession, signal: AbortSignal) => Promise<Result>,
+): Promise<Result> {
   const lifecycle = !session && typeof window !== 'undefined' ? window : undefined;
-  let invalidated = false;
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
   const abort = () => {
-    invalidated = true;
+    cancel();
     for (const controller of activeConversionControllers) controller.abort();
     for (const cancel of pendingMutations) cancel();
   };
-  const captured = session ?? (lifecycle ? {
-    assert() { if (invalidated) throw new Error('conversion_aborted'); },
-  } : undefined);
+  const captured: MutationSession = {
+    signal: controller.signal,
+    assert() {
+      session?.assert();
+      if (controller.signal.aborted) throw new Error('conversion_aborted');
+    },
+  };
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
   lifecycle?.addEventListener('pagehide', abort);
   lifecycle?.addEventListener(hostedInvalidationEvent, abort);
   const result = importQueue.then(() => {
-    captured?.assert();
+    captured.assert();
     if (nativeDecodePending) throw new Error('audio_decoder_busy');
-    return operation(captured);
+    return operation(captured, controller.signal);
   }).finally(() => {
+    signal?.removeEventListener('abort', cancel);
     lifecycle?.removeEventListener('pagehide', abort);
     lifecycle?.removeEventListener(hostedInvalidationEvent, abort);
   });
@@ -2501,17 +2518,17 @@ function enqueueImport<Result>(session: MutationSession | undefined, operation: 
   return result;
 }
 
-export async function storeTrack(file: File): Promise<Track> {
+export async function storeTrack(file: File, signal?: AbortSignal): Promise<Track> {
   const session = captureMutationSession();
-  return enqueueImport(session, captured => importTrack(file, captured));
+  return enqueueImport(session, signal, (captured, activeSignal) => importTrack(file, captured, activeSignal));
 }
 
-export async function addFillerRecording(file: File, name?: string): Promise<FillerRecording> {
+export async function addFillerRecording(file: File, name?: string, signal?: AbortSignal): Promise<FillerRecording> {
   const session = captureMutationSession();
   const title = name ?? file.name.slice(0, 160);
   if (typeof title !== 'string' || !title.trim() || title.length > 160) throw new Error('invalid_filler_recording');
-  return enqueueImport(session, async session => {
-    const record = await prepareTrack(file, session);
+  return enqueueImport(session, signal, async (session, activeSignal) => {
+    const record = await prepareTrack(file, session, activeSignal);
     if (!record.sha256) throw new Error('track_integrity_failed');
     const aliases: Record<string, string> = {
       'audio/mp3': 'audio/mpeg', 'audio/x-m4a': 'audio/mp4', 'audio/wave': 'audio/wav',
@@ -2561,12 +2578,12 @@ async function cacheTrack(
   if (typeof trackId !== 'string' || !trackId.trim()) throw new Error('invalid_track_id');
   if (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error('invalid_track_hash');
   if (!(blob instanceof Blob) || !blob.size || blob.size > MAX_CLOUD_TRACK_BYTES) throw new Error('audio_byte_limit');
-  return enqueueImport(session, async session => {
+  return enqueueImport(session, undefined, async (session, signal) => {
     session?.assert();
     const sha256 = await digest(blob);
     session?.assert();
     if (sha256 !== expectedSha256) throw new Error('track_integrity_failed');
-    const record = await prepareTrack(new File([blob], 'cloud-audio', { type: blob.type }), session, true);
+    const record = await prepareTrack(new File([blob], 'cloud-audio', { type: blob.type }), session, signal, true);
     if (record.sha256 !== expectedSha256) throw new Error('track_integrity_failed');
     if (recording && Math.abs(record.duration - recording.duration) > 0.1) throw new Error('audio_duration_mismatch');
     const connection = await database(session);
