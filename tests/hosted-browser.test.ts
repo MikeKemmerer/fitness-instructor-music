@@ -853,7 +853,9 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await panel.getByRole('button', { name: 'New music playlist', exact: true }).click();
     await panel.getByLabel('Playlist name', { exact: true }).fill('Saved lobby');
     await panel.locator('summary[aria-label="Add track"]').click();
-    await panel.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
+    const choosingFiles = page.waitForEvent('filechooser');
+    await panel.getByRole('button', { name: 'Import audio', exact: true }).click();
+    await (await choosingFiles).setFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
     await browserExpect(panel.locator('.playlist-entry')).toHaveCount(1);
     await context.setOffline(true);
     await panel.getByRole('button', { name: 'Save', exact: true }).click();
@@ -899,7 +901,9 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await panel.getByLabel('Playlist name', { exact: true }).fill('Shared lobby');
     await panel.locator('summary[aria-label="Add track"]').click();
     await browserExpect(panel.getByRole('button', { name: 'From audio library', exact: true })).toBeVisible();
-    await panel.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
+    const choosingFiles = page.waitForEvent('filechooser');
+    await panel.getByRole('button', { name: 'Import audio', exact: true }).click();
+    await (await choosingFiles).setFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: fillerWav() });
     await panel.getByRole('button', { name: 'Save', exact: true }).click();
     await browserExpect(panel.locator('.playlist-save-status')).toHaveText('Saved');
     await browserExpect(page.locator('.notice [role=status]')).toHaveText('Saved to cloud.');
