@@ -116,7 +116,7 @@ const mocks = vi.hoisted(() => ({
   saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async (): Promise<DraftRecovery[]> => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), setActiveRoutine: vi.fn(), saveRoutine: vi.fn(),
   getActiveRoutineSelection: vi.fn<() => Promise<RevisionReference | null>>(async () => null), setActiveRoutineSelection: vi.fn(), listCachedClassSetups: vi.fn(async () => []),
-  storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), renderEditor: vi.fn(),
+  storeTrack: vi.fn(), removeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), renderEditor: vi.fn(),
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),
   cacheFillerRecording: vi.fn(), getFillerRecordingBlob: vi.fn(),
   listMusicPlaylists: vi.fn(), getMusicPlaylist: vi.fn(), saveMusicPlaylist: vi.fn(), cacheMusicPlaylist: vi.fn(), deleteMusicPlaylist: vi.fn(),
@@ -806,6 +806,8 @@ describe('uploaded audio manager', () => {
         expect(mocks.addFillerRecording).toHaveBeenCalledOnce(); expect(setup.cloud.addFiller).toHaveBeenCalledOnce();
         expect(mocks.storeTrack).not.toHaveBeenCalled(); expect(setup.cloud.uploadAsset).not.toHaveBeenCalled();
       }
+      expect(mocks.removeTrack).not.toHaveBeenCalled();
+      expect(mocks.removeFillerRecording).not.toHaveBeenCalled();
       setup.manager.dispose();
     },
   );
@@ -819,6 +821,59 @@ describe('uploaded audio manager', () => {
     setup.button(t('uploadAudio')).click(); await setup.idle();
     expect(setup.cloud.recordLibraryIntake).toHaveBeenCalledWith('song', 'asset-manager', 'original.wav', 20, expect.any(Object));
     expect(setup.cloud.putLibraryMetadata).toHaveBeenCalledWith('song', 'asset-manager', 1, { title: 'original', artist: '' }, expect.any(Object));
+    expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioBatchDone'));
+    setup.manager.dispose();
+  });
+
+  it.each([
+    ['song', 'bad:name.wav', 20],
+    ['filler', '.', 20],
+    ['song', 'long.wav', 1201],
+    ['filler', 'long.wav', 361],
+  ] as const)('rejects permanent %s intake facts before cloud writes and accepts a later selection', async (kind, filename, duration) => {
+    const setup = await harness();
+    const track = { id: 'local-song', title: 'long', duration, firstBeat: 0, bodyArea: '', cues: [] };
+    const recording: FillerRecording = { id: 'local-filler', name: 'long', duration, asset: setup.item.asset };
+    mocks.storeTrack.mockResolvedValue(track);
+    mocks.getTrackBlob.mockResolvedValue(setup.blob);
+    mocks.addFillerRecording.mockResolvedValue(recording);
+    mocks.getFillerRecordingBlob.mockResolvedValue(setup.blob);
+    setup.cloud.addFiller.mockResolvedValue(recording);
+    if (kind === 'filler' && duration > 360) mocks.removeFillerRecording.mockRejectedValue(new Error('cleanup_failed'));
+    if (kind === 'filler') {
+      setup.root.querySelectorAll('button').find(node => node.textContent === t('managedFillers'))!.click();
+      await setup.idle();
+    }
+    const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    files.files = [new File([setup.blob], filename, { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(kind === 'song' ? t('uploadAudio') : t('uploadFillers')).click();
+    await setup.idle();
+    if (filename.includes(':') || filename === '.') {
+      expect(mocks.storeTrack).not.toHaveBeenCalled(); expect(mocks.addFillerRecording).not.toHaveBeenCalled();
+      expect(mocks.removeTrack).not.toHaveBeenCalled(); expect(mocks.removeFillerRecording).not.toHaveBeenCalled();
+    } else if (kind === 'song') {
+      expect(mocks.removeTrack).toHaveBeenCalledOnce(); expect(mocks.removeTrack).toHaveBeenCalledWith(track.id);
+      expect(mocks.removeFillerRecording).not.toHaveBeenCalled();
+      expect(setup.root.querySelector('.media-status')!.textContent).toBe('invalid_audio');
+    } else {
+      expect(mocks.removeFillerRecording).toHaveBeenCalledOnce(); expect(mocks.removeFillerRecording).toHaveBeenCalledWith(recording.id);
+      expect(mocks.removeTrack).not.toHaveBeenCalled();
+      expect(setup.root.querySelector('.media-status')!.textContent).toBe('invalid_audio');
+    }
+    expect(setup.cloud.uploadAsset).not.toHaveBeenCalled();
+    expect(setup.cloud.addFiller).not.toHaveBeenCalled();
+    expect(setup.cloud.recordLibraryIntake).not.toHaveBeenCalled();
+    expect(setup.button(t('resumeAudioUpload')).hidden).toBe(true);
+
+    const validDuration = 20;
+    mocks.storeTrack.mockResolvedValue({ ...track, duration: validDuration });
+    mocks.addFillerRecording.mockResolvedValue({ ...recording, duration: validDuration });
+    files.files = [new File([setup.blob], 'later.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(kind === 'song' ? t('uploadAudio') : t('uploadFillers')).click();
+    await setup.idle();
+    expect(setup.cloud.recordLibraryIntake).toHaveBeenCalledOnce();
+    expect(mocks.removeTrack).toHaveBeenCalledTimes(kind === 'song' && duration > 360 ? 1 : 0);
+    expect(mocks.removeFillerRecording).toHaveBeenCalledTimes(kind === 'filler' && duration > 360 ? 1 : 0);
     expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioBatchDone'));
     setup.manager.dispose();
   });

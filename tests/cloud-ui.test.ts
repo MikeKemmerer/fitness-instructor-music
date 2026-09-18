@@ -178,7 +178,9 @@ describe('uploaded audio manager adapters', () => {
     const intake = harness.fetcher.mock.calls[0]![1]!; const edit = harness.fetcher.mock.calls[1]![1]!;
     expect(new Headers(intake.headers).get('If-Match')).toBe('"0"'); expect(JSON.parse(String(intake.body))).toEqual({ filename: 'source.wav', duration: 30 });
     expect(new Headers(edit.headers).get('If-Match')).toBe('"1"'); expect(JSON.parse(String(edit.body))).toEqual(value);
-    await expect(harness.library.recordLibraryIntake('filler', 'asset-a', '../source.wav', 30)).rejects.toThrow();
+    for (const filename of ['../source.wav', 'source:mix.wav', '.', '..', 'source\u0001.wav', 'source\u007f.wav']) {
+      await expect(harness.library.recordLibraryIntake('filler', 'asset-a', filename, 30)).rejects.toThrow('invalid_audio');
+    }
     await expect(harness.library.putLibraryMetadata('song', 'asset-a', 1, { title: '', artist: '', bpm: 221 })).rejects.toThrow();
     expect(harness.fetcher).toHaveBeenCalledTimes(2);
   });

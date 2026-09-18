@@ -8,6 +8,26 @@ const CLOUD_DOWNLOAD_CONCURRENCY = 2;
 const downloadQueue: Array<() => void> = [];
 let activeDownloads = 0;
 
+export function isLibraryIntakeFilename(filename: unknown): filename is string {
+  return typeof filename === 'string' && filename.length <= 300 && !!filename.trim()
+    && !/[\\/:\x00-\x1f\x7f]/.test(filename) && filename !== '.' && filename !== '..';
+}
+
+export function validateLibraryIntakeFilename(filename: unknown): asserts filename is string {
+  if (!isLibraryIntakeFilename(filename)) throw new Error('invalid_audio');
+}
+
+export function validateLibraryIntakeDuration(kind: ManagedAudioItem['kind'], duration: unknown): asserts duration is number {
+  if (!Number.isFinite(duration) || (duration as number) <= 0 || (duration as number) > (kind === 'song' ? 1200 : 360)) {
+    throw new Error('invalid_audio');
+  }
+}
+
+export function validateLibraryIntake(kind: ManagedAudioItem['kind'], filename: unknown, duration: unknown): void {
+  validateLibraryIntakeFilename(filename);
+  validateLibraryIntakeDuration(kind, duration);
+}
+
 function withDownloadSlot(action: () => Promise<void>, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const cancel = () => {
@@ -747,7 +767,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     if (!value || !Number.isSafeInteger(value.revision) || value.revision < 0
       || typeof value.title !== 'string' || value.title.length > 300 || typeof value.artist !== 'string' || value.artist.length > 300
       || (value.bpm !== undefined && (!Number.isFinite(value.bpm) || value.bpm < 40 || value.bpm > 220))
-      || (value.filename !== undefined && (typeof value.filename !== 'string' || value.filename.length > 300 || /[/\\]/.test(value.filename)))
+      || (value.filename !== undefined && !isLibraryIntakeFilename(value.filename))
       || (value.duration !== undefined && (!Number.isFinite(value.duration) || value.duration <= 0 || value.duration > 1200))) throw new Error('cloud_invalid_response');
     return structuredClone(value);
   };
@@ -792,7 +812,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
   };
   const recordLibraryIntake = async (kind: ManagedAudioItem['kind'], id: string, filename: string, duration: number, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {
     const assert = operation(transfer, true);
-    if (!filename || filename.length > 300 || /[/\\]/.test(filename) || !Number.isFinite(duration) || duration <= 0 || duration > (kind === 'song' ? 1200 : 360)) throw new Error('invalid_audio');
+    validateLibraryIntake(kind, filename, duration);
     const result = await client.request<{ metadata: LibraryMetadata }>(`${libraryPath(kind, id)}/intake`, { method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'If-Match': '"0"' }, body: JSON.stringify({ filename, duration }), signal: transfer.signal });
     assert();

@@ -5,7 +5,7 @@ import type { AudioPreview } from '../../shared/preview-contract';
 import { allRoutineFillers, allRoutineTracks, type Routine, type Track, type FillerRecording } from '../../shared/routine';
 import * as offline from './offline';
 import { captureCloudIdentity, CloudRequestError, getCloudContext, getCloudRole, refreshCloudSession, subscribeCloudSession } from './cloud-client';
-import { cloudHash, type createCloudLibrary, type CloudTransfer } from './cloud-library';
+import { cloudHash, validateLibraryIntakeDuration, validateLibraryIntakeFilename, type createCloudLibrary, type CloudTransfer } from './cloud-library';
 import { cloudErrorMessage } from './cloud-ui';
 import { audioDuration } from './audio-library-picker';
 import { formatNumber, formatTime, t } from './i18n';
@@ -335,8 +335,7 @@ export function createMediaLibrary(context: MediaLibraryContext) {
     for (const [index, entry] of batch.entries()) {
       if (entry.phase === 'done') continue;
       assert(); status.textContent = t('audioBatchProgress', { current: index + 1, total: batch.length, name: entry.file.name });
-      const filename = entry.file.name.split(/[\\/]/).pop()!;
-      if (!filename || filename.length > 300) throw new Error('invalid_audio');
+      const filename = entry.file.name;
       const duration = () => entry.track?.duration ?? entry.recording!.duration;
       const desired = { title: filename.replace(/\.[^.]+$/, ''), artist: '' };
       const intakeMatches = (metadata: ManagedAudioItem['metadata']) => metadata.revision >= 1
@@ -346,11 +345,21 @@ export function createMediaLibrary(context: MediaLibraryContext) {
       if (entry.phase === 'asset') {
         if (entry.kind === 'song') {
           entry.track ??= await offline.storeTrack(entry.file); assert();
+          try { validateLibraryIntakeDuration(entry.kind, entry.track.duration); }
+          catch (error) {
+            try { await offline.removeTrack(entry.track.id); } catch {}
+            batch = []; files.value = ''; throw error;
+          }
           const blob = await offline.getTrackBlob(entry.track.id); assert(); if (!blob) throw new Error('missing_audio');
           const asset = await context.cloud.uploadAsset(blob, transfer); assert();
           entry.committed = { id: asset.id, kind: 'song', asset, metadata: { revision: 0, title: '', artist: '' } };
         } else {
           entry.recording ??= await offline.addFillerRecording(entry.file, filename.replace(/\.[^.]+$/, '').slice(0, 160)); assert();
+          try { validateLibraryIntakeDuration(entry.kind, entry.recording.duration); }
+          catch (error) {
+            try { await offline.removeFillerRecording(entry.recording.id); } catch {}
+            batch = []; files.value = ''; throw error;
+          }
           const blob = await offline.getFillerRecordingBlob(entry.recording); assert(); if (!blob) throw new Error('missing_audio');
           const recording = await context.cloud.addFiller(entry.recording, blob, transfer); assert();
           entry.committed = { id: recording.id, kind: 'filler', asset: recording.asset, recording, metadata: { revision: 0, title: '', artist: '' } };
@@ -414,6 +423,8 @@ export function createMediaLibrary(context: MediaLibraryContext) {
     if (blocked() || !online() || !files.files?.length || pendingBatch()) return;
     const selected = Array.from(files.files);
     if (selected.length > 100 || selected.some(file => !file.size || file.size > 32 * 1024 * 1024)) { status.textContent = t('audioByteLimit'); return; }
+    try { for (const file of selected) validateLibraryIntakeFilename(file.name); }
+    catch (error) { batch = []; files.value = ''; showError(error); render(); return; }
     batch = selected.map(file => ({ file, kind, phase: 'asset' })); void uploadBatch();
   }, true);
   const resume = iconButton(t('resumeAudioUpload'), CloudUpload, () => { if (pendingBatch()) void uploadBatch(); }, true);
