@@ -6,11 +6,13 @@ interface ReorderOptions {
   tracks: () => readonly Track[];
   fingerprint: () => string;
   commit: (trackId: string, destination: number) => void;
+  // Each mounted list needs its own marker class so page-level selectors stay unambiguous.
+  lineClass?: string;
 }
 
 export function createTrackReorder(list: HTMLElement, options: ReorderOptions) {
   const entries: { track: Track; card: HTMLElement; grip: HTMLButtonElement }[] = [];
-  const line = element('div', 'track-insertion-line');
+  const line = element('div', options.lineClass ?? 'track-insertion-line');
   line.hidden = true;
   line.setAttribute('aria-hidden', 'true');
   list.append(line);

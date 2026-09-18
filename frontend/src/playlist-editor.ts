@@ -115,6 +115,7 @@ export function createPlaylistEditor(context: PlaylistContext) {
   const announcement = element('p', 'visually-hidden'); announcement.setAttribute('aria-live', 'polite');
   const file = element('input', 'visually-hidden'); file.type = 'file'; file.multiple = true; file.tabIndex = -1;
   file.accept = 'audio/*,.opus,.mp3,.m4a,.aac,.wav,.ogg,.flac,.webm'; file.setAttribute('aria-label', t('import'));
+  file.setAttribute('aria-hidden', 'true');
   const importAudio = iconButton(t('import'), Plus, () => { if (editable()) file.click(); }, true);
   const picker = createAudioLibraryPicker({ library: media, hosted: context.hosted,
     available: editable, identity: () => `${playlist?.id}:${generation}`, remaining: () => 100 - (playlist?.tracks.length ?? 0),
@@ -209,7 +210,7 @@ export function createPlaylistEditor(context: PlaylistContext) {
     });
   }, true);
   footer.append(close);
-  const chooser = element('section', 'routine-library playlist-library');
+  const chooser = element('section', 'playlist-library');
   const search = element('input'); search.type = 'search'; search.setAttribute('aria-label', t('searchPlaylists')); search.placeholder = t('searchPlaylists');
   search.addEventListener('input', renderChoices);
   const filters = element('div', 'library-toolbar');
@@ -239,10 +240,10 @@ export function createPlaylistEditor(context: PlaylistContext) {
     assets = {}; copy = null; envelope = null; persisted = false; dirty = true; generation++; observe(); render(); name.focus();
   }, true);
   filters.append(locationMenu.element, statusMenu.element, field(t('favoritesOnly'), favoritesOnly), refresh, newButton);
-  const choiceRows = element('div', 'routine-library-rows');
+  const choiceRows = element('div', 'playlist-library-rows');
   chooser.append(search, filters, choiceRows);
   const chooserHome = element('div'); chooserHome.append(chooser);
-  const chooserDialog = element('dialog', 'library-dialog routine-chooser playlist-chooser'); chooserDialog.setAttribute('aria-label', t('openPlaylistDialog'));
+  const chooserDialog = element('dialog', 'library-dialog chooser-dialog playlist-chooser'); chooserDialog.setAttribute('aria-label', t('openPlaylistDialog'));
   const chooserHeading = element('div', 'chooser-heading');
   const chooserClose = iconButton(t('closePlaylistChooser'), X, () => dismissChooser());
   chooserHeading.append(element('h2', '', t('openPlaylistDialog')), chooserClose);
@@ -273,8 +274,8 @@ export function createPlaylistEditor(context: PlaylistContext) {
       if (!locations.has(value.source) || !statuses.has(value.playlist.published ? 'published' : 'draft')
         || (favoritesOnly.checked && !favorites.has(key(value)))
         || !value.playlist.name.toLocaleLowerCase('en-US').includes(search.value.trim().toLocaleLowerCase('en-US'))) continue;
-      const row = element('div', 'routine-library-row');
-      const text = element('div', 'routine-library-info');
+      const row = element('div', 'playlist-library-row');
+      const text = element('div', 'playlist-library-info');
       text.append(element('strong', '', value.playlist.name), element('span', 'muted',
         `${t(value.source === 'local' ? 'localFilter' : 'householdFilter')} / ${t(value.playlist.published ? 'exportPublished' : 'draft')}${value.copy?.pendingCloud ? ` / ${t('savedPending')}` : ''}`));
       if (isCurrent(value)) { row.setAttribute('aria-current', 'true'); text.append(element('span', 'muted', t('currentPlaylist'))); }
@@ -460,7 +461,8 @@ export function createPlaylistEditor(context: PlaylistContext) {
   }
   function renderRows() {
     reorder?.cancel(); rows.replaceChildren(); rowSync.length = 0;
-    reorder = createTrackReorder(rows, { editable, tracks: () => playlist?.tracks ?? [], fingerprint: () => JSON.stringify(playlist), commit: move });
+    reorder = createTrackReorder(rows, { editable, tracks: () => playlist?.tracks ?? [], fingerprint: () => JSON.stringify(playlist), commit: move,
+      lineClass: 'playlist-insertion-line' });
     for (const [index, track] of (playlist?.tracks ?? []).entries()) {
       const row = element('div', 'playlist-entry'); row.dataset.trackId = track.id; row.setAttribute('role', 'listitem');
       const grip = iconButton(t('reorderTrack', { name: track.title }), GripVertical, () => {}); grip.classList.add('track-grip');

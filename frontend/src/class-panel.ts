@@ -332,6 +332,7 @@ export function createClassPanel(context: ClassPanelContext) {
       }));
       const file = element('input'); file.type = 'file'; file.multiple = true; file.accept = 'audio/*,.opus,.mp3,.m4a,.aac,.wav,.ogg,.flac,.webm';
       file.setAttribute('aria-label', t('import'));
+      file.setAttribute('aria-hidden', 'true');
       file.addEventListener('change', () => {
         const files = Array.from(file.files ?? []); file.value = '';
         if (!editable() || !files.length) return;
