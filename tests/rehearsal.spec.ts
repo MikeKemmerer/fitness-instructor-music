@@ -879,7 +879,7 @@ test('independent local playlist copied into one routine prepares silently and r
   await setupLibrary.getByRole('button', { name: 'New music playlist', exact: true }).click();
   await setupLibrary.getByLabel('Playlist name', { exact: true }).fill('Lobby');
   await setupLibrary.locator('summary[aria-label="Add track"]').click();
-  await expect(setupLibrary.getByRole('button', { name: 'Import audio', exact: true }).and(setupLibrary.locator('button'))).toBeVisible();
+  await expect(setupLibrary.getByRole('button', { name: 'Import audio', exact: true }).first()).toBeVisible();
   await setupLibrary.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: syntheticWav(8) });
   await setupLibrary.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Playlist saved on this device.');
