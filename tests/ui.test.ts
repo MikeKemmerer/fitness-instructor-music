@@ -752,19 +752,63 @@ describe('uploaded audio manager', () => {
     expect(setup.preview.playTrack).not.toHaveBeenCalled(); setup.manager.dispose();
   });
 
-  it('does not reupload committed bytes when intake metadata fails', async () => {
-    const setup = await harness();
-    mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'original', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
-    mocks.getTrackBlob.mockResolvedValue(setup.blob);
-    setup.cloud.recordLibraryIntake.mockRejectedValueOnce(new Error('network_unavailable'));
-    const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
-    files.files = [new File([setup.blob], 'original.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
-    setup.button(t('uploadAudio')).click(); await setup.idle();
-    expect(setup.cloud.uploadAsset).toHaveBeenCalledOnce(); expect(mocks.storeTrack).toHaveBeenCalledOnce();
-    expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioUploadMetadataFailed'));
-    expect(setup.button(t('resumeAudioUpload')).hidden).toBe(true); expect(setup.cloud.managedPage).toHaveBeenCalledTimes(2);
-    setup.manager.dispose();
-  });
+  it.each([
+    ['song', 'intake-transient'], ['song', 'intake-lost'], ['song', 'metadata-transient'], ['song', 'metadata-lost'],
+    ['filler', 'intake-transient'], ['filler', 'intake-lost'], ['filler', 'metadata-transient'], ['filler', 'metadata-lost'],
+  ] as const)(
+    'resumes a committed %s after %s without duplicating its bytes or catalog entry',
+    async (kind, failure) => {
+      const setup = await harness();
+      const localRecording: FillerRecording = { id: 'local-filler', name: 'original', duration: 20, asset: setup.item.asset };
+      const remoteRecording: FillerRecording = { ...localRecording, id: 'remote-filler' };
+      mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'original', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
+      mocks.getTrackBlob.mockResolvedValue(setup.blob);
+      mocks.addFillerRecording.mockResolvedValue(localRecording);
+      mocks.getFillerRecordingBlob.mockResolvedValue(setup.blob);
+      setup.cloud.addFiller.mockResolvedValue(remoteRecording);
+      let authoritative: LibraryMetadata = { revision: 0, title: '', artist: '' };
+      let intakeCalls = 0;
+      setup.cloud.libraryMetadata.mockImplementation(async () => structuredClone(authoritative));
+      setup.cloud.recordLibraryIntake.mockImplementation(async (_kind, _id, filename, duration) => {
+        intakeCalls++;
+        const accepted: LibraryMetadata = { revision: 1, title: '', artist: '', filename, duration };
+        if (failure === 'intake-transient' && intakeCalls === 1) throw new Error('network_unavailable');
+        authoritative = accepted;
+        if (failure === 'intake-lost' && intakeCalls === 1) throw new Error('network_unavailable');
+        return structuredClone(accepted);
+      });
+      let metadataCalls = 0;
+      setup.cloud.putLibraryMetadata.mockImplementation(async (_kind, _id, revision, value) => {
+        metadataCalls++;
+        if (failure === 'metadata-transient' && metadataCalls === 1) throw new Error('network_unavailable');
+        authoritative = { ...value, revision: revision + 1, filename: 'original.wav', duration: 20 };
+        if (failure === 'metadata-lost' && metadataCalls === 1) throw new Error('network_unavailable');
+        return structuredClone(authoritative);
+      });
+      if (kind === 'filler') {
+        setup.root.querySelectorAll('button').find(node => node.textContent === t('managedFillers'))!.click();
+        await setup.idle();
+      }
+      const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
+      files.files = [new File([setup.blob], 'original.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+      setup.button(kind === 'song' ? t('uploadAudio') : t('uploadFillers')).click(); await setup.idle();
+      expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioUploadMetadataFailed'));
+      expect(setup.button(t('resumeAudioUpload')).hidden).toBe(false);
+      setup.button(t('resumeAudioUpload')).click(); await setup.idle();
+      expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioBatchDone'));
+      expect(setup.button(t('resumeAudioUpload')).hidden).toBe(true);
+      expect(setup.cloud.recordLibraryIntake).toHaveBeenCalledTimes(failure === 'intake-transient' ? 2 : 1);
+      expect(setup.cloud.putLibraryMetadata).toHaveBeenCalledTimes(failure === 'metadata-transient' ? 2 : 1);
+      if (kind === 'song') {
+        expect(mocks.storeTrack).toHaveBeenCalledOnce(); expect(setup.cloud.uploadAsset).toHaveBeenCalledOnce();
+        expect(mocks.addFillerRecording).not.toHaveBeenCalled(); expect(setup.cloud.addFiller).not.toHaveBeenCalled();
+      } else {
+        expect(mocks.addFillerRecording).toHaveBeenCalledOnce(); expect(setup.cloud.addFiller).toHaveBeenCalledOnce();
+        expect(mocks.storeTrack).not.toHaveBeenCalled(); expect(setup.cloud.uploadAsset).not.toHaveBeenCalled();
+      }
+      setup.manager.dispose();
+    },
+  );
 
   it('uses the intake response revision for uploaded editable metadata', async () => {
     const setup = await harness();
@@ -776,6 +820,25 @@ describe('uploaded audio manager', () => {
     expect(setup.cloud.recordLibraryIntake).toHaveBeenCalledWith('song', 'asset-manager', 'original.wav', 20, expect.any(Object));
     expect(setup.cloud.putLibraryMetadata).toHaveBeenCalledWith('song', 'asset-manager', 1, { title: 'original', artist: '' }, expect.any(Object));
     expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioBatchDone'));
+    setup.manager.dispose();
+  });
+
+  it('does not overwrite authoritative metadata changed after a lost metadata response', async () => {
+    const setup = await harness();
+    mocks.storeTrack.mockResolvedValue({ id: 'local-song', title: 'original', duration: 20, firstBeat: 0, bodyArea: '', cues: [] });
+    mocks.getTrackBlob.mockResolvedValue(setup.blob);
+    setup.cloud.putLibraryMetadata.mockRejectedValueOnce(new Error('network_unavailable'));
+    setup.cloud.libraryMetadata.mockResolvedValue({
+      revision: 2, title: 'Concurrent title', artist: 'Another editor', filename: 'original.wav', duration: 20,
+    });
+    const files = setup.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    files.files = [new File([setup.blob], 'original.wav', { type: 'audio/wav' })]; files.dispatchEvent(new Event('change'));
+    setup.button(t('uploadAudio')).click(); await setup.idle();
+    setup.button(t('resumeAudioUpload')).click(); await setup.idle();
+    expect(setup.cloud.uploadAsset).toHaveBeenCalledOnce(); expect(setup.cloud.recordLibraryIntake).toHaveBeenCalledOnce();
+    expect(setup.cloud.putLibraryMetadata).toHaveBeenCalledOnce();
+    expect(setup.button(t('resumeAudioUpload')).hidden).toBe(false);
+    expect(setup.root.querySelector('.media-status')!.textContent).toBe(t('audioUploadMetadataFailed'));
     setup.manager.dispose();
   });
 

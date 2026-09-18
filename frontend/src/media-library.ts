@@ -92,7 +92,18 @@ export function createMediaLibrary(context: MediaLibraryContext) {
   let dialogFeedback: HTMLElement | null = null;
   let owner = '';
   let catalogChanged = false;
-  type PendingUpload = { file: File; kind: ManagedAudioItem['kind']; track?: Track; recording?: FillerRecording; committed?: ManagedAudioItem; done?: boolean };
+  type UploadPhase = 'asset' | 'intake' | 'metadata' | 'done';
+  type PendingUpload = {
+    file: File;
+    kind: ManagedAudioItem['kind'];
+    phase: UploadPhase;
+    track?: Track;
+    recording?: FillerRecording;
+    committed?: ManagedAudioItem;
+    intakeRevision?: number;
+    intakeAttempted?: boolean;
+    metadataAttempted?: boolean;
+  };
   let batch: PendingUpload[] = [];
   const author = () => context.hosted && ['owner', 'editor'].includes(getCloudRole() ?? '');
   const online = () => getCloudContext().access === 'online' && globalThis.navigator?.onLine !== false;
@@ -151,7 +162,8 @@ export function createMediaLibrary(context: MediaLibraryContext) {
   };
   const refreshButton = iconButton(t('refreshAudio'), RefreshCw, () => { void refresh(); }, true);
   const more = iconButton(t('moreAudio'), RefreshCw, () => { if (cursor) void run((transfer, assert) => load(transfer, assert, false)); }, true);
-  const cancel = iconButton(t('cancel'), X, () => { controller?.abort(); stopPreview(); status.textContent = t(batch.some(entry => !entry.done) ? 'audioBatchCancelled' : 'audioCheckIncomplete'); }, true);
+  const pendingBatch = () => batch.some(entry => entry.phase !== 'done');
+  const cancel = iconButton(t('cancel'), X, () => { controller?.abort(); stopPreview(); status.textContent = t(pendingBatch() ? 'audioBatchCancelled' : 'audioCheckIncomplete'); }, true);
   const tabButtons = new Map<ManagedAudioItem['kind'], HTMLButtonElement>();
   for (const mode of ['song', 'filler'] as const) {
     const button = element('button', '', t(mode === 'song' ? 'managedSongs' : 'managedFillers')); button.type = 'button';
@@ -321,11 +333,17 @@ export function createMediaLibrary(context: MediaLibraryContext) {
   const uploadBatch = () => run(async (transfer, assert) => {
     stopPreview();
     for (const [index, entry] of batch.entries()) {
-      if (entry.done) continue;
+      if (entry.phase === 'done') continue;
       assert(); status.textContent = t('audioBatchProgress', { current: index + 1, total: batch.length, name: entry.file.name });
       const filename = entry.file.name.split(/[\\/]/).pop()!;
       if (!filename || filename.length > 300) throw new Error('invalid_audio');
-      if (!entry.committed) {
+      const duration = () => entry.track?.duration ?? entry.recording!.duration;
+      const desired = { title: filename.replace(/\.[^.]+$/, ''), artist: '' };
+      const intakeMatches = (metadata: ManagedAudioItem['metadata']) => metadata.revision >= 1
+        && metadata.filename === filename && metadata.duration === duration();
+      const desiredMatches = (metadata: ManagedAudioItem['metadata']) => metadata.title === desired.title
+        && metadata.artist === desired.artist && metadata.bpm === undefined;
+      if (entry.phase === 'asset') {
         if (entry.kind === 'song') {
           entry.track ??= await offline.storeTrack(entry.file); assert();
           const blob = await offline.getTrackBlob(entry.track.id); assert(); if (!blob) throw new Error('missing_audio');
@@ -337,12 +355,49 @@ export function createMediaLibrary(context: MediaLibraryContext) {
           const recording = await context.cloud.addFiller(entry.recording, blob, transfer); assert();
           entry.committed = { id: recording.id, kind: 'filler', asset: recording.asset, recording, metadata: { revision: 0, title: '', artist: '' } };
         }
+        entry.phase = 'intake';
       }
-      const item = entry.committed;
-      entry.done = true;
+      const item = entry.committed!;
       try {
-        const metadata = await context.cloud.recordLibraryIntake(item.kind, item.id, filename, entry.track?.duration ?? entry.recording!.duration, transfer); assert();
-        item.metadata = await context.cloud.putLibraryMetadata(item.kind, item.id, metadata.revision, { title: filename.replace(/\.[^.]+$/, ''), artist: '' }, transfer); assert();
+        if (entry.phase === 'intake') {
+          if (entry.intakeAttempted) {
+            const authoritative = await context.cloud.libraryMetadata(item.kind, item.id, transfer); assert();
+            if (intakeMatches(authoritative)) {
+              item.metadata = authoritative;
+              if (authoritative.revision === 1) {
+                entry.intakeRevision = 1; entry.phase = 'metadata';
+              } else if (desiredMatches(authoritative)) {
+                entry.phase = 'done';
+              } else {
+                throw new CloudRequestError('cloud_http_error', 409, 'metadata_conflict');
+              }
+            } else if (authoritative.revision !== 0 || authoritative.filename !== undefined || authoritative.duration !== undefined) {
+              throw new CloudRequestError('cloud_http_error', 409, 'metadata_conflict');
+            }
+          }
+          if (entry.phase === 'intake') {
+            entry.intakeAttempted = true;
+            const metadata = await context.cloud.recordLibraryIntake(item.kind, item.id, filename, duration(), transfer); assert();
+            item.metadata = metadata; entry.intakeRevision = metadata.revision; entry.phase = 'metadata';
+          }
+        }
+        if (entry.phase === 'metadata') {
+          if (entry.metadataAttempted) {
+            const authoritative = await context.cloud.libraryMetadata(item.kind, item.id, transfer); assert();
+            if (authoritative.revision !== entry.intakeRevision && intakeMatches(authoritative) && desiredMatches(authoritative)) {
+              item.metadata = authoritative; entry.phase = 'done';
+            } else if (authoritative.revision !== entry.intakeRevision) {
+              throw new CloudRequestError('cloud_http_error', 409, 'metadata_conflict');
+            } else {
+              item.metadata = authoritative;
+            }
+          }
+          if (entry.phase === 'metadata') {
+            entry.metadataAttempted = true;
+            item.metadata = await context.cloud.putLibraryMetadata(item.kind, item.id, entry.intakeRevision!, desired, transfer); assert();
+            entry.phase = 'done';
+          }
+        }
       } catch (error) {
         files.value = '';
         if (!transfer.signal?.aborted) {
@@ -356,12 +411,12 @@ export function createMediaLibrary(context: MediaLibraryContext) {
     await load(transfer, assert, true); status.textContent = t('audioBatchDone'); files.value = '';
   });
   const upload = iconButton(t('uploadAudio'), CloudUpload, () => {
-    if (blocked() || !online() || !files.files?.length || batch.some(entry => !entry.done)) return;
+    if (blocked() || !online() || !files.files?.length || pendingBatch()) return;
     const selected = Array.from(files.files);
     if (selected.length > 100 || selected.some(file => !file.size || file.size > 32 * 1024 * 1024)) { status.textContent = t('audioByteLimit'); return; }
-    batch = selected.map(file => ({ file, kind })); void uploadBatch();
+    batch = selected.map(file => ({ file, kind, phase: 'asset' })); void uploadBatch();
   }, true);
-  const resume = iconButton(t('resumeAudioUpload'), CloudUpload, () => { if (batch.some(entry => !entry.done)) void uploadBatch(); }, true);
+  const resume = iconButton(t('resumeAudioUpload'), CloudUpload, () => { if (pendingBatch()) void uploadBatch(); }, true);
   function sync() {
     if (disposed) return;
     const user = getCloudContext().user;
@@ -375,9 +430,9 @@ export function createMediaLibrary(context: MediaLibraryContext) {
     more.disabled = unavailable;
     refreshButton.disabled = blocked() || globalThis.navigator?.onLine === false;
     more.hidden = !cursor || items.length >= 2048;
-    files.disabled = unavailable || batch.some(entry => !entry.done);
-    upload.disabled = unavailable || !files.files?.length || batch.some(entry => !entry.done);
-    resume.hidden = !batch.some(entry => !entry.done); resume.disabled = unavailable;
+    files.disabled = unavailable || pendingBatch();
+    upload.disabled = unavailable || !files.files?.length || pendingBatch();
+    resume.hidden = !pendingBatch(); resume.disabled = unavailable;
     cancel.hidden = !controller; cancel.disabled = controller?.signal.aborted ?? false;
     root.setAttribute('aria-busy', String(!!controller));
     panel.setAttribute('aria-labelledby', `managed-audio-${kind}`);
