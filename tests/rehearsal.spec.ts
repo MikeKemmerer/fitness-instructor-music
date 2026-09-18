@@ -746,8 +746,10 @@ test('playlist workspace Open Close Save and import Undo preserve independent ro
   await panel.locator('summary[aria-label="Add track"]').click();
   await expectMenuInsideViewport(panel.locator('.section-heading .command-menu-items'));
   await expect(panel.getByRole('button', { name: 'From audio library', exact: true })).toBeVisible();
-  const input = panel.locator('input[type=file]');
-  await input.setInputFiles([{ name: 'Arrival A.wav', mimeType: 'audio/wav', buffer: syntheticWav(3) },
+  const choosingFiles = page.waitForEvent('filechooser');
+  await panel.getByRole('button', { name: 'Import audio', exact: true }).click();
+  const input = await choosingFiles;
+  await input.setFiles([{ name: 'Arrival A.wav', mimeType: 'audio/wav', buffer: syntheticWav(3) },
     { name: 'Arrival B.wav', mimeType: 'audio/wav', buffer: syntheticWav(4) }]);
   await expect(panel.locator('.playlist-entry')).toHaveCount(2);
   await panel.getByRole('button', { name: 'Undo edit', exact: true }).click(); await expect(panel.locator('.playlist-entry')).toHaveCount(0);
@@ -885,7 +887,9 @@ test('independent local playlist copied into one routine prepares silently and r
   await setupLibrary.getByLabel('Playlist name', { exact: true }).fill('Lobby');
   await setupLibrary.locator('summary[aria-label="Add track"]').click();
   await expect(setupLibrary.locator('.section-heading .command-menu-items').getByRole('button', { name: 'Import audio', exact: true })).toBeVisible();
-  await setupLibrary.locator('input[type=file]').setInputFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: syntheticWav(8) });
+  const choosingFiles = page.waitForEvent('filechooser');
+  await setupLibrary.getByRole('button', { name: 'Import audio', exact: true }).click();
+  await (await choosingFiles).setFiles({ name: 'Lobby.wav', mimeType: 'audio/wav', buffer: syntheticWav(8) });
   await setupLibrary.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.locator('.notice [role=status]')).toHaveText('Playlist saved on this device.');
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
@@ -931,7 +935,9 @@ test('inline phase checkboxes configure the class in chronological order and per
     await library.getByRole('button', { name: 'New music playlist', exact: true }).click();
     await library.getByLabel('Playlist name', { exact: true }).fill(title);
     await library.locator('summary[aria-label="Add track"]').click();
-    await library.locator('input[type=file]').setInputFiles({ name: `${title}.wav`, mimeType: 'audio/wav', buffer: syntheticWav(3) });
+    const choosingFiles = page.waitForEvent('filechooser');
+    await library.getByRole('button', { name: 'Import audio', exact: true }).click();
+    await (await choosingFiles).setFiles({ name: `${title}.wav`, mimeType: 'audio/wav', buffer: syntheticWav(3) });
     await library.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.locator('.notice [role=status]')).toHaveText('Playlist saved on this device.');
     await library.getByRole('button', { name: 'Close playlist', exact: true }).click();
@@ -1039,7 +1045,10 @@ test('full class workflow uses saved references, silent practice and real audio 
   await expect(library).toBeVisible();
   await library.getByRole('button', { name: 'New music playlist', exact: true }).click();
   await library.getByLabel('Playlist name', { exact: true }).fill('Lobby pair');
-  await library.locator('input[type=file]').setInputFiles([
+  await library.locator('summary[aria-label="Add track"]').click();
+  let choosingFiles = page.waitForEvent('filechooser');
+  await library.getByRole('button', { name: 'Import audio', exact: true }).click();
+  await (await choosingFiles).setFiles([
     { name: 'Lobby A.wav', mimeType: 'audio/wav', buffer: syntheticWav(2) },
     { name: 'Lobby B.wav', mimeType: 'audio/wav', buffer: syntheticWav(2) },
   ]);
@@ -1048,7 +1057,10 @@ test('full class workflow uses saved references, silent practice and real audio 
   await library.getByRole('button', { name: 'Close playlist', exact: true }).click();
   await library.getByRole('button', { name: 'New music playlist', exact: true }).click();
   await library.getByLabel('Playlist name', { exact: true }).fill('Departure pair');
-  await library.locator('input[type=file]').setInputFiles([
+  await library.locator('summary[aria-label="Add track"]').click();
+  choosingFiles = page.waitForEvent('filechooser');
+  await library.getByRole('button', { name: 'Import audio', exact: true }).click();
+  await (await choosingFiles).setFiles([
     { name: 'Departure A.wav', mimeType: 'audio/wav', buffer: syntheticWav(2) },
     { name: 'Departure B.wav', mimeType: 'audio/wav', buffer: syntheticWav(2) },
   ]);

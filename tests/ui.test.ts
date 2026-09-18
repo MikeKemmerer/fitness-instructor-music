@@ -2652,10 +2652,15 @@ describe('dedicated playlist workspace', () => {
   });
   it('serially imports cue-free entries, undoes the batch, and rejects excess files before decoding', async () => {
     const fixture = await harness(); fixture.button(t('newPlaylist')).click();
+    const addMenu = fixture.root.querySelectorAll('summary').find(node => node.title === t('addTrack'))!.parentNode!;
+    addMenu.open = true;
     const file = fixture.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    const selected = new File(['a'], 'a.wav');
     const first = deferred(); mocks.storeTrack.mockImplementationOnce(async () => { await first.promise; return { ...song('one'), cues: [{ id: 'cue' }], after: { mode: 'none' } }; })
       .mockResolvedValueOnce(song('two'));
-    file.files = [new File(['a'], 'a.wav'), new File(['b'], 'b.wav')]; file.dispatchEvent(new Event('change'));
+    file.files = [selected, new File(['b'], 'b.wav')]; file.dispatchEvent(new Event('change'));
+    expect(addMenu.open).toBe(false);
+    expect(mocks.storeTrack).toHaveBeenCalledWith(selected, expect.any(AbortSignal));
     expect(mocks.storeTrack).toHaveBeenCalledTimes(1); first.resolve(); await fixture.settled();
     expect(mocks.storeTrack).toHaveBeenCalledTimes(2); expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(2);
     fixture.button(t('undoEdit')).click(); expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(0);
@@ -2665,6 +2670,22 @@ describe('dedicated playlist workspace', () => {
     file.files = Array.from({ length: 99 }, () => new File(['x'], 'x.wav')); file.dispatchEvent(new Event('change'));
     expect(mocks.storeTrack).toHaveBeenCalledTimes(2); expect(fixture.message).toHaveBeenCalledWith(t('tooManyTracks'), true);
     expect(mocks.preview.playTrack).not.toHaveBeenCalled(); expect(mocks.player.play).not.toHaveBeenCalled();
+  });
+  it('aborts a pending import when leaving without committing a late track', async () => {
+    const fixture = await harness(); fixture.button(t('newPlaylist')).click();
+    const file = fixture.root.querySelectorAll('input').find(node => node.type === 'file')!;
+    const release = deferred(); let signal: AbortSignal | undefined;
+    mocks.storeTrack.mockImplementationOnce(async (_file, active) => {
+      signal = active; await release.promise;
+      if (active?.aborted) throw new Error('conversion_aborted');
+      return song('late');
+    });
+    file.files = [new File(['a'], 'a.wav')]; file.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    const messages = fixture.message.mock.calls.length;
+    fixture.session.leave(); expect(signal!.aborted).toBe(true); release.resolve(); await fixture.settled();
+    expect(fixture.root.querySelectorAll('.playlist-entry')).toHaveLength(0);
+    expect(fixture.message).toHaveBeenCalledTimes(messages);
   });
   it('stages Open before accepting Discard and preserves the current draft after failed Open or Cancel', async () => {
     const other = mix('other'); local.set(other.id, other);

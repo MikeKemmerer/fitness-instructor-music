@@ -83,7 +83,7 @@ export function createPlaylistEditor(context: PlaylistContext) {
     if (!shared) context.working(true);
     sync();
     try { identity = context.hosted ? captureCloudIdentity() : () => {}; assert(); await work({ signal: active.signal }, assert); }
-    catch (error) { if (!disposed) fail(error); }
+    catch (error) { if (!disposed && (!(error instanceof Error) || error.message !== 'cloud_cancelled')) fail(error); }
     finally {
       if (controller === active) { busy = false; controller = null; }
       if (!shared) context.working(false);
@@ -437,13 +437,14 @@ export function createPlaylistEditor(context: PlaylistContext) {
     });
   }
   file.addEventListener('change', () => {
+    add.close();
     const files = Array.from(file.files ?? []); file.value = '';
     if (!editable() || !files.length || !playlist) return;
     if (playlist.tracks.length + files.length > 100) { context.message(t('tooManyTracks'), true); return; }
-    void run(async (_transfer, assert) => {
+    void run(async (transfer, assert) => {
       const failures: string[] = []; let imported = 0;
       for (const input of files) {
-        try { const track = await offline.storeTrack(input); assert(); track.cues = []; delete track.after; playlist!.tracks.push(track); dirty = true; imported++; }
+        try { const track = await offline.storeTrack(input, transfer.signal); assert(); track.cues = []; delete track.after; playlist!.tracks.push(track); dirty = true; imported++; }
         catch (error) { assert(); failures.push(cloudErrorMessage(error)); }
       }
       observe(); render(); context.message([t('importedToast', { count: imported }), ...failures].join('\n'), !!failures.length);
@@ -618,7 +619,7 @@ export function createPlaylistEditor(context: PlaylistContext) {
     currentMedia: (): CloudMusicPlaylist[] => playlist && !disposed ? [currentEnvelope()] : [],
     hasUnsaved: () => dirty, working: () => busy,
     enter(fromRoutine = false) { returnVisible = fromRoutine || returnVisible; sync(); if (!initialized && available()) void initialize(); },
-    leave() { stopPreview(); reorder?.cancel(); picker.leave(); add.close(); more.close(); dismissChooser(true); },
+    leave() { controller?.abort(); stopPreview(); reorder?.cancel(); picker.leave(); add.close(); more.close(); dismissChooser(true); },
     initialize,
     async syncPending(transfer: CloudTransfer = {}) {
       if (!online() || !author()) return;
