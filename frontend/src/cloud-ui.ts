@@ -28,6 +28,8 @@ export function cloudErrorMessage(error: unknown): string {
     if (['invalid_revision', 'revision_required', 'invalid_routine_state'].includes(error.serverCode ?? '')) return t('cloudHeadRequired');
     if (error.serverCode === 'publication_requires_tracks') return t('cloudSaveFirst');
     if (error.serverCode === 'invalid_asset') return t('cloudIntegrity');
+    if (error.serverCode === 'reference_scan_uncertain') return t('audioScanUncertain');
+    if (error.serverCode === 'library_delete_unconfigured') return t('audioDeleteUnconfigured');
     const messages: Record<number, MessageKey> = {
       400: 'cloudValidation', 404: 'cloudNotFound', 409: 'cloudUploadConflict', 412: 'cloudConflict',
       413: 'cloudMediaSize', 415: 'cloudUnsupported', 422: 'cloudIntegrity', 423: 'cloudLocked',

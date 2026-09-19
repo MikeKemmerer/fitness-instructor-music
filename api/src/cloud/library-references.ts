@@ -142,8 +142,12 @@ export class LibraryReferences {
         if (source) {
           const { value: head } = await source.storedHead(id);
           const history = source.history(head);
-          if (!descriptions && (history.some((link, index) => link.revision !== index + 1 || !link.draft)
-            || history.length !== head.draft.revision)) throw new Error();
+          // Migrations may drop the oldest revisions, so require a contiguous run ending at the head rather than one
+          // starting at 1. A head with no stored history is still unknown and must fail closed.
+          if (!descriptions && (!head.history?.length
+            || history.some((link, index) => !link.draft
+              || (index > 0 && link.revision !== history[index - 1]!.revision + 1))
+            || history[history.length - 1]!.revision !== head.draft.revision)) throw new Error();
           const pointers = descriptions ? [{ ...head.draft, published: false }] : history.flatMap(link => [
             ...(link.draft ? [{ key: link.draft, revision: link.revision, published: false }] : []),
             ...(link.published ? [{ key: link.published, revision: link.revision, published: true }] : []),

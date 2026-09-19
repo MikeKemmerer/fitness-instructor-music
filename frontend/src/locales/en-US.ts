@@ -146,6 +146,8 @@ export const enUS = {
   cloudTrackConflict: 'This track ID already has different local audio. The existing audio was kept. Resolve the cache conflict before preparing.',
   cloudThrottled: 'Cloud is rate limited. Wait before trying the operation again.',
   cloudUnavailable: 'Cloud is unavailable or busy. Try again later.', cloudQuota: 'Cloud storage allocation is full. Contact the owner.',
+  audioScanUncertain: 'Could not confirm everywhere this audio is used, so deletion stays blocked. Retrying will not help.',
+  audioDeleteUnconfigured: 'Deleting library audio is not switched on for this household yet.',
   cloudFailed: 'The cloud operation failed. Your draft and prepared routine were kept.',
   cloudPlayerEmpty: 'No published cloud routine selected.',
   hostedStorageFailed: 'Private pilot access could not use browser storage. Enable site storage and try again.',
