@@ -85,7 +85,8 @@ export function validateArtifact(files, sourceConfig, licensedAssets, { requireC
   const apiRoute = config.routes.find(route => route.route === '/api/*');
   assert(apiRoute, 'Missing forwarded API route.');
   assert.deepEqual(apiRoute.allowedRoles, ['anonymous']);
-  for (const path of ['/.auth/login/aad', '/.auth/login/github', '/.auth/me']) {
+  // Azure always serves /.auth/me from the platform, so only the sign-in providers can be blocked by route.
+  for (const path of ['/.auth/login/aad', '/.auth/login/github']) {
     assert.equal(config.routes.find(route => route.route === path)?.statusCode, 404, 'Missing exact platform auth block.');
   }
   for (const route of config.routes) {
@@ -93,7 +94,7 @@ export function validateArtifact(files, sourceConfig, licensedAssets, { requireC
     assert.equal(route.redirect, undefined);
     assert.equal(route.methods, undefined);
     if (route.statusCode !== undefined) {
-      assert(['/.auth/login/aad', '/.auth/login/github', '/.auth/me', '/.auth/*', '/local-media/*'].includes(route.route) && route.statusCode === 404);
+      assert(['/.auth/login/aad', '/.auth/login/github', '/.auth/*', '/local-media/*'].includes(route.route) && route.statusCode === 404);
     } else assert.deepEqual(route.allowedRoles, ['anonymous']);
   }
   assert.equal(apiRoute.statusCode, undefined, 'API requests must reach the server.');

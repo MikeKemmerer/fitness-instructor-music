@@ -10,7 +10,6 @@ const config = Buffer.from(JSON.stringify({ platform: { apiRuntime: 'node:22' },
   { route: '/api/*', allowedRoles: ['anonymous'] },
   { route: '/.auth/login/aad', statusCode: 404 },
   { route: '/.auth/login/github', statusCode: 404 },
-  { route: '/.auth/me', statusCode: 404 },
   { route: '/*', allowedRoles: ['anonymous'] }
 ] }));
 const artifact = () => new Map([

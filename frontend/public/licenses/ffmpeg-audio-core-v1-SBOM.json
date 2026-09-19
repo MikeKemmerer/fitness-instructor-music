@@ -125,7 +125,7 @@
     "initialMemory": 33554432,
     "externalLibraries": []
   },
-  "source": "/sources/ffmpeg-audio-core-v1-source.tar.gz",
+  "source": "/sources/ffmpeg-audio-core-v1-source.zip",
   "notices": "/licenses/ffmpeg-audio-core-v1-NOTICES.txt",
   "artifacts": {
     "frontend/src/assets/codecs/ffmpeg-audio-core.js": {
@@ -136,9 +136,9 @@
       "bytes": 2460050,
       "sha256": "978adc54750b888c10b605105bfc22a99ea46ee2b255dad43ccd045e4b90fdf2"
     },
-    "frontend/public/sources/ffmpeg-audio-core-v1-source.tar.gz": {
-      "bytes": 19521396,
-      "sha256": "45360ad6c7469beec37a3a91560353750a41473b61337ec67561cbb9e2b20394"
+    "frontend/public/sources/ffmpeg-audio-core-v1-source.zip": {
+      "bytes": 19529793,
+      "sha256": "283be4c555c6209a291bf69aaf969e829ce7230aa8d93c64bbf8b693b14d637d"
     },
     "frontend/public/licenses/ffmpeg-audio-core-v1-NOTICES.txt": {
       "bytes": 771627,

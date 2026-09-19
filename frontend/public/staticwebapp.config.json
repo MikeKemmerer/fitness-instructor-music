@@ -2,7 +2,6 @@
   "routes": [
     { "route": "/.auth/login/aad", "statusCode": 404 },
     { "route": "/.auth/login/github", "statusCode": 404 },
-    { "route": "/.auth/me", "statusCode": 404 },
     { "route": "/.auth/*", "statusCode": 404 },
     { "route": "/signin.html", "allowedRoles": ["anonymous"], "headers": { "Cache-Control": "no-store" } },
     { "route": "/signin.js", "allowedRoles": ["anonymous"], "headers": { "Cache-Control": "no-store" } },
@@ -12,7 +11,7 @@
     { "route": "/access.css", "allowedRoles": ["anonymous"] },
     { "route": "/assets/*", "allowedRoles": ["anonymous"] },
     { "route": "/licenses/*", "allowedRoles": ["anonymous"] },
-    { "route": "/sources/ffmpeg-audio-core-v1-source.tar.gz", "allowedRoles": ["anonymous"], "headers": { "Content-Type": "application/gzip" } },
+    { "route": "/sources/ffmpeg-audio-core-v1-source.zip", "allowedRoles": ["anonymous"] },
     { "route": "/icon-192.png", "allowedRoles": ["anonymous"] },
     { "route": "/icon-512.png", "allowedRoles": ["anonymous"] },
     { "route": "/icons.svg", "allowedRoles": ["anonymous"] },
@@ -31,5 +30,5 @@
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
     "Content-Security-Policy": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
   },
-  "mimeTypes": { ".wav": "audio/wav", ".ttf": "font/ttf", ".webmanifest": "application/manifest+json", ".wasm": "application/wasm", ".gz": "application/gzip", ".tar.gz": "application/gzip" }
+  "mimeTypes": { ".wav": "audio/wav", ".ttf": "font/ttf", ".webmanifest": "application/manifest+json", ".wasm": "application/wasm", ".zip": "application/zip" }
 }

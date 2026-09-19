@@ -119,9 +119,33 @@ writeFileSync(resolve(stage, 'BUILD.txt'), [
   'Full source headers and license texts are retained in the input archives. No source-download promise substitutes for these files.',
   '',
 ].join('\n'));
-const sourceName = 'ffmpeg-audio-core-v1-source.tar.gz';
-execFileSync('tar', ['--sort=name', '--mtime=@1686528000', '--owner=0', '--group=0', '--numeric-owner',
-  '-czf', resolve(sources, sourceName), '-C', stage, '.']);
+const sourceName = 'ffmpeg-audio-core-v1-source.zip';
+// ZIP, not .tar.gz: Azure Static Web Apps splits a compound suffix into a base type plus
+// Content-Encoding, so the archive would not download intact. Python 3 is already a build prerequisite.
+execFileSync('python3', ['-c', `
+import os, sys, zipfile
+stage, target = sys.argv[1], sys.argv[2]
+entries = []
+for directory, subdirectories, names in os.walk(stage):
+    subdirectories.sort()
+    for name in sorted(subdirectories) + sorted(names):
+        path = os.path.join(directory, name)
+        entries.append((os.path.relpath(path, stage).replace(os.sep, '/'), path))
+entries.sort()
+with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    for name, path in entries:
+        directory_entry = os.path.isdir(path)
+        info = zipfile.ZipInfo(name + '/' if directory_entry else name, date_time=(2023, 6, 11, 17, 0, 0))
+        mode = os.stat(path).st_mode & 0o7777
+        info.external_attr = ((mode | (0o040000 if directory_entry else 0o100000)) & 0xFFFF) << 16
+        if directory_entry:
+            info.external_attr |= 0x10
+            info.compress_type = zipfile.ZIP_STORED
+            archive.writestr(info, b'')
+        else:
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(path, 'rb') as handle: archive.writestr(info, handle.read())
+`, stage, resolve(sources, sourceName)]);
 const artifacts = {};
 for (const extension of ['js', 'wasm']) {
   const name = `ffmpeg-audio-core.${extension}`;
