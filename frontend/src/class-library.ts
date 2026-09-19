@@ -25,7 +25,7 @@ export function parseCloudPlaylist(value: unknown): CloudMusicPlaylist {
   } catch { throw new Error('cloud_invalid_response'); }
 }
 
-export function parseClassSetup(value: unknown): ClassSetup {
+function parseClassSetup(value: unknown): ClassSetup {
   try {
     const setup = value as ClassSetup;
     if (validateClassSetup(setup).length || Object.keys(setup).some(key => !['schemaVersion', 'id', 'name', 'revision',

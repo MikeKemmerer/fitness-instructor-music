@@ -44,7 +44,7 @@ function number(value: unknown): number {
   return value;
 }
 
-export function boolean(value: unknown): boolean {
+function boolean(value: unknown): boolean {
   if (typeof value !== 'boolean') invalid();
   return value;
 }

@@ -80,7 +80,7 @@ function probe(blob: Blob, signal: AbortSignal): Promise<void> {
   });
 }
 
-export function recommendLoudness(integratedLufs: number, peakDbfs: number): LoudnessEstimate {
+function recommendLoudness(integratedLufs: number, peakDbfs: number): LoudnessEstimate {
   if (!Number.isFinite(integratedLufs) || !Number.isFinite(peakDbfs)) throw new Error('loudness_no_signal');
   const targetLufs = Math.max(-11, Math.min(-5, integratedLufs));
   const desired = 10 ** ((targetLufs - integratedLufs) / 20);
