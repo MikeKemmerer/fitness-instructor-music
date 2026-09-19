@@ -44,6 +44,7 @@ export function createClassComposition(context: {
   const mediaLibrary = createCloudLibrary();
   const library = createClassLibrary(undefined, mediaLibrary);
   let choices: PhaseChoices = { enabled: { walkIn: false, before: false, after: false, walkOut: false }, retained: {} };
+  const openPhases: Partial<Record<Phase, boolean>> = {};
   let routineId = '';
   let fingerprint = '';
   let busy = false;
@@ -131,8 +132,18 @@ export function createClassComposition(context: {
     for (const phase of phases) {
       if (!choices.enabled[phase]) continue;
       const section = element('section', 'editor-section class-phase-config'); section.dataset.classPhase = phase;
-      section.setAttribute('aria-label', t(labels[phase])); section.append(element('h2', '', t(labels[phase])));
-      const body = element('fieldset'); fields.push(body); section.append(body);
+      section.setAttribute('aria-label', t(labels[phase]));
+      const body = element('fieldset'); fields.push(body);
+      if (phase === 'walkIn' || phase === 'walkOut') {
+        const disclosure = element('details', 'class-phase-disclosure');
+        // An already chosen playlist starts folded away so the sequence stays short on a phone.
+        disclosure.open = openPhases[phase] ?? !context.routine().sequence?.[phase];
+        disclosure.addEventListener('toggle', () => { openPhases[phase] = disclosure.open; });
+        const summary = element('summary');
+        summary.append(element('h2', '', t(labels[phase])));
+        disclosure.append(summary, body);
+        section.append(disclosure);
+      } else section.append(element('h2', '', t(labels[phase])), body);
       if (phase === 'walkIn' || phase === 'walkOut') {
         const selected = context.routine().sequence?.[phase];
         const choice = selectInput('', [{ value: '', label: selected?.name ?? t('choosePhasePlaylist') },

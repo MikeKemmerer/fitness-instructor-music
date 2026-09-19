@@ -41,6 +41,8 @@
 .phase-setup > .button { margin-block: 12px; }
 .class-phase-config { border-inline-start: 3px solid var(--accent); padding: 16px; margin-block: 16px; }
 .class-phase-config h2 { font-size: 1.15rem; }
+.class-phase-disclosure > summary { display: list-item; list-style-position: inside; }
+.class-phase-disclosure > summary h2 { display: inline; }
 .class-phase-config > fieldset > .button { margin: 12px 8px 0 0; max-inline-size: 100%; }
 .phase-identity, .class-phase-config fieldset { border: 0; padding: 0; margin-inline: 0; min-inline-size: 0; }
 @media (max-width: 600px) {
@@ -252,7 +254,7 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .draft-status { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
 .draft-identity { display: flex; flex-wrap: wrap; gap: 2px 16px; font-size: .8rem; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
 .identity-id { flex-basis: 100%; min-inline-size: 0; user-select: text; }
-.editor-actions { margin-block: 16px 0; padding-block: 12px; border-block: 1px solid var(--border); }
+.editor-actions { position: sticky; inset-block-start: 0; z-index: 6; margin-block: 16px 0; padding-block: 12px; border-block: 1px solid var(--border); background: var(--background); }
 .editor-actions > .draft-protection { flex: 1 1 240px; min-inline-size: 0; }
 .editor-actions > .draft-status { flex: 1 1 140px; text-align: end; }
 .editor-actions > .button { flex: none; }
