@@ -607,6 +607,16 @@ describe('local Web Audio player', () => {
     expect(state).toMatchObject({ trackIndex: 0, elapsed: 0, status: 'paused' });
   });
 
+  it('steps back from the first routine song to the walk-in playlist', async () => {
+    await player.load(routine(), classAudio());
+    await player.play();
+    await player.advance!();
+    await player.advance!();
+    expect(state).toMatchObject({ phase: 'routine', trackIndex: 0 });
+    await player.previous!();
+    expect(state).toMatchObject({ phase: 'walk-in', phaseTrackIndex: 0, elapsed: 0 });
+  });
+
   it('Stop and Previous retain the walk-in playlist and announcement phase', async () => {
     await player.load(routine(), classAudio());
     await player.play();
