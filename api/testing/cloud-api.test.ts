@@ -1010,6 +1010,23 @@ describe('uploaded audio retained history and finite scans', () => {
     await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'media_in_use' });
   });
 
+  it('scans a migrated head whose oldest revisions were pruned, without treating it as corrupt', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const draft = await api.routines.create(headers, routine(asset));
+    const empty = routine();
+    empty.routine.id = draft.routine.id;
+    await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'save', empty);
+    await api.routines.mutate(atRevision(headers, 2), draft.routine.id, 'save', { ...empty, routine: { ...empty.routine, revision: 2 } });
+    const key = api.routines.headKey(draft.routine.id);
+    const head = (await readJson<Record<string, unknown>>(store, key))!;
+    const links = head.value.history as { revision: number }[];
+    head.value.history = links.slice(1);
+    await store.put(key, encode(head.value), head.etag);
+    const usage = await api.managed.usage(headers, 'song', asset.id);
+    expect(usage.complete).toBe(true);
+    expect(usage.references).toEqual([]);
+  });
+
   it('fails closed on unknown legacy history, preserving the closed gate', async () => {
     const { api, headers, asset, store } = await managementFixture();
     const draft = await api.routines.create(headers, routine());

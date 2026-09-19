@@ -1,12 +1,12 @@
 import { ArrowDown, ArrowUp, Check, GripVertical, Pause, Pencil, Play, Plus, ScanLine, Square, Trash2, ChevronsRight, Minus, Hand } from 'lucide';
-import { cueSeconds, reorderTrack, transitionAfter, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import { cueSeconds, DEFAULT_BEEP_VOLUME, reorderTrack, transitionAfter, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { AudioPreview, BpmEstimate, LoudnessEstimate, PreviewState } from '../../shared/preview-contract';
 import { formatCueTime, parseCueTime } from './cue-time';
 import { formatNumber, formatTime, t } from './i18n';
 import { createTrackReorder } from './track-reorder';
 import { fillerControls, fillerSoundLabel } from './filler-controls';
 import { getFillerSoundBpm } from './filler-audio';
-import { cueAtSeconds, element, field, gainSlider, iconButton, numberInput, selectInput, setButtonIcon, textInput, transientText } from './ui';
+import { cueAtSeconds, element, field, gainSlider, iconButton, makeRange, numberInput, selectInput, setButtonIcon, textInput, transientText } from './ui';
 
 interface EditorContext {
   preview: AudioPreview;
@@ -52,7 +52,8 @@ export function duplicateDraft(routine: Routine): Routine {
 export function contentFingerprint(routine: Routine): string {
   return JSON.stringify({ name: routine.name, tracks: routine.tracks, filler: routine.filler,
     crossfade: routine.crossfade, beepEvery: routine.beepEvery, beepRemaining: routine.beepRemaining,
-    beepOnceRemaining: routine.beepOnceRemaining ?? 0, sequence: routine.sequence });
+    beepOnceRemaining: routine.beepOnceRemaining ?? 0, beepVolume: routine.beepVolume ?? DEFAULT_BEEP_VOLUME,
+    sequence: routine.sequence });
 }
 
 export function renderEditor(host: HTMLElement, routine: Routine, changed: (structural?: boolean) => void,
@@ -794,6 +795,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     field(t('beepRemaining'), numberInput(routine.beepRemaining, 0, 1200, value => mutate(() => { routine.beepRemaining = value; }))),
     field(t('beepOnceRemaining'), numberInput(routine.beepOnceRemaining ?? 0, 0, 1200,
       value => mutate(() => { routine.beepOnceRemaining = value; }))),
+    makeRange(t('beepVolume'), 0, 100, Math.round((routine.beepVolume ?? DEFAULT_BEEP_VOLUME) * 100),
+      value => mutate(() => { routine.beepVolume = value / 100; })),
   );
   const alertFields = content(t('alerts'));
   alertFields.append(beepFields);

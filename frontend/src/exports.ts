@@ -133,6 +133,7 @@ export const exportColumns: readonly ExportColumn[] = freezeTree([
   { id: 'routine.beepEvery', label: 'beepEvery', group: 'exportSoundFields', type: 'number', width: 22, default: false, value: row => row.routine.beepEvery },
   { id: 'routine.beepRemaining', label: 'beepRemaining', group: 'exportSoundFields', type: 'number', width: 24, default: false, value: row => row.routine.beepRemaining },
   { id: 'routine.beepOnceRemaining', label: 'beepOnceRemaining', group: 'exportSoundFields', type: 'number', width: 24, default: false, value: row => row.routine.beepOnceRemaining },
+  { id: 'routine.beepVolume', label: 'beepVolume', group: 'exportSoundFields', type: 'number', width: 20, default: false, value: row => row.routine.beepVolume },
   { id: 'row.status', label: 'exportRowStatus', group: 'exportValidationFields', type: 'string', width: 40, default: true, value: row => row.issues.length ? row.issues.map(validationMessage).join('\n') : t('exportValid') },
 ]);
 

@@ -265,6 +265,23 @@ describe('strict routine content boundary', () => {
       .toThrowError(expect.objectContaining({ status: 400, code: 'invalid_input' }));
   });
 
+  it.each([0, 0.25, 0.8, 1])('retains authored beep volume %s', beepVolume => {
+    const raw = { ...content(), beepVolume };
+    const parsed = parseRoutineContent(raw);
+    expect(parsed).toStrictEqual(raw);
+    expect(JSON.parse(JSON.stringify(parsed))).toStrictEqual(raw);
+  });
+
+  it.each([NaN, Infinity, -Infinity, -0.1, 1.1, '0.5', null, undefined])('rejects invalid beep volume %s', beepVolume => {
+    expect(() => parseRoutineContent({ ...content(), beepVolume }))
+      .toThrowError(expect.objectContaining({ status: 400, code: 'invalid_input' }));
+  });
+
+  it('omits beep volume entirely when the author never set it', () => {
+    const parsed = parseRoutineContent(content());
+    expect(parsed).not.toHaveProperty('beepVolume');
+  });
+
   it('rejects a single-warning accessor without invoking it', () => {
     let invoked = false;
     const raw = Object.defineProperty(content(), 'beepOnceRemaining', {

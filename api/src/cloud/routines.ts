@@ -41,6 +41,7 @@ export class CloudRoutines extends CloudDocuments<CloudRoutine, Routine> {
     if (!value.routine || typeof value.routine !== 'object') throw new ApiError(400, 'invalid_input');
     const fields = ['id', 'revision', 'locked', 'published', 'schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
     if (Object.hasOwn(value.routine, 'beepOnceRemaining')) fields.push('beepOnceRemaining');
+    if (Object.hasOwn(value.routine, 'beepVolume')) fields.push('beepVolume');
     if (Object.hasOwn(value.routine, 'sequence')) fields.push('sequence');
     if (Object.hasOwn(value.routine, 'savedAt')) fields.push('savedAt');
     const record = strictRecord(value.routine, fields);

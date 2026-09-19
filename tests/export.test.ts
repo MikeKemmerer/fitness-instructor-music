@@ -87,7 +87,7 @@ describe('export registry and snapshots', () => {
       'filler.recording.id', 'filler.recording.name', 'filler.recording.duration', 'filler.recording.asset.id',
       'filler.recording.asset.sha256', 'filler.recording.asset.bytes', 'filler.recording.asset.contentType',
       'routine.crossfade', 'routine.beepEvery',
-      'routine.beepRemaining', 'routine.beepOnceRemaining', 'row.status',
+      'routine.beepRemaining', 'routine.beepOnceRemaining', 'routine.beepVolume', 'row.status',
     ]);
     expect(new Set(allIds()).size).toBe(exportColumns.length);
     for (const column of exportColumns) {

@@ -27,6 +27,7 @@ const validationMessages: Record<string, MessageKey> = {
   'Unsupported schema': 'invalidSchema', 'Invalid routine name or ID': 'invalidName',
   'Invalid revision': 'invalidRevision', 'Invalid routine state': 'invalidState',
   'Crossfade must be 0-12 seconds': 'invalidCrossfade', 'Invalid beep timing': 'invalidBeeps',
+  'Invalid beep volume': 'invalidBeepVolume',
   'Invalid filler': 'invalidFiller', 'Invalid filler timing': 'invalidFillerTiming', 'Too many tracks': 'tooManyTracks',
   'Invalid filler recording': 'invalidFillerRecording',
   'Track entry IDs must be unique': 'duplicateTracks', 'Invalid track text': 'invalidTrackText',
