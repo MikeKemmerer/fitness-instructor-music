@@ -131,7 +131,12 @@ export function validateCodecRoutes(config, approved) {
     'Unapproved source route.');
   const sourceRoute = config.routes.find(route => route.route === source.publicPath);
   assert(sourceRoute, 'Missing exact corresponding-source route.');
-  assert.equal(config.mimeTypes?.['.tar.gz'], source.mimeType, 'Missing compound source MIME mapping.');
+  // Azure Static Web Apps splits a compound archive suffix into a base type plus Content-Encoding,
+  // which breaks the intact-download contract. Require a single self-describing extension instead.
+  assert(!/\.(?:tar\.(?:gz|bz2|xz|zst)|tgz|tbz2|txz)$/i.test(source.publicPath),
+    'Corresponding source must not use a compound compression extension.');
+  assert.equal(config.mimeTypes?.[source.publicPath.slice(source.publicPath.lastIndexOf('.'))], source.mimeType,
+    'Missing source MIME mapping.');
   for (const [name, artifact] of approved) {
     assert.equal(codecArtifact(name), artifact, 'Untrusted codec route metadata.');
     const route = config.routes.find(candidate => candidate.route === `/${name}` ||

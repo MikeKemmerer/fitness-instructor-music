@@ -437,12 +437,17 @@ it('provides complete pinned source archives, build recipe and notices with exac
     expect(createHash('sha256').update(bytes).digest('hex')).toBe(expected.sha256);
   }
   const archive = `frontend/public${inventory.source}`;
-  const entries = execFileSync('tar', ['-tzf', archive]).toString().trim().split('\n');
-  expect(entries).toContain('./BUILD.txt');
-  expect(entries).toContain('./source-bundle.json');
+  const member = (name: string, maxBuffer = 40 * 1024 * 1024) => execFileSync('python3',
+    ['-c', 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))', archive, name],
+    { maxBuffer });
+  const entries = execFileSync('python3',
+    ['-c', 'import sys, zipfile; print("\\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))', archive])
+    .toString().trim().split('\n');
+  expect(entries).toContain('BUILD.txt');
+  expect(entries).toContain('source-bundle.json');
   for (const name of ['ffmpeg', 'wrapper', 'emscripten', 'emsdk']) {
     const input = inventory.bundledInputs[name];
-    const bytes = execFileSync('tar', ['-xOzf', archive, `./downloads/${input.archive}`], { maxBuffer: 40 * 1024 * 1024 });
+    const bytes = member(`downloads/${input.archive}`);
     expect(createHash('sha256').update(bytes).digest('hex')).toBe(input.sha256);
     if (name === 'wrapper' || name === 'emscripten') {
       const files = execFileSync('tar', ['-tzf', '-'], { input: bytes, maxBuffer: 2 * 1024 * 1024 }).toString();
@@ -450,7 +455,7 @@ it('provides complete pinned source archives, build recipe and notices with exac
     }
   }
   for (const name of ['build-audio-codec.sh', 'prepare-audio-codec.mjs', 'package-audio-codec.mjs', 'audio-codec-inputs.json']) {
-    expect(execFileSync('tar', ['-xOzf', archive, `./scripts/${name}`])).toEqual(readFileSync(`scripts/${name}`));
+    expect(member(`scripts/${name}`)).toEqual(readFileSync(`scripts/${name}`));
   }
   expect(entries.every(path => !/local-media|node_modules|\.env|\.git\//.test(path))).toBe(true);
   const notices = readFileSync(`frontend/public${inventory.notices}`, 'utf8');

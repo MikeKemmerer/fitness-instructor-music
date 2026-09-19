@@ -148,7 +148,7 @@ test('live verification is read-only and records archive failures without hiding
   const files = new Map([
     ['index.html', Buffer.from('synthetic shell')],
     ['staticwebapp.config.json', Buffer.from('{"globalHeaders":{"X-Content-Type-Options":"nosniff"}}')],
-    ['sources/ffmpeg-audio-core-v1-source.tar.gz', Buffer.from('synthetic archive')],
+    ['sources/ffmpeg-audio-core-v1-source.zip', Buffer.from('synthetic archive')],
   ]);
   const requests = [];
   const receipt = await verifyPublicRelease({ hostname: 'fixture.1.azurestaticapps.net', files }, async (url, options) => {
@@ -174,7 +174,7 @@ test('live verification is read-only and records archive failures without hiding
     return new Response('missing', { status: 404 });
   });
   assert.equal(receipt.status, 'LIVE_WITH_VERIFICATION_FAILURES');
-  assert.deepEqual(receipt.failures.map(item => item.path), ['/sources/ffmpeg-audio-core-v1-source.tar.gz']);
+  assert.deepEqual(receipt.failures.map(item => item.path), ['/sources/ffmpeg-audio-core-v1-source.zip']);
   assert.match(receipt.failures[0].reason, /MIME/);
   assert.deepEqual(receipt.results.filter(item => item.path.startsWith('/api/')).map(item => [item.path, item.status]), [
     ['/api/auth/session', 401], ['/api/routines', 401], ['/api/playlists', 401], ['/api/classes', 401],

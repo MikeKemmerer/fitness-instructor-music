@@ -139,11 +139,22 @@ uploads, starts previews or restores them. API denial probes do not establish
 authenticated production v2 behavior; actual account and physical-device
 acceptance remain parent/user gates.
 
-**Known separate release issue:** Azure has transformed the corresponding-source
-`.tar.gz` response to `application/x-tar` with `Content-Encoding: gzip`. Intact
-decoded source contents do not satisfy the downloadable-gzip contract. Preserve
-`LIVE_WITH_VERIFICATION_FAILURES`, report the archive path separately from other
-passing checks, and do not weaken validation or retry uploads automatically.
+**Static Web Apps response-shape rules.** Two platform behaviours are fixed and
+must be designed around rather than asserted away:
+
+1. A compound archive suffix such as `.tar.gz` is split into a base type plus
+   `Content-Encoding`, so the archive does not download intact. The
+   corresponding source is therefore published as a single-extension `.zip`
+   served as `application/zip`, and
+   [validateCodecRoutes](licensed-codecs.mjs) rejects any compound suffix.
+   Binary types are passed through untransformed; only text types are
+   compressed.
+2. `/.auth/me` is served by the platform and cannot be routed to 404, unlike
+   `/.auth/login/*` which can. Both sign-in providers are blocked, no client
+   code reads `clientPrincipal`, and the API rejects spoofed
+   `x-ms-client-principal` headers, so the endpoint can only ever report a null
+   principal. Live verification therefore probes the provider routes, not
+   `/.auth/me`.
 
 Pricing assumptions remain the existing SWA Free/private-storage design and the
 USD 30 total budget including about 40 songs. No new spending or billing
@@ -217,10 +228,10 @@ five `cache: true` artifacts belong in the offline shell.
 | --- | ---: | --- |
 | [JS glue](../frontend/src/assets/codecs/ffmpeg-audio-core.js) | 81,943 | `9ccec78786ef9d9ed1bbdfe6af56218ab7dfe1b6aae066c8324c36f07ee40df9` |
 | [WASM](../frontend/src/assets/codecs/ffmpeg-audio-core.wasm) | 2,460,050 | `978adc54750b888c10b605105bfc22a99ea46ee2b255dad43ccd045e4b90fdf2` |
-| [Corresponding source](../frontend/public/sources/ffmpeg-audio-core-v1-source.tar.gz) | 19,521,396 | `45360ad6c7469beec37a3a91560353750a41473b61337ec67561cbb9e2b20394` |
+| [Corresponding source](../frontend/public/sources/ffmpeg-audio-core-v1-source.zip) | 19,529,334 | `e19b7e519780021da06e5e9c51908a27526c9dda2d130b18768cbe8e11a013c0` |
 | [Full notices](../frontend/public/licenses/ffmpeg-audio-core-v1-NOTICES.txt) | 771,627 | `1df2000900c82be7ce56c6c0f06d6c3ddc132d0d7afd5a45698319e8d77ce945` |
 | [LGPL 2.1](../frontend/public/licenses/ffmpeg-audio-core-v1-LGPL-2.1.txt) | 26,526 | `b634ab5640e258563c536e658cad87080553df6f34f62269a21d554844e58bfe` |
-| [SBOM](../frontend/public/licenses/ffmpeg-audio-core-v1-SBOM.json) | 5,445 | `f3bff2dda08dbbfad7f9ef8d9fb41d7cfe9d54f3b18f81ccdad68c085251823c` |
+| [SBOM](../frontend/public/licenses/ffmpeg-audio-core-v1-SBOM.json) | 5,439 | `e6eae0ea84bf25707d7aea5c161f75b0f9aefbba788147dde77a5fa3ad07bf11` |
 
 The SBOM declares FFmpeg 5.1.4 at commit
 `4729204c17f756e186d622060088371d10b34f7e`, the pinned wrapper overlay,
@@ -243,10 +254,10 @@ requirements for the parent, not changes already made by this pass.
   insert this exact route before the final catch-all:
 
   ```json
-  { "route": "/sources/ffmpeg-audio-core-v1-source.tar.gz", "allowedRoles": ["anonymous"], "headers": { "Cache-Control": "public, max-age=0, must-revalidate" } }
+  { "route": "/sources/ffmpeg-audio-core-v1-source.zip", "allowedRoles": ["anonymous"] }
   ```
 
-  Add `".wasm": "application/wasm"` and `".gz": "application/gzip"` to
+  Add `".wasm": "application/wasm"` and `".zip": "application/zip"` to
   `mimeTypes`, retaining every existing mapping. Keep `/assets/*` and
   `/licenses/*` anonymous, inheriting the existing `nosniff` header. JS must be
   JavaScript, notice/license text `text/plain`, SBOM `application/json`.

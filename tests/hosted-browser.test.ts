@@ -205,10 +205,10 @@ test.skipIf(!hosted).each([[1, 0], [2, 0], [1, 70000], [2, 2 * 1024 * 1024]])('i
           sha256: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('') };
       })), pins);
       expect(cached).toEqual(pins);
-      const sourcePath = '/sources/ffmpeg-audio-core-v1-source.tar.gz';
+      const sourcePath = '/sources/ffmpeg-audio-core-v1-source.zip';
       const source = await page.request.get(sourcePath);
       expect(source.status()).toBe(200);
-      expect(source.headers()['content-type']).toBe('application/gzip');
+      expect(source.headers()['content-type']).toBe('application/zip');
       expect((await source.body()).byteLength).toBeGreaterThan(1024 * 1024);
       expect(await page.evaluate(async path => !!await caches.match(path), sourcePath)).toBe(false);
       await page.close();
@@ -683,7 +683,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     await browserExpect(page).toHaveURL(/\/signin.html$/);
     expect(await records(page)).toEqual({});
     expect((await context.request.get('/api/routines', { headers: { 'x-ms-client-principal': 'spoofed' } })).status()).toBe(401);
-    for (const path of ['/local-media/incoming/private.wav', '/.auth/me']) expect((await context.request.get(path)).status()).toBe(404);
+    for (const path of ['/local-media/incoming/private.wav', '/.auth/login/aad']) expect((await context.request.get(path)).status()).toBe(404);
     expect((await context.request.get('/sw.js')).status()).toBe(200);
     await screenshot(page, 'signin');
     await page.getByLabel('Username', { exact: true }).fill('owner');

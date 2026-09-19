@@ -22,12 +22,11 @@ function fixture() {
       { route: '/api/*', allowedRoles: ['anonymous'] },
       { route: '/.auth/login/aad', statusCode: 404 },
       { route: '/.auth/login/github', statusCode: 404 },
-      { route: '/.auth/me', statusCode: 404 },
       { route: source.publicPath, allowedRoles: ['anonymous'] },
       { route: '/*', allowedRoles: ['anonymous'] },
     ],
     globalHeaders: { 'X-Content-Type-Options': 'nosniff' },
-    mimeTypes: { '.wasm': 'application/wasm', '.gz': 'application/gzip', '.tar.gz': 'application/gzip' },
+    mimeTypes: { '.wasm': 'application/wasm', '.zip': 'application/zip' },
   };
   const manifest = { 'index.html': { file: 'assets/app-AbCd1234.js', isEntry: true,
     assets: [buildPath(glue), buildPath(wasm)] } };
@@ -47,10 +46,10 @@ test('exact handoff artifacts pass the release gate and all bytes count toward F
   assert.equal(validateCodecManifest(structuredClone(codecManifest)), codecManifest);
   const approved = validateCodecDistribution(files, { required: true });
   assert.equal(approved.size, 6);
-  assert.equal(codecManifest.artifacts.reduce((bytes, artifact) => bytes + artifact.bytes, 0), 22866987);
+  assert.equal(codecManifest.artifacts.reduce((bytes, artifact) => bytes + artifact.bytes, 0), 22875378);
   const report = validateArtifact(files, files.get('staticwebapp.config.json'), [], { requireCodecs: true });
   assert.equal(report.totalBytes, [...files.values()].reduce((bytes, content) => bytes + content.length, 0));
-  assert(report.totalBytes > 22866987 && report.totalBytes < 250000000);
+  assert(report.totalBytes > 22875378 && report.totalBytes < 250000000);
   const local = new Map(codecManifest.artifacts.map(artifact => [artifact.path, files.get(buildPath(artifact))]));
   assert.equal(validateCodecDistribution(local, { location: 'source', required: true }).size, 6);
 });
@@ -59,7 +58,7 @@ test('cache descriptors include only the five pinned offline artifacts, never th
   const { files } = fixture();
   const entries = codecCacheEntries(validateCodecDistribution(files));
   assert.equal(entries.length, 5);
-  assert.equal(entries.reduce((bytes, entry) => bytes + entry.bytes, 0), 3345591);
+  assert.equal(entries.reduce((bytes, entry) => bytes + entry.bytes, 0), 3345585);
   assert(!entries.some(entry => entry.path.startsWith('sources/')));
   for (const entry of entries) {
     const artifact = codecArtifact(entry.path);
@@ -248,26 +247,25 @@ test('Vite source metadata is not a runtime URL but deployed codec references re
 test('exact anonymous source route and codec MIME mappings are required without shadowing', () => {
   for (const mutate of [
     config => { config.mimeTypes['.wasm'] = 'application/octet-stream'; },
-    config => { delete config.mimeTypes['.gz']; },
-    config => { delete config.mimeTypes['.tar.gz']; },
-    config => { config.mimeTypes['.tar.gz'] = 'application/x-tar'; },
-    config => { config.routes.splice(4, 1); },
-    config => { config.routes[4].route = '/sources/*'; },
+    config => { delete config.mimeTypes['.zip']; },
+    config => { config.mimeTypes['.zip'] = 'application/x-tar'; },
+    config => { config.routes.splice(3, 1); },
+    config => { config.routes[3].route = '/sources/*'; },
     config => { config.routes.push({ route: '/sources*', allowedRoles: ['anonymous'] }); },
     config => { config.routes.push({ route: '/downloads/*.gz', allowedRoles: ['anonymous'] }); },
     config => { config.routes.push({ route: '/sources/unreviewed.tar.gz', allowedRoles: ['anonymous'] }); },
-    config => { config.routes.push({ ...config.routes[4] }); },
-    config => { config.routes[4].allowedRoles = ['authenticated']; },
-    config => { config.routes[4].redirect = 'https://cdn.invalid/source.tar.gz'; },
-    config => { config.routes[4].rewrite = '/index.html'; },
-    config => { config.routes[4].statusCode = 404; },
-    config => { config.routes[4].methods = ['GET']; },
+    config => { config.routes.push({ ...config.routes[3] }); },
+    config => { config.routes[3].allowedRoles = ['authenticated']; },
+    config => { config.routes[3].redirect = 'https://cdn.invalid/source.zip'; },
+    config => { config.routes[3].rewrite = '/index.html'; },
+    config => { config.routes[3].statusCode = 404; },
+    config => { config.routes[3].methods = ['GET']; },
     config => { config.routes.unshift({ route: '/*', allowedRoles: ['anonymous'] }); },
-    config => { config.routes[4].headers = { 'Content-Type': 'text/html' }; },
-    config => { config.routes[4].headers = { 'Content-Encoding': 'gzip' }; },
-    config => { config.routes[4].headers = { 'X-Content-Type-Options': '' }; },
+    config => { config.routes[3].headers = { 'Content-Type': 'text/html' }; },
+    config => { config.routes[3].headers = { 'Content-Encoding': 'gzip' }; },
+    config => { config.routes[3].headers = { 'X-Content-Type-Options': '' }; },
     config => { delete config.globalHeaders; },
-    config => { config.routes[4].headers = { 'Cache-Control': 'private' }; },
+    config => { config.routes[3].headers = { 'Cache-Control': 'private' }; },
     config => { config.globalHeaders = { 'Cache-Control': 'no-store' }; },
   ]) {
     const { files, config } = fixture();

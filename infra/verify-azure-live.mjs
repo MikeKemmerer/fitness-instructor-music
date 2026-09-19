@@ -52,7 +52,7 @@ export async function verifyPublicRelease({ hostname, files }, request = fetch) 
   await check('/api/routines', 401, undefined, { 'x-ms-client-principal': Buffer.from(JSON.stringify({
     identityProvider: 'aad', userId: 'synthetic-release-probe', userRoles: ['anonymous', 'authenticated', 'owner'],
   })).toString('base64') }, true);
-  for (const path of ['/.auth/login/aad', '/.auth/login/github', '/.auth/me', '/local-media/release-probe', '/staticwebapp.config.json']) {
+  for (const path of ['/.auth/login/aad', '/.auth/login/github', '/local-media/release-probe', '/staticwebapp.config.json']) {
     await check(path, 404);
   }
   for (const [path, bytes] of files) {

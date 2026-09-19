@@ -19,7 +19,7 @@ describe('hosted entry boundary', () => {
     expect(routeFor('/api/routines').statusCode).toBeUndefined();
   });
   it('allows custom sign-in and public build assets but no Microsoft or private-file routes', () => {
-    for (const path of ['/.auth/login/aad', '/.auth/login/github', '/.auth/me']) {
+    for (const path of ['/.auth/login/aad', '/.auth/login/github']) {
       expect(config.routes.find((rule: { route: string }) => rule.route === path)?.statusCode).toBe(404);
     }
     expect(routeFor('/.auth/login/aad').statusCode).toBe(404);

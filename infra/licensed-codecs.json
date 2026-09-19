@@ -27,11 +27,11 @@
     },
     {
       "role": "source",
-      "path": "frontend/public/sources/ffmpeg-audio-core-v1-source.tar.gz",
-      "publicPath": "/sources/ffmpeg-audio-core-v1-source.tar.gz",
-      "mimeType": "application/gzip",
-      "bytes": 19521396,
-      "sha256": "45360ad6c7469beec37a3a91560353750a41473b61337ec67561cbb9e2b20394",
+      "path": "frontend/public/sources/ffmpeg-audio-core-v1-source.zip",
+      "publicPath": "/sources/ffmpeg-audio-core-v1-source.zip",
+      "mimeType": "application/zip",
+      "bytes": 19529793,
+      "sha256": "283be4c555c6209a291bf69aaf969e829ce7230aa8d93c64bbf8b693b14d637d",
       "cache": false,
       "deploy": true
     },
@@ -60,8 +60,8 @@
       "path": "frontend/public/licenses/ffmpeg-audio-core-v1-SBOM.json",
       "publicPath": "/licenses/ffmpeg-audio-core-v1-SBOM.json",
       "mimeType": "application/json",
-      "bytes": 5445,
-      "sha256": "f3bff2dda08dbbfad7f9ef8d9fb41d7cfe9d54f3b18f81ccdad68c085251823c",
+      "bytes": 5439,
+      "sha256": "b40f41e976bd8cb9f0b5373001caa760debaf8e3ea12d8a58d14d4e1adb3a211",
       "cache": true,
       "deploy": true
     }
