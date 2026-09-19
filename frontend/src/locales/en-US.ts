@@ -61,7 +61,6 @@ export const enUS = {
   readiness: 'Class readiness', notQueued: 'Not queued', verifiedLocal: 'Audio verified on this device',
   readinessChanged: 'Selection or draft changed. Prepare again to replace the current class.',
   soundCheck: 'Test sound', soundChecked: 'Sound test finished. Confirm the intended speaker was audible.',
-  speakerCheck: 'I checked the speaker and volume', powerCheck: 'I checked device power',
   fullscreen: 'Fullscreen',
   shareCreate: 'Create cloud routine', shareReplace: 'Replace existing draft',
   routines: 'Routines', localFilter: 'Local', householdFilter: 'Cloud', newRoutine: 'New routine',

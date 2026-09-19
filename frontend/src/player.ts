@@ -808,13 +808,33 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     emit();
   }
 
+  function rewindToWalkIn(): void {
+    if (disposed) return;
+    running = false;
+    cancelScheduled();
+    checkpoint = 0;
+    alarmFloor = 0;
+    firedAlarms.clear();
+    routineStart = null;
+    routineEnd = null;
+    segments = phasePlan('walk-in', 0);
+    state = { ...initialState(), ducked: state.ducked, beepsMuted: state.beepsMuted };
+    if (context?.state === 'running') void context.suspend().catch(() => undefined);
+    project();
+    emit();
+  }
+
   async function previous(): Promise<void> {
     if (!ready || !routine || disposed || pendingNext) return;
     const current = ownerAt(position());
     if (!current || ['before', 'after'].includes(phaseOf(current))) return;
     const wasRunning = running;
     const wasPaused = state.status === 'paused';
-    rewindTrack(true);
+    // Stepping back from the top of the routine returns to walk-in instead of restarting the first song.
+    const atRoutineStart = phaseOf(current) === 'routine' && current.kind === 'song'
+      && (current.phaseTrackIndex ?? current.trackIndex) === 0 && position() - current.start <= 1;
+    if (atRoutineStart && classAudio?.walkIn?.tracks.length) rewindToWalkIn();
+    else rewindTrack(true);
     if (wasRunning) await play();
     else if (wasPaused) { state = { ...state, status: 'paused' }; emit(); }
   }

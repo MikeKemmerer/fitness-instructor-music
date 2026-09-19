@@ -613,7 +613,7 @@ const startClass = iconButton(t('startClass'), Maximize2, () => {
   stopEditorAudio();
   selectTab('teach');
   classMode.enter(false);
-});
+}, true);
 startClass.hidden = true;
 startClass.setAttribute('aria-controls', 'panel-teach');
 const preparationActions = element('div', 'action-row');
@@ -1401,10 +1401,6 @@ const readySound = iconButton(t('soundCheck'), Play, () => {
 }, true);
 const stopSound = iconButton(t('stopSoundCheck'), Square, () => audioPreview.stop());
 readyPanel.append(element('h2', '', t('readiness')), readyIdentity, readyState, readyQueue, readySound, stopSound);
-for (const label of ['speakerCheck', 'powerCheck'] as const) {
-  const checkbox = element('input'); checkbox.type = 'checkbox';
-  readyPanel.append(field(t(label), checkbox));
-}
 panels.teach.insertBefore(readyPanel, rehearsal);
 
 function renderReadiness() {
@@ -1828,7 +1824,6 @@ async function prepareRoutine(current: () => boolean): Promise<void> {
     loaded = snapshot;
     preparedAudio = classAudio;
     preparedName = selectedClass?.setup.name ?? snapshot.name;
-    for (const checkbox of readyPanel.querySelectorAll<HTMLInputElement>('input')) checkbox.checked = false;
     preparedCloudBase = selectionKey(); preparedClassKey = requestedClass;
     preparedSourceFingerprint = contentFingerprint(snapshot);
     cueEditing = false; selectedCueId = ''; cueTimeInvalid = false;
