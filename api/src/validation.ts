@@ -168,6 +168,7 @@ export function parseRoutineContent(input: unknown): RoutineContent {
   try {
     const fields = ['schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
     if (Object.prototype.hasOwnProperty.call(input, 'beepOnceRemaining')) fields.push('beepOnceRemaining');
+    if (Object.prototype.hasOwnProperty.call(input, 'beepVolume')) fields.push('beepVolume');
     if (Object.prototype.hasOwnProperty.call(input, 'sequence')) fields.push('sequence');
     if (Object.prototype.hasOwnProperty.call(input, 'savedAt')) fields.push('savedAt');
     const value = strictRecord(input, fields);
@@ -178,6 +179,7 @@ export function parseRoutineContent(input: unknown): RoutineContent {
       beepEvery: number(value.beepEvery), beepRemaining: number(value.beepRemaining),
     };
     if (fields.includes('beepOnceRemaining')) content.beepOnceRemaining = number(value.beepOnceRemaining);
+    if (fields.includes('beepVolume')) content.beepVolume = number(value.beepVolume);
     if (fields.includes('sequence')) content.sequence = parseSequence(value.sequence);
     if (fields.includes('savedAt')) content.savedAt = number(value.savedAt);
     if (validateRoutine({ ...content, id: 'validation', revision: 1, locked: false, published: false }).length) invalid();

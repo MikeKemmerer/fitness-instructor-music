@@ -290,6 +290,7 @@ export const enUS = {
   invalidSchema: 'Unsupported routine format.', invalidName: 'Enter a routine name of 1-160 characters.',
   invalidRevision: 'Invalid saved revision.', invalidState: 'Invalid routine state.', invalidCrossfade: 'Crossfade must be 0-12 seconds.',
   invalidBeeps: 'Beep times must be zero or greater.', invalidFiller: 'Choose a valid filler mode and sound.',
+  invalidBeepVolume: 'Beep volume must be between 0% and 100%.',
   invalidFillerTiming: 'Filler must be 0-600 seconds and 40-220 BPM.', tooManyTracks: 'A routine supports up to 100 tracks.',
   duplicateTracks: 'Track entries must have unique IDs.', invalidTrackText: 'Check track titles and body areas.',
   invalidDuration: 'Tracks must be longer than zero and no more than 20 minutes.',

@@ -1,7 +1,7 @@
 import { createElement, type IconNode } from 'lucide';
 import type { Cue, Track } from '../../shared/routine';
 import type { PlayerState } from '../../shared/player-contract';
-import { formatTime, t } from './i18n';
+import { formatNumber, formatTime, t } from './i18n';
 
 export function cueAtSeconds(track: Track, cue: Cue, seconds: number, duration: number): Cue | null {
   const end = Math.min(track.duration, duration);
@@ -220,6 +220,27 @@ export function numberInput(value: number, minimum: number, maximum: number, cha
   input.required = true;
   input.addEventListener('input', () => change(input.valueAsNumber));
   return input;
+}
+
+export function makeRange(label: string, minimum: number, maximum: number, value: number,
+  change: (value: number) => void, unit: 'pixels' | 'percent' = 'percent'): HTMLLabelElement {
+  const input = element('input');
+  input.type = 'range';
+  input.min = String(minimum);
+  input.max = String(maximum);
+  input.step = '1';
+  input.value = String(value);
+  const output = element('output', 'range-value', t(unit, { count: formatNumber(value) }));
+  const labelElement = field(label, input);
+  labelElement.classList.add('range-field');
+  labelElement.append(output);
+  input.setAttribute('aria-valuetext', output.value);
+  input.addEventListener('input', () => {
+    output.value = t(unit, { count: formatNumber(input.valueAsNumber) });
+    input.setAttribute('aria-valuetext', output.value);
+    change(input.valueAsNumber);
+  });
+  return labelElement;
 }
 
 export function gainSlider(label: string, read: () => number, write: (gain: number) => void, editable: () => boolean = () => true) {

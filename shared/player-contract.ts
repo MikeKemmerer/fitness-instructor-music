@@ -36,7 +36,6 @@ export interface Player {
   hold(): void;
   continue(): Promise<void>;
   setVolume(value: number): void;
-  setBeepVolume(value: number): void;
   setDucked(value: boolean): void;
   setBeepsMuted(value: boolean): void;
   subscribe(listener: (state: PlayerState) => void): () => void;

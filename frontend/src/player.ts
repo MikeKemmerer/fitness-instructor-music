@@ -1,4 +1,4 @@
-import { cueSeconds, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
+import { cueSeconds, DEFAULT_BEEP_VOLUME, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
 import type { Player, PlayerState } from '../../shared/player-contract';
 import { routineClassAudio, type ClassAudio, type ClassPhase } from '../../shared/class-plan';
 import { getReadiness, getReadinessClass, getTrackBlob, MAX_DECODED_BYTES, MAX_TRACK_SECONDS } from './offline';
@@ -97,7 +97,6 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
   let alarmFloor = 0;
   let anchor = 0;
   let volume = 0.8;
-  let beepVolume = 0.3;
   let frame: number | null = null;
   let scheduler: ReturnType<typeof setInterval> | null = null;
   let decodeQueue = Promise.resolve();
@@ -326,7 +325,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
   function updateBuses(): void {
     if (!context || !musicBus || !beepBus) return;
     musicBus.gain.setTargetAtTime(volume * (state.ducked ? 0.25 : 1), context.currentTime, 0.015);
-    beepBus.gain.setTargetAtTime(state.beepsMuted ? 0 : beepVolume, context.currentTime, 0.015);
+    beepBus.gain.setTargetAtTime(state.beepsMuted ? 0 : routine?.beepVolume ?? DEFAULT_BEEP_VOLUME, context.currentTime, 0.015);
   }
 
   function audioContext(): AudioContext {
@@ -966,6 +965,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
       alarmFloor = 0;
       state = { ...initialState(), ducked: state.ducked, beepsMuted: state.beepsMuted };
       routine = structuredClone(value);
+      updateBuses();
       classAudio = undefined;
       sourceTracks = [];
       segments = [];
@@ -1065,7 +1065,6 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
       if (running && ownerAt(position())?.kind === 'filler') await requestNext();
     },
     setVolume(value) { if (Number.isFinite(value)) volume = Math.max(0, Math.min(1, value)); updateBuses(); },
-    setBeepVolume(value) { if (Number.isFinite(value)) beepVolume = Math.max(0, Math.min(1, value)); updateBuses(); },
     setDucked(value) { state = { ...state, ducked: value }; updateBuses(); emit(); },
     setBeepsMuted(value) { state = { ...state, beepsMuted: value }; updateBuses(); emit(); },
     subscribe(listener) {

@@ -143,7 +143,7 @@ const mocks = vi.hoisted(() => ({
   editorSession: { syncAvailability: vi.fn(), cancelJobs: vi.fn(), refreshFillers: vi.fn(), dispose: vi.fn() },
   player: { unload: vi.fn(), load: vi.fn(), play: vi.fn(), pause: vi.fn(), stop: vi.fn(), previous: vi.fn(), next: vi.fn(),
     seek: vi.fn(), updateCues: vi.fn(), advance: vi.fn(),
-    hold: vi.fn(), continue: vi.fn(), setVolume: vi.fn(), setBeepVolume: vi.fn(),
+    hold: vi.fn(), continue: vi.fn(), setVolume: vi.fn(),
     setDucked: vi.fn(), setBeepsMuted: vi.fn(), subscribe: vi.fn(), dispose: vi.fn() },
 }));
 
@@ -1472,6 +1472,7 @@ describe('editor committed controls', () => {
     stubDocument();
     const routine = newRoutine();
     delete routine.beepOnceRemaining;
+    delete routine.beepVolume;
     routine.tracks.push({ id: 'song', title: 'Song', duration: 30, bpm: 120, firstBeat: 0, bodyArea: '', cues: [
       { id: 'later', note: 'Later', anchor: { kind: 'timestamp', seconds: 10 } },
       { id: 'count', note: 'Count', anchor: { kind: 'count', count: 5 } },
@@ -1726,6 +1727,22 @@ describe('editor committed controls', () => {
     await wait.promise; await Promise.resolve();
     expect(button(t('applyGain')).disabled).toBe(true);
     expect(track.gain).toBe(reason === 'gain' ? 0.5 : undefined); session.dispose();
+  });
+
+  it('authors beep volume per routine, defaulting missing values without editing them', async () => {
+    const { routine, host, input, session } = await setup();
+    const slider = input(t('beepVolume'));
+    expect(routine.beepVolume).toBeUndefined();
+    expect(slider.value).toBe('80');
+    expect(Object.assign({}, slider)).toEqual(expect.objectContaining({ min: '0', max: '100', type: 'range' }));
+    slider.value = '45';
+    slider.dispatchEvent(new Event('input'));
+    expect(routine.beepVolume).toBe(0.45);
+    expect(routine.beepRemaining).toBe(10);
+    routine.locked = true;
+    session.syncAvailability();
+    expect(host.querySelectorAll('fieldset').every(fields => fields.disabled)).toBe(true);
+    session.dispose();
   });
 
   it('shows an independent bounded warning, keeps old defaults, and locks edits without locking auditions', async () => {

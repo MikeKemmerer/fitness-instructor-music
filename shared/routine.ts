@@ -1,4 +1,8 @@
 export type Role = 'owner' | 'editor' | 'player';
+
+// Routines saved before beepVolume existed play at this gain.
+export const DEFAULT_BEEP_VOLUME = 0.8;
+
 export type CueAnchor =
   | { kind: 'timestamp'; seconds: number }
   | { kind: 'count'; count: number }
@@ -73,6 +77,7 @@ export interface Routine {
   beepEvery: number;
   beepRemaining: number;
   beepOnceRemaining?: number;
+  beepVolume?: number;
   sequence?: RoutineSequence;
   savedAt?: number;
 }
@@ -119,6 +124,7 @@ export function validateRoutine(routine: Routine): string[] {
   if (!nonnegative(routine.crossfade) || routine.crossfade > 12) errors.push('Crossfade must be 0-12 seconds');
   if (!nonnegative(routine.beepEvery) || !nonnegative(routine.beepRemaining)) errors.push('Invalid beep timing');
   if (routine.beepOnceRemaining !== undefined && (!nonnegative(routine.beepOnceRemaining) || routine.beepOnceRemaining > 1200)) errors.push('Invalid beep timing');
+  if (routine.beepVolume !== undefined && (!nonnegative(routine.beepVolume) || routine.beepVolume > 1)) errors.push('Invalid beep volume');
   if (!routine.filler || typeof routine.filler !== 'object' || Array.isArray(routine.filler)) return [...errors, 'Invalid filler'];
   if (!['none', 'timed', 'hold'].includes(routine.filler.mode) || !['soft', 'bright', 'drums', 'lofi', 'recording'].includes(routine.filler.sound)) errors.push('Invalid filler');
   if (routine.filler.sound === 'recording') {
@@ -229,6 +235,6 @@ export function newRoutine(): Routine {
     schemaVersion: 2, id: crypto.randomUUID(), name: 'My barre class', revision: 1,
     locked: false, published: false, tracks: [],
     filler: { mode: 'timed', seconds: 15, bpm: 100, sound: 'soft' },
-    crossfade: 2, beepEvery: 0, beepRemaining: 10, beepOnceRemaining: 0,
+    crossfade: 2, beepEvery: 0, beepRemaining: 10, beepOnceRemaining: 0, beepVolume: DEFAULT_BEEP_VOLUME,
   };
 }

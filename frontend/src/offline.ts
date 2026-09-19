@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPTransaction } from 'idb';
-import { allRoutineFillers, allRoutineTracks, newRoutine, validFillerRecording, validateRoutine, type AudioAsset, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import { allRoutineFillers, allRoutineTracks, DEFAULT_BEEP_VOLUME, newRoutine, validFillerRecording, validateRoutine, type AudioAsset, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { CloudRoutine } from '../../shared/cloud-contract';
 import { AAC_IMPORT } from '../../shared/audio-import';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from './hosted-session';
@@ -233,7 +233,7 @@ export async function inspectLocalAudioReferences(asset: AudioAsset, recordingId
         if (Object.keys(record).some(field => !allowed.includes(field))) complete = false;
       };
       fields(routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
-        'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'sequence', 'savedAt']);
+        'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
       for (const track of allRoutineTracks(routine)) {
         fields(track, ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
         if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
@@ -583,7 +583,7 @@ function checkedWorkingEnvelope(value: CloudRoutine): CloudRoutine {
     if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('invalid_cloud_routine');
   };
   fields(snapshot.routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
-    'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'sequence', 'savedAt']);
+    'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
   if (snapshot.routine.sequence) {
     fields(snapshot.routine.sequence, ['crossfade', 'walkIn', 'before', 'after', 'walkOut']);
     for (const playlist of [snapshot.routine.sequence.walkIn, snapshot.routine.sequence.walkOut]) {
@@ -819,7 +819,8 @@ export async function saveRoutine(
     checkRoutineDowngrade(previous, snapshot);
     session?.assert();
     const content = (value: Routine) => JSON.stringify({
-      ...value, savedAt: undefined, beepOnceRemaining: value.beepOnceRemaining ?? 0, locked: false, published: false, revision: 0,
+      ...value, savedAt: undefined, beepOnceRemaining: value.beepOnceRemaining ?? 0,
+      beepVolume: value.beepVolume ?? DEFAULT_BEEP_VOLUME, locked: false, published: false, revision: 0,
     });
     let error: string | undefined;
     if (await transaction.objectStore('meta').get(deletedKey('routine', snapshot.id)) ||

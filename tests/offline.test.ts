@@ -3,7 +3,7 @@ import { chromium } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { newRoutine, validateRoutine, type AudioAsset, type FillerRecording } from '../shared/routine';
+import { DEFAULT_BEEP_VOLUME, newRoutine, validateRoutine, type AudioAsset, type FillerRecording } from '../shared/routine';
 import type { CloudRoutine } from '../shared/cloud-contract';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from '../frontend/src/hosted-session';
 import { AAC_IMPORT } from '../shared/audio-import';
@@ -2179,6 +2179,18 @@ describe('local package storage', () => {
     expect(locked.beepOnceRemaining).toBeUndefined();
     const unlocked = await saveRoutine({ ...locked, beepOnceRemaining: 0 }, locked.revision, 'unlock');
     expect(unlocked).toMatchObject({ locked: false, beepOnceRemaining: 0 });
+  });
+
+  it('stores beep volume per routine and treats a missing value as the shared default', async () => {
+    const saved = await saveRoutine({ ...newRoutine(), beepVolume: 0.45 }, null);
+    expect(await getRoutine(saved.id)).toMatchObject({ beepVolume: 0.45 });
+    const quiet = await saveRoutine({ ...saved, beepVolume: 0 }, saved.revision);
+    expect(await getRoutine(quiet.id)).toMatchObject({ beepVolume: 0 });
+    const legacy = newRoutine();
+    delete legacy.beepVolume;
+    const stored = await saveRoutine(legacy, null);
+    expect(stored.beepVolume).toBeUndefined();
+    expect(await getRoutine(stored.id)).not.toHaveProperty('beepVolume');
   });
 
   it('keeps originals when saving a new duplicate ID, selects by ID, and returns detached records', async () => {

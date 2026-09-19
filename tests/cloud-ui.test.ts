@@ -35,7 +35,7 @@ const appMocks = vi.hoisted(() => ({
     subscribe: vi.fn(() => () => {}) },
   exportDispose: vi.fn(),
   player: { unload: vi.fn(), load: vi.fn(), play: vi.fn(), pause: vi.fn(), stop: vi.fn(), next: vi.fn(), seek: vi.fn(), updateCues: vi.fn(), advance: vi.fn(),
-    hold: vi.fn(), continue: vi.fn(), setVolume: vi.fn(), setBeepVolume: vi.fn(), setDucked: vi.fn(),
+    hold: vi.fn(), continue: vi.fn(), setVolume: vi.fn(), setDucked: vi.fn(),
     setBeepsMuted: vi.fn(), subscribe: vi.fn(), dispose: vi.fn() },
 }));
 

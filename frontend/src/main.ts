@@ -38,7 +38,7 @@ import { createFillerLibrary } from './filler-library';
 import { createMediaLibrary } from './media-library';
 import { errorMessage, formatNumber, formatTime, locale, t, trackCount, validationMessage, type MessageKey } from './i18n';
 import { accents, applyTheme, palette, readPreferences, savePreferences } from './theme';
-import { actionMenu, createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
+import { actionMenu, createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, makeRange, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
 import { hostedCloudSelectionKey, hostedInvalidationEvent } from './hosted-session';
 
 const hostedPilot = import.meta.env.VITE_HOSTED_PILOT === 'true';
@@ -1452,9 +1452,6 @@ for (const accent of accents) {
 }
 appearance.append(modes, contrastLabel, field(t('accent'), swatches),
   makeRange(t('progressHeight'), 44, 120, preferences.progressHeight, value => { preferences.progressHeight = value; updatePreferences(); }, 'pixels'));
-const soundSettings = element('section', 'settings-section');
-soundSettings.append(element('h2', '', t('sessionSound')),
-  makeRange(t('beepVolume'), 0, 100, 35, value => player.setBeepVolume(value / 100)));
 const demoSettings = element('section', 'settings-section');
 const disableDemosLabel = element('label', 'switch-label');
 const disableDemosInput = element('input');
@@ -1563,28 +1560,8 @@ mediaLibrary = createMediaLibrary({ hosted: hostedPilot, cloud: cloudLibrary, pr
   catalog: items => fillerLibrary.catalog(items),
 });
 if (hostedPilot) mediaLibrary.element.append(fillerLibrary.element);
-panels.settings.append(settingsHeading, appearance, soundSettings, demoSettings, mediaLibrary.element,
+panels.settings.append(settingsHeading, appearance, demoSettings, mediaLibrary.element,
   ...(hostedPilot ? [] : [fillerLibrary.element]), storage);
-
-function makeRange(label: string, minimum: number, maximum: number, value: number, change: (value: number) => void, unit: 'pixels' | 'percent' = 'percent'): HTMLLabelElement {
-  const input = element('input');
-  input.type = 'range';
-  input.min = String(minimum);
-  input.max = String(maximum);
-  input.step = '1';
-  input.value = String(value);
-  const output = element('output', 'range-value', t(unit, { count: formatNumber(value) }));
-  const labelElement = field(label, input);
-  labelElement.classList.add('range-field');
-  labelElement.append(output);
-  input.setAttribute('aria-valuetext', output.value);
-  input.addEventListener('input', () => {
-    output.value = t(unit, { count: formatNumber(input.valueAsNumber) });
-    input.setAttribute('aria-valuetext', output.value);
-    change(input.valueAsNumber);
-  });
-  return labelElement;
-}
 
 function updatePreferences(persist = true): void {
   applyTheme(preferences);
@@ -2381,7 +2358,6 @@ const unsubscribe = player.subscribe(nextState => {
   if (state.error && state.error !== priorError) notify(errorMessage(state.error), true);
 });
 player.setVolume(0.8);
-player.setBeepVolume(0.35);
 updatePreferences(false);
 selectTab('teach');
 refreshDraft(true);

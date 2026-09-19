@@ -1807,11 +1807,12 @@ describe('local Web Audio player', () => {
   });
 
   it('keeps independent music/duck/beep buses and disposes resources', async () => {
-    await player.load(routine());
+    await player.load({ ...routine(), beepVolume: 0.2 });
     await player.play();
+    const beeps = MockContext.latest.gains[1].gain.setTargetAtTime;
+    expect(beeps).toHaveBeenLastCalledWith(0.2, 0, 0.015);
     player.setVolume(0.6);
     player.setDucked(true);
-    player.setBeepVolume(0.2);
     player.setBeepsMuted(true);
     const audio = MockContext.latest;
     expect(audio.gains[0].gain.setTargetAtTime).toHaveBeenLastCalledWith(0.15, 0, 0.015);
