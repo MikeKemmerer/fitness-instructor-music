@@ -93,9 +93,8 @@ test('R17 R18 R22 held duration, percentage controls and transient errors preser
   await gap.getByRole('button', { name: 'Apply', exact: true }).click();
   await automaticReady(page);
   await setSlider(page.getByRole('slider', { name: 'Music volume', exact: true }), 55);
-  await page.getByRole('tab', { name: 'Settings', exact: true }).click();
-  await setSlider(page.getByRole('slider', { name: 'Beep volume', exact: true }), 40);
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
+  await setSlider(edit.getByRole('slider', { name: 'Beep volume', exact: true }), 40);
   const cueId = await edit.locator('.cue-row').first().getAttribute('data-cue-id');
   const cue = edit.locator(`.cue-row[data-cue-id="${cueId}"]`);
   await cue.getByRole('combobox', { name: 'Source', exact: true }).selectOption('timestamp');
