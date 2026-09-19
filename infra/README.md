@@ -691,6 +691,22 @@ copies, so usable media is below 2.5 GiB; 128 MiB/file; 2 MiB chunks; 64 active 
 4,096 lifetime upload allocations; 512 lifetime routines; 20,000 charged mutations.
 Forty ordinary songs is a workload target, not a worst-case-size guarantee.
 
+### Local `local-media/` Layout
+
+The ignored `local-media/` tree serves three distinct purposes, and only one of them is
+disposable. Write new files into the matching category so cleanup never needs judgement:
+
+| Category | Location | Lifetime |
+|----------|----------|----------|
+| Private media | `incoming/`, `processed/` | Permanent; never delete or copy out of the tree |
+| Evidence | `deployment/<release>/`, `migration-<name>/` | Permanent; upload guards and audit receipts |
+| Scratch | `scratch/` | Freely deletable at any time |
+
+Release helpers such as `unified-release.mjs` also live at the top level and are pinned
+by hash in each `review.json`, so they are not scratch. Tests that call
+`privateDirectory()` must remove the directory they create; an uncleaned test leaks a new
+private directory on every run.
+
 ## Managed Completion
 
 The current [API media contract](../api/README.md#media-contract-for-client-wiring)

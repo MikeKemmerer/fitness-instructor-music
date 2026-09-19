@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
@@ -123,7 +123,7 @@ test('native mono/stereo AAC and isolated browser preserve source timing without
       assert.equal(result.externalRequests, 0);
       verifyTimeline(72048, await decodedFrames(outputPath, channels), Number(metadata.streams[0].duration), result.duration);
     }
-  } finally { await browser.close(); }
+  } finally { await browser.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('reconstruction verifies chunks and full hash with at most two concurrent reads', async () => {
