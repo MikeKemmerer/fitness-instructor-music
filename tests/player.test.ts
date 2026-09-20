@@ -2,6 +2,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from '../frontend/node_modules/vite/dist/node/index.js';
 import { resolve } from 'node:path';
+
+// Vite's /@fs/ route requires forward slashes; resolve() returns backslashes on Windows.
+const fsImportPath = (path: string) => resolve(path).replaceAll('\\', '/');
 import { beepOffsets, createPlayer, projectCues, transitionOverlap } from '../frontend/src/player';
 import { newRoutine, type Cue, type Filler, type FillerRecording, type Track } from '../shared/routine';
 import type { Player, PlayerState } from '../shared/player-contract';
@@ -105,7 +108,7 @@ describe('real Chromium source-gain rendering', () => {
             import * as offline from '/src/offline.ts';
             import * as player from '/src/player.ts';
             import * as preview from '/src/audio-preview.ts';
-            import { newRoutine } from '/@fs/${resolve('shared/routine.ts')}';
+            import { newRoutine } from '/@fs/${fsImportPath('shared/routine.ts')}';
             globalThis.gainTest = { ...offline, ...player, ...preview, newRoutine };
           </script>`);
         });

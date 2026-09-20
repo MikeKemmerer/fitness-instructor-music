@@ -2,6 +2,9 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from '../frontend/node_modules/vite/dist/node/index.js';
 import { resolve } from 'node:path';
+
+// Vite's /@fs/ route requires forward slashes; resolve() returns backslashes on Windows.
+const fsImportPath = (path: string) => resolve(path).replaceAll('\\', '/');
 import type * as Offline from '../frontend/src/offline';
 import type * as Playback from '../frontend/src/player';
 import type * as Routine from '../shared/routine';
@@ -19,8 +22,8 @@ beforeAll(async () => {
         response.end(`<!doctype html><title>Class audio</title><script type="module">
           import * as offline from '/src/offline.ts';
           import * as playback from '/src/player.ts';
-          import * as routine from '/@fs/${resolve('shared/routine.ts')}';
-          import * as classPlan from '/@fs/${resolve('shared/class-plan.ts')}';
+          import * as routine from '/@fs/${fsImportPath('shared/routine.ts')}';
+          import * as classPlan from '/@fs/${fsImportPath('shared/class-plan.ts')}';
           globalThis.classAudioTest = { ...offline, ...playback, ...routine, ...classPlan };
         </script>`);
       });
