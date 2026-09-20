@@ -1,5 +1,6 @@
 import { app, type HttpRequest, type HttpResponseInit } from '@azure/functions';
 import { loadConfig } from './config';
+import { CosmosStore } from './cosmos-store';
 import { CloudApi, failure } from './http';
 import { AzureBlobStore } from './store';
 
@@ -8,7 +9,8 @@ export async function handler(request: HttpRequest): Promise<HttpResponseInit> {
     const config = loadConfig(process.env);
     const store = AzureBlobStore.connect(config.connectionString, config.container);
     await store.verifyPrivate();
-    const api = new CloudApi(store, () => process.env);
+    const cosmosStore = config.documentsBackend === 'cosmos' && config.cosmos ? CosmosStore.connect(config.cosmos) : undefined;
+    const api = new CloudApi(store, () => process.env, Date.now, cosmosStore);
     const response = await api.handle({ method: request.method, url: request.url,
       headers: new Headers([...request.headers.entries()]), body: request.body });
     return { status: response.status, headers: response.headers, body: response.body };
@@ -17,6 +19,7 @@ export async function handler(request: HttpRequest): Promise<HttpResponseInit> {
     return { status: response.status, headers: response.headers, body: response.body };
   }
 }
+
 
 app.http('cloud', { route: '{*path}', methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
   authLevel: 'anonymous', handler });

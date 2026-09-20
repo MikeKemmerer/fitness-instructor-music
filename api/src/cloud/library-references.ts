@@ -5,6 +5,7 @@ import { strictRecord } from '../validation';
 import type { CloudAuth } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
 import { fillerAssetIds } from './content';
+import type { CosmosStoreLike } from './cosmos-store';
 import { CloudMedia } from './media';
 import { CloudClasses, CloudPlaylists, type CloudClassSetup } from './plans';
 import { CloudRoutines } from './routines';
@@ -84,7 +85,29 @@ function position(asset: string, exclude: string, cursor?: string): Position {
 }
 
 export class LibraryReferences {
-  constructor(readonly store: BlobStore, readonly auth: CloudAuth, readonly clock: () => number = Date.now) {}
+  constructor(readonly store: BlobStore, readonly auth: CloudAuth, readonly clock: () => number = Date.now,
+    readonly cosmos?: CosmosStoreLike) {}
+
+  // When the Cosmos documents backend is active, routine/playlist/class snapshots carry a
+  // denormalized assetIds/name pair (see cosmos-documents.ts), so a single indexed ARRAY_CONTAINS
+  // query replaces the resumable Blob prefix-scan for stages 0-2. Fillers are never migrated to
+  // Cosmos, so the filler stage (3) always continues to scan Blob unchanged below.
+  private async cosmosReferences(assetId: string): Promise<LibraryUsagePage['references']> {
+    const rows = await this.cosmos!.query<{ documentId: string; kind: string; revision: number; name: string }>(
+      'snapshots', 'SELECT c.documentId, c.kind, c.revision, c.name FROM c WHERE ARRAY_CONTAINS(c.assetIds, @assetId)',
+      [{ name: '@assetId', value: assetId }]);
+    const seen = new Set<string>();
+    const references: LibraryUsagePage['references'] = [];
+    for (const row of rows) {
+      if (row.kind !== 'routine' && row.kind !== 'playlist' && row.kind !== 'class') throw new ApiError(503, 'reference_scan_uncertain');
+      if (!safeId(row.documentId) || typeof row.name !== 'string' || !Number.isSafeInteger(row.revision)) throw new ApiError(503, 'reference_scan_uncertain');
+      const key = `${row.kind}:${row.documentId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      references.push({ kind: row.kind, id: row.documentId, name: row.name, revision: row.revision });
+    }
+    return references;
+  }
 
   async scan(headers: Headers, assetId: string, exclude = '', cursor?: string,
     descriptions?: Map<string, Description | undefined>): Promise<ReferencePage> {
@@ -117,6 +140,16 @@ export class LibraryReferences {
       return Object.values(body.media).some(asset => asset.id === assetId);
     };
     try {
+      // Fast path: when Cosmos-backed, resolve routine/playlist/class usage with one indexed query
+      // instead of walking every document's history. Skipped for `descriptions` (browse-listing
+      // title lookups), which still need parsed track bodies and already limit themselves to
+      // stages 0-1 below; that lookup falls back to Blob-only results when the backend is Cosmos.
+      if (this.cosmos && !descriptions && state.stage < 3) {
+        references.push(...await this.cosmosReferences(assetId));
+        state.stage = 3;
+        state.marker = '';
+        state.last = '';
+      }
       for (let step = 0; state.stage < 4 && step < REFERENCE_LIMITS.steps; step++) {
         if (this.clock() >= bounded.deadline) throw new ScanLimit();
         if (descriptions && state.stage >= 2) { state.stage = 4; break; }

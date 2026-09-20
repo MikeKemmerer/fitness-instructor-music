@@ -28,17 +28,49 @@ export interface Account {
   authVersion: number;
 }
 
+export interface CosmosConfig {
+  endpoint: string;
+  key: string;
+  database: string;
+}
+
 export interface CloudConfig {
   origin: string;
   connectionString: string;
   container: string;
   accounts: Account[];
+  cosmos?: CosmosConfig;
+  documentsBackend: 'blob' | 'cosmos';
 }
 
 export const safeId = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(value);
 
 export const normalizeUsername = (value: string): string => value.trim().toLowerCase();
+
+// Absent when unconfigured (parallel-run phase, Blob remains authoritative); malformed still fails closed.
+function loadCosmosConfig(env: NodeJS.ProcessEnv): CosmosConfig | undefined {
+  const connectionString = env.FIM_COSMOS_CONNECTION_STRING ?? '';
+  const database = env.FIM_COSMOS_DATABASE ?? '';
+  if (!connectionString && !database) return undefined;
+  if (connectionString.length > 2048) throw new Error();
+  const settings = new Map<string, string>();
+  for (const part of connectionString.replace(/;$/, '').split(';')) {
+    const separator = part.indexOf('=');
+    const key = part.slice(0, separator);
+    if (separator < 1 || settings.has(key)) throw new Error();
+    settings.set(key, part.slice(separator + 1));
+  }
+  if (settings.size !== 2) throw new Error();
+  const endpoint = settings.get('AccountEndpoint') ?? '';
+  const url = new URL(endpoint);
+  if (url.protocol !== 'https:' || !/^[a-z0-9-]{3,50}\.documents\.azure\.com$/.test(url.hostname) ||
+      url.pathname !== '/' || url.search || url.username || url.password) throw new Error();
+  const key = settings.get('AccountKey') ?? '';
+  if (!/^[A-Za-z0-9+/]{86}==$/.test(key) || Buffer.from(key, 'base64').toString('base64') !== key) throw new Error();
+  if (!/^[a-zA-Z0-9%_-]{1,255}$/.test(database)) throw new Error();
+  return { endpoint, key, database };
+}
 
 export function parsePasswordHash(value: unknown): { salt: Buffer; hash: Buffer } {
   if (typeof value !== 'string' || !/^scrypt\$32768\$8\$3\$[0-9a-f]{32}\$[0-9a-f]{64}$/.test(value)) {
@@ -87,7 +119,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): CloudConfig {
       usernames.add(account.username);
     }
     if (!accounts.some(account => account.enabled && account.role === 'owner')) throw new Error();
-    return { origin, connectionString, container, accounts: accounts as Account[] };
+    const cosmos = loadCosmosConfig(env);
+    const documentsBackend = env.FIM_DOCUMENTS_BACKEND ?? 'blob';
+    if (documentsBackend !== 'blob' && documentsBackend !== 'cosmos') throw new Error();
+    if (documentsBackend === 'cosmos' && !cosmos) throw new Error();
+    return { origin, connectionString, container, accounts: accounts as Account[], cosmos, documentsBackend };
   } catch {
     throw new ApiError(503, 'unconfigured');
   }

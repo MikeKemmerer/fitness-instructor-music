@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit && npm --prefix frontend run typecheck",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "check:privacy": "node scripts/check-privacy.mjs"
+    "check:privacy": "node scripts/check-privacy.mjs",
+    "pipeline:watch": "node scripts/watch-pipeline.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.58.2",
