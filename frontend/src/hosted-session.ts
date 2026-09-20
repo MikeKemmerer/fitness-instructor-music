@@ -28,7 +28,7 @@ export function hostedIdentityMarker(identity: CloudIdentity): string {
   return JSON.stringify({ id: identity.id, authVersion: identity.authVersion, role: identity.role });
 }
 
-export function readHostedIdentity(marker: string | null): CloudIdentity | null {
+function readHostedIdentity(marker: string | null): CloudIdentity | null {
   if (!marker) return null;
   try { return parseCloudIdentity(JSON.parse(marker)); }
   catch { return null; }

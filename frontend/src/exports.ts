@@ -137,7 +137,7 @@ export const exportColumns: readonly ExportColumn[] = freezeTree([
   { id: 'row.status', label: 'exportRowStatus', group: 'exportValidationFields', type: 'string', width: 40, default: true, value: row => row.issues.length ? row.issues.map(validationMessage).join('\n') : t('exportValid') },
 ]);
 
-export function fillerSoundName(routine: Routine): string {
+function fillerSoundName(routine: Routine): string {
   const sound = routine.filler.sound;
   return sound === 'recording' ? routine.filler.recording?.name ?? t('customFillers') : t(sound);
 }
@@ -311,7 +311,6 @@ export async function createExcelBlob(snapshot: ExportSnapshot, selectedIds: rea
   return writeExcelFile(sheets, { fontFamily: 'Calibri', fontSize: 11, features: [filters] }).toBlob();
 }
 
-export const pdfFontPath = 'fonts/NotoSans-Regular.ttf';
 
 async function loadPdfFont(): Promise<Uint8Array> {
   try {

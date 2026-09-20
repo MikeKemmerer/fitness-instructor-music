@@ -8,7 +8,7 @@ const CLOUD_DOWNLOAD_CONCURRENCY = 2;
 const downloadQueue: Array<() => void> = [];
 let activeDownloads = 0;
 
-export function isLibraryIntakeFilename(filename: unknown): filename is string {
+function isLibraryIntakeFilename(filename: unknown): filename is string {
   return typeof filename === 'string' && filename.length <= 300 && !!filename.trim()
     && !/[\\/:\x00-\x1f\x7f]/.test(filename) && filename !== '.' && filename !== '..';
 }
@@ -23,7 +23,7 @@ export function validateLibraryIntakeDuration(kind: ManagedAudioItem['kind'], du
   }
 }
 
-export function validateLibraryIntake(kind: ManagedAudioItem['kind'], filename: unknown, duration: unknown): void {
+function validateLibraryIntake(kind: ManagedAudioItem['kind'], filename: unknown, duration: unknown): void {
   validateLibraryIntakeFilename(filename);
   validateLibraryIntakeDuration(kind, duration);
 }

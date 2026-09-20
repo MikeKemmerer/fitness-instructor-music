@@ -10,7 +10,7 @@ import { QuotaBudget } from './quota';
 import { BlobConflict, encode, readJson, type BlobStore } from './store';
 
 export type LibraryKind = 'song' | 'filler';
-export const METADATA_BYTES = 4096;
+const METADATA_BYTES = 4096;
 export const MANAGED_PAGE_KEYS = 32;
 const metadataKey = (kind: LibraryKind, id: string): string => `library/metadata/${kind}/${id}`;
 
