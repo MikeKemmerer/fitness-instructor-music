@@ -3,6 +3,9 @@ import type { ReadableStream } from 'node:stream/web';
 import { ServiceError } from '../errors';
 import { CloudAuth, clearCookie } from './auth';
 import { ApiError, LIMITS, safeId } from './config';
+import type { CosmosStoreLike } from './cosmos-store';
+import { CosmosClasses, CosmosPlaylists } from './cosmos-plans';
+import { CosmosRoutines } from './cosmos-routines';
 import { CloudLibrary } from './library';
 import { LibraryManagement } from './library-management';
 import { CloudMedia } from './media';
@@ -107,19 +110,31 @@ let activeCompletions = 0;
 export class CloudApi {
   readonly auth: CloudAuth;
   readonly media: CloudMedia;
-  readonly routines: CloudRoutines;
-  readonly playlists: CloudPlaylists;
-  readonly classes: CloudClasses;
+  readonly routines: CloudRoutines | CosmosRoutines;
+  readonly playlists: CloudPlaylists | CosmosPlaylists;
+  readonly classes: CloudClasses | CosmosClasses;
   readonly library: CloudLibrary;
   readonly managed: LibraryManagement;
-  constructor(readonly store: BlobStore, env: () => NodeJS.ProcessEnv, now: () => number = Date.now) {
+  constructor(readonly store: BlobStore, env: () => NodeJS.ProcessEnv, now: () => number = Date.now, cosmosStore?: CosmosStoreLike) {
     this.auth = new CloudAuth(store, env, now);
     this.media = new CloudMedia(store, this.auth);
-    this.routines = new CloudRoutines(store, this.auth, this.media);
-    this.playlists = new CloudPlaylists(store, this.auth, this.media);
-    this.classes = new CloudClasses(store, this.auth, this.routines, this.playlists);
-    this.library = new CloudLibrary(store, this.auth, this.media, this.routines, this.playlists);
-    this.managed = new LibraryManagement(store, this.auth, this.media, this.routines.fillers);
+    if (cosmosStore) {
+      this.routines = new CosmosRoutines(cosmosStore, store, this.auth, this.media);
+      this.playlists = new CosmosPlaylists(cosmosStore, store, this.auth, this.media);
+      this.classes = new CosmosClasses(cosmosStore, store, this.auth, this.routines, this.playlists);
+      // Library BROWSING (title lookups for the asset list) stays Blob-only -- CloudLibrary never
+      // actually calls these two fields, see cosmos-routines.ts. Reference-checking for deletion
+      // safety (LibraryManagement below) is Cosmos-aware and does not depend on these.
+      const libraryRoutines = new CloudRoutines(store, this.auth, this.media);
+      const libraryPlaylists = new CloudPlaylists(store, this.auth, this.media);
+      this.library = new CloudLibrary(store, this.auth, this.media, libraryRoutines, libraryPlaylists);
+    } else {
+      this.routines = new CloudRoutines(store, this.auth, this.media);
+      this.playlists = new CloudPlaylists(store, this.auth, this.media);
+      this.classes = new CloudClasses(store, this.auth, this.routines, this.playlists);
+      this.library = new CloudLibrary(store, this.auth, this.media, this.routines, this.playlists);
+    }
+    this.managed = new LibraryManagement(store, this.auth, this.media, this.routines.fillers, cosmosStore);
   }
 
   async traffic(bucket: string, limit: number): Promise<void> {
@@ -138,6 +153,9 @@ export class CloudApi {
     if (activeRequests >= 4) return failure(503, 'server_busy');
     activeRequests++;
     try {
+      const maintenance = this.auth.env().FIM_MAINTENANCE_MESSAGE;
+      if (maintenance) return { status: 503, headers: { ...responseHeaders, 'retry-after': '1800' },
+        body: JSON.stringify({ error: 'maintenance', message: maintenance }) };
       this.auth.config();
       await this.traffic(`global-${randomInt(8)}`, 64);
       const url = new URL(request.url);

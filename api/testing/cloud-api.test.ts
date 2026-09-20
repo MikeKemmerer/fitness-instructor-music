@@ -15,7 +15,7 @@ import { CloudRoutines, revisionHeader } from '../src/cloud/routines';
 import { QuotaBudget } from '../src/cloud/quota';
 import { CloudFillers } from '../src/cloud/fillers';
 import { HEAD_BYTES, HISTORY_LIMIT } from '../src/cloud/documents';
-import type { CloudClassSetup, ResolvedClassSetup } from '../src/cloud/plans';
+import { CloudClasses, CloudPlaylists, type CloudClassSetup, type ResolvedClassSetup } from '../src/cloud/plans';
 import { parseRoutineContent } from '../src/validation';
 import { LIBRARY_SCAN_LIMIT } from '../src/cloud/library';
 import { AssetAdmission, GATE_BYTES } from '../src/cloud/admission';
@@ -383,7 +383,7 @@ describe('unified routine HTTP aggregate', () => {
     if (defect === 'forged-source') Object.assign(arrival.source!, { role: 'owner' });
     const quota = store.blobs.get('control/quota');
     expect((await api.handle(request('routines', 'POST', headers, input))).status).toBe(400);
-    expect(store.blobs.has(api.routines.headKey(input.routine.id))).toBe(false);
+    expect(store.blobs.has((api.routines as CloudRoutines).headKey(input.routine.id))).toBe(false);
     const before = JSON.parse(quota!.bytes.toString());
     const after = (await readJson<Record<string, number>>(store, 'control/quota'))!.value;
     expect(after).toMatchObject({ routines: before.routines, fillers: before.fillers, assets: before.assets, active: before.active });
@@ -465,7 +465,7 @@ describe('unified routine HTTP aggregate', () => {
     delete legacy.routine.savedAt;
     delete head.value.draft.savedAt;
     await store.put(head.value.draft.key, encode(legacy), stored.etag);
-    await store.put(api.routines.headKey(created.routine.id), encode(head.value), head.etag);
+    await store.put((api.routines as CloudRoutines).headKey(created.routine.id), encode(head.value), head.etag);
     expect(await api.routines.get(headers, created.routine.id, false)).toEqual(legacy);
     expect((await api.routines.list(headers, false)).routines[0]).not.toHaveProperty('savedAt');
     const setup = await api.classes.create(headers, classPlan(pin(legacy.routine)));
@@ -1017,7 +1017,7 @@ describe('uploaded audio retained history and finite scans', () => {
     empty.routine.id = draft.routine.id;
     await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'save', empty);
     await api.routines.mutate(atRevision(headers, 2), draft.routine.id, 'save', { ...empty, routine: { ...empty.routine, revision: 2 } });
-    const key = api.routines.headKey(draft.routine.id);
+    const key = (api.routines as CloudRoutines).headKey(draft.routine.id);
     const head = (await readJson<Record<string, unknown>>(store, key))!;
     const links = head.value.history as { revision: number }[];
     head.value.history = links.slice(1);
@@ -1031,7 +1031,7 @@ describe('uploaded audio retained history and finite scans', () => {
     const { api, headers, asset, store } = await managementFixture();
     const draft = await api.routines.create(headers, routine());
     await api.routines.mutate(atRevision(headers, 1), draft.routine.id, 'save', draft);
-    const key = api.routines.headKey(draft.routine.id);
+    const key = (api.routines as CloudRoutines).headKey(draft.routine.id);
     const head = (await readJson<Record<string, unknown>>(store, key))!;
     delete head.value.history;
     await store.put(key, encode(head.value), head.etag);
@@ -1044,7 +1044,7 @@ describe('uploaded audio retained history and finite scans', () => {
   it('fails closed on a missing retained snapshot instead of interpreting it as unused', async () => {
     const { api, headers, asset, store } = await managementFixture();
     const draft = await api.routines.create(headers, routine());
-    const { value: head } = await api.routines.storedHead(draft.routine.id);
+    const { value: head } = await (api.routines as CloudRoutines).storedHead(draft.routine.id);
     const get = store.get.bind(store);
     vi.spyOn(store, 'get').mockImplementation((key, maximum) => key === head.draft.key ? Promise.resolve(null) : get(key, maximum));
     await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
@@ -1071,9 +1071,9 @@ describe('uploaded audio retained history and finite scans', () => {
   it('rejects oversized history and malformed admission state', async () => {
     const { api, headers, asset, store } = await managementFixture();
     const draft = await api.routines.create(headers, routine());
-    const { value: head, etag } = await api.routines.storedHead(draft.routine.id);
+    const { value: head, etag } = await (api.routines as CloudRoutines).storedHead(draft.routine.id);
     head.history = Array.from({ length: HISTORY_LIMIT + 1 }, (_, index) => ({ revision: index + 1, draft: head.draft.key }));
-    await store.put(api.routines.headKey(draft.routine.id), encode(head), etag);
+    await store.put((api.routines as CloudRoutines).headKey(draft.routine.id), encode(head), etag);
     await expect(api.managed.usage(headers, 'song', asset.id)).rejects.toMatchObject({ code: 'reference_scan_uncertain' });
     await store.put(`library/gates/${asset.id}`, encode({ version: 1, claims: [], deleted: false }), null);
     await expect(api.managed.remove(atRevision(headers, 0), 'song', asset.id)).rejects.toMatchObject({ status: 503 });
@@ -1083,7 +1083,7 @@ describe('uploaded audio retained history and finite scans', () => {
     const { api, headers, asset, store } = await managementFixture();
     const draft = await api.routines.create(headers, routine());
     const saved = await api.classes.create(headers, classPlan(pin(draft.routine)));
-    const { value: head } = await api.classes.storedHead(saved.setup.id);
+    const { value: head } = await (api.classes as CloudClasses).storedHead(saved.setup.id);
     const snapshot = (await readJson<CloudClassSetup>(store, head.draft.key))!;
     snapshot.value.setup.routine.revision = 99;
     await store.put(head.draft.key, encode(snapshot.value), snapshot.etag);
@@ -1368,7 +1368,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
   it.each(['routines', 'playlists', 'classes'] as const)('%s never exposes staged revisions after a failed head CAS', async kind => {
     const context = await planFixture();
     const { api, headers, asset, publication } = context;
-    const service = kind === 'routines' ? api.routines : kind === 'playlists' ? api.playlists : api.classes;
+    const service = (kind === 'routines' ? api.routines : kind === 'playlists' ? api.playlists : api.classes) as CloudRoutines | CloudPlaylists | CloudClasses;
     const input = kind === 'routines' ? routine(asset) : kind === 'playlists' ? musicPlaylist(asset) : classPlan(pin(publication.routine));
     const body = await service.create(headers, input);
     const id = 'routine' in body ? body.routine.id : planState(body).id;
@@ -1400,7 +1400,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
     const tags: (string | null)[] = [];
     const put = api.store.put.bind(api.store);
     vi.spyOn(api.store, 'put').mockImplementation(async (key, bytes, expected) => {
-      if (key === api.classes.headKey(body.setup.id)) {
+      if (key === (api.classes as CloudClasses).headKey(body.setup.id)) {
         tags.push(expected);
         if (tags.length === 2) release();
         await barrier;
@@ -1428,7 +1428,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
   ] as const)('%s %s withdraws author access after staging without committing or refunding', async (kind, action) => {
     const context = await planFixture('editor');
     const { api, headers, asset, publication } = context;
-    const service = kind === 'playlists' ? api.playlists : api.classes;
+    const service = (kind === 'playlists' ? api.playlists : api.classes) as CloudPlaylists | CloudClasses;
     const input = kind === 'playlists' ? musicPlaylist(asset) : classPlan(pin(publication.routine));
     const id = planState(input).id;
     if (action === 'publish') await service.create(headers, input);
@@ -1455,7 +1455,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
     const current = await api.routines.head(id);
     const { history: omitted, ...legacy } = current.value;
     expect(omitted).toHaveLength(4);
-    await api.store.put(api.routines.headKey(id), encode(legacy), current.etag);
+    await api.store.put((api.routines as CloudRoutines).headKey(id), encode(legacy), current.etag);
     expect((await api.routines.get(headers, id, false, 4)).routine.revision).toBe(4);
     expect(await api.routines.get(headers, id, true, 2)).toEqual(JSON.parse(encode(publication).toString()));
     for (const revision of [1, 3]) await expect(api.routines.get(headers, id, false, revision)).rejects.toMatchObject({ status: 404, code: 'revision_not_found' });
@@ -1475,13 +1475,13 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
     while (current.playlist.revision < HISTORY_LIMIT) {
       current = await api.playlists.mutate(atRevision(headers, current.playlist.revision), id, 'save', current);
     }
-    const stored = (await api.store.get(api.playlists.headKey(id), HEAD_BYTES))!;
+    const stored = (await api.store.get((api.playlists as CloudPlaylists).headKey(id), HEAD_BYTES))!;
     expect(JSON.parse(stored.bytes.toString()).history).toHaveLength(HISTORY_LIMIT);
     expect(stored.bytes.length).toBeLessThanOrEqual(HEAD_BYTES);
     const quota = await api.store.get('control/quota', 65536);
     await expect(api.playlists.mutate(atRevision(headers, HISTORY_LIMIT), id, 'save', current)).rejects.toMatchObject({ status: 409, code: 'revision_limit_reached' });
     expect(await api.store.get('control/quota', 65536)).toEqual(quota);
-    expect(await api.store.get(api.playlists.headKey(id), HEAD_BYTES)).toEqual(stored);
+    expect(await api.store.get((api.playlists as CloudPlaylists).headKey(id), HEAD_BYTES)).toEqual(stored);
     expect(await api.playlists.get(headers, id, true, 2)).toEqual(JSON.parse(encode(publication).toString()));
   });
 
@@ -1502,7 +1502,7 @@ describe('approved class workflow (persistent services, Blob fake)', () => {
 
   it('rejects nonprogressing, duplicate and oversized discovery pages for each collection', async () => {
     const { api } = await planFixture();
-    for (const service of [api.routines, api.playlists, api.classes]) {
+    for (const service of [api.routines, api.playlists, api.classes] as (CloudRoutines | CloudPlaylists | CloudClasses)[]) {
       for (const keys of [[], [`${service.indexPrefix}same`, `${service.indexPrefix}same`],
         Array.from({ length: 129 }, (_, index) => `${service.indexPrefix}entry-${index}`)]) {
         const spy = vi.spyOn(api.store, 'list').mockResolvedValue({ keys, cursor: 'unchanged' });
@@ -2085,6 +2085,25 @@ describe('cloud configuration and Blob-backed auth (in-process Blob fake, not Az
     }
     expect(() => loadConfig({ ...context.env(), FIM_ORIGIN: 'https://example.invalid/' })).toThrow('unconfigured');
     expect(() => parsePasswordHash(passwordHash.replace('32768', '1048576'))).toThrow('unconfigured');
+  });
+
+  it('leaves cosmos config absent when unset, and fails closed only when malformed', () => {
+    const context = fixture();
+    expect(loadConfig(context.env()).cosmos).toBeUndefined();
+    const key = Buffer.alloc(64).toString('base64');
+    const cosmosEnv = { ...context.env(),
+      FIM_COSMOS_CONNECTION_STRING: `AccountEndpoint=https://fim-cosmos-pilot.documents.azure.com:443/;AccountKey=${key};`,
+      FIM_COSMOS_DATABASE: 'fim' };
+    expect(loadConfig(cosmosEnv).cosmos).toEqual({
+      endpoint: 'https://fim-cosmos-pilot.documents.azure.com:443/', key, database: 'fim' });
+    for (const broken of [
+      { ...cosmosEnv, FIM_COSMOS_DATABASE: '' },
+      { ...cosmosEnv, FIM_COSMOS_CONNECTION_STRING: `AccountEndpoint=http://fim-cosmos-pilot.documents.azure.com:443/;AccountKey=${key};` },
+      { ...cosmosEnv, FIM_COSMOS_CONNECTION_STRING: 'AccountEndpoint=https://fim-cosmos-pilot.documents.azure.com:443/;' },
+      { ...cosmosEnv, FIM_COSMOS_CONNECTION_STRING: `AccountEndpoint=https://fim-cosmos-pilot.documents.azure.com:443/;AccountKey=not-base64;` },
+    ]) {
+      expect(() => loadConfig(broken)).toThrow('unconfigured');
+    }
   });
 
   it('creates opaque secure cookies and authenticates through an independent service', async () => {
@@ -3162,6 +3181,19 @@ describe('actual HTTP dispatcher (Blob fake; no Azure ingress claim)', () => {
     const failed = await new CloudApi(context.store, context.env).handle(request('auth/session', 'GET', new Headers()));
     expect(failed.status).toBe(503);
     expect(String(failed.body)).not.toContain('private-internal');
+  });
+
+  it('blocks every request with a 503 when FIM_MAINTENANCE_MESSAGE is set, even for a valid session', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const maintenance = new CloudApi(context.store, () => ({ ...context.env(), FIM_MAINTENANCE_MESSAGE: 'Upgrading storage, back soon.' }), context.auth.now);
+    for (const route of [request('auth/session', 'GET', new Headers()), request('routines', 'GET', headers), request('routines', 'POST', headers, routine())]) {
+      const response = await maintenance.handle(route);
+      expect(response).toMatchObject({ status: 503, body: '{"error":"maintenance","message":"Upgrading storage, back soon."}' });
+      expect(response.headers['retry-after']).toBe('1800');
+    }
+    const normal = new CloudApi(context.store, context.env, context.auth.now);
+    expect((await normal.handle(request('auth/session', 'GET', headers))).status).toBe(200);
   });
 });
 

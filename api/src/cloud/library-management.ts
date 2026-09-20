@@ -3,6 +3,7 @@ import { strictRecord, text } from '../validation';
 import { admitted, AssetAdmission, type AdmissionState } from './admission';
 import type { Authenticated, CloudAuth } from './auth';
 import { ApiError, safeId } from './config';
+import type { CosmosStoreLike } from './cosmos-store';
 import { CloudFillers } from './fillers';
 import { LibraryReferences, type Description } from './library-references';
 import { CloudMedia } from './media';
@@ -73,9 +74,10 @@ export class LibraryManagement {
   readonly gate: AssetAdmission;
   readonly references: LibraryReferences;
   readonly budget: QuotaBudget;
-  constructor(readonly store: BlobStore, readonly auth: CloudAuth, readonly media: CloudMedia, readonly fillers: CloudFillers) {
+  constructor(readonly store: BlobStore, readonly auth: CloudAuth, readonly media: CloudMedia, readonly fillers: CloudFillers,
+    cosmos?: CosmosStoreLike) {
     this.gate = new AssetAdmission(store);
-    this.references = new LibraryReferences(store, auth);
+    this.references = new LibraryReferences(store, auth, Date.now, cosmos);
     this.budget = new QuotaBudget(store);
   }
 

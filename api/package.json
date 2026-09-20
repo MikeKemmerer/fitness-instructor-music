@@ -11,6 +11,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@azure/cosmos": "4.10.1",
     "@azure/functions": "4.16.2",
     "@azure/storage-blob": "12.28.0"
   },
