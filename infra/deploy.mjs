@@ -12,7 +12,7 @@ const execute = promisify(execFile);
 
 export const target = Object.freeze({
   resourceGroup: 'rg-fitness-instructor-pilot',
-  appName: 'fitness-instructor-music-pilot'
+  appName: 'fitness-instructor-music-pilot2'
 });
 export const apiDirectory = resolve(root, 'local-media/deployment/api');
 
