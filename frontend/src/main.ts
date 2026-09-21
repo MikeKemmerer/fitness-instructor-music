@@ -2232,7 +2232,7 @@ function updateText(node: HTMLElement, text: string): void {
 function fitMoveNote(node: HTMLElement): void {
   node.style.fontSize = '';
   if (!node.clientHeight) return;
-  for (let step = 0; step < 10 && node.scrollHeight > node.clientHeight + 1; step++) {
+  for (let step = 0; step < 20 && node.scrollHeight > node.clientHeight + 1; step++) {
     const current = Number.parseFloat(getComputedStyle(node).fontSize);
     if (!Number.isFinite(current) || current <= 10) break;
     node.style.fontSize = `${current * 0.92}px`;
