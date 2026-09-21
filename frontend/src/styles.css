@@ -155,8 +155,11 @@ svg { flex: none; }
 .current-move { border-inline-start: 3px solid var(--accent); padding-inline-start: 16px; }
 .move-note { font-family: 'Barlow Condensed', sans-serif; font-size: 2.75rem; font-weight: 500; line-height: 1.12; margin-block-start: 9px; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 2.3em; overflow: hidden; }
 .move-note.long-note { font-size: 1.7rem; line-height: 1.2; }
-/* Multi-line moves (explicit line break): keep the first line prominent, shrink the rest. */
-.move-note.multiline { font-size: 1.7rem; line-height: 1.2; }
+/* Multi-line moves (explicit line break): keep the first line prominent, shrink the rest.
+   The enlarged first line alone can take up to ~1.96 of the shrunk font's line-heights (see the
+   ::first-line ratios below), so 2.3em (sized for a single uniform long-note) isn't enough room
+   even for just 2 lines here -- give multiline extra budget before the JS auto-fit has to shrink. */
+.move-note.multiline { font-size: 1.7rem; line-height: 1.2; max-height: 3em; }
 .move-note.multiline::first-line { font-size: 1.6176em; }
 .next-note { font-family: 'Barlow Condensed', sans-serif; font-size: 2rem; font-weight: 500; line-height: 1.2; margin-block: 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .next-cue-time { color: var(--accent); font-size: 1.2rem; font-weight: 600; line-height: 1.35; margin-block-start: 12px; overflow-wrap: anywhere; }
