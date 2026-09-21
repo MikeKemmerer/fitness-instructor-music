@@ -247,9 +247,6 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
   .routine-library .library-toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .routine-library .library-toolbar > * { min-inline-size: 0; }
   .routine-library .library-toolbar .button { max-inline-size: 100%; white-space: normal; }
-  /* At 428-430px (iPhone 13/14 Pro Max) two columns leave too little room for longer
-     field labels, which then wrap and force uneven row heights across the whole grid. */
-  .field-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .editor-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px 24px; align-items: start; }
 .editor-identity { min-inline-size: 0; }
@@ -478,6 +475,11 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
   .cue-sheet { grid-column: 1 / -1; margin-block-start: 28px; }
   .moves { padding-block: 42px 36px; min-block-size: 220px; }
   .transport { gap: 16px; }
+}
+@media (max-width: 480px) {
+  /* At 428-430px (iPhone 13/14 Pro Max) two columns leave too little room for longer
+     field labels, which then wrap and force uneven row heights across the whole grid. */
+  .field-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 380px) {
   .app-shell { padding-inline: 14px; }
