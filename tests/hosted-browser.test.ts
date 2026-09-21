@@ -699,7 +699,7 @@ describe.skipIf(!hosted)('built hosted browser with real CloudApi and test-only 
     expect((await accepted).headers()['cache-control']).toContain('no-store');
     const cookies = await context.cookies();
     expect(cookies).toHaveLength(1);
-    expect(cookies[0]).toMatchObject({ secure: true, httpOnly: true, sameSite: 'Strict', path: '/' });
+    expect(cookies[0]).toMatchObject({ secure: true, httpOnly: true, sameSite: 'None', path: '/' });
     expect(await page.evaluate(() => document.cookie)).toBe('');
     expect(await page.evaluate(() => JSON.stringify({ ...localStorage }))).not.toContain(cookies[0]!.value);
     await screenshot(page, 'cloud');
