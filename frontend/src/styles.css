@@ -32,7 +32,7 @@
 .recovery-library { margin-block: 16px; }
 .class-composition { border-block: 1px solid var(--border); margin-block: 16px; padding-block: 16px; }
 .class-composition h2 { font-size: 1.1rem; margin-block: 0 12px; }
-.phase-toggles { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.phase-toggles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; }
 .phase-toggles .field { display: flex; flex-direction: row; align-items: center; gap: 8px; }
 .phase-setup:empty { display: none; }
 .phase-setup { margin-block-start: 16px; }
@@ -244,6 +244,12 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
   .playlist-workspace .library-toolbar > * { min-inline-size: 0; }
   .playlist-workspace .library-toolbar .button { max-inline-size: 100%; white-space: normal; }
   .playlist-workspace .editor-heading-actions > .button { white-space: normal; text-align: start; }
+  .routine-library .library-toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .routine-library .library-toolbar > * { min-inline-size: 0; }
+  .routine-library .library-toolbar .button { max-inline-size: 100%; white-space: normal; }
+  /* At 428-430px (iPhone 13/14 Pro Max) two columns leave too little room for longer
+     field labels, which then wrap and force uneven row heights across the whole grid. */
+  .field-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .editor-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px 24px; align-items: start; }
 .editor-identity { min-inline-size: 0; }
@@ -291,7 +297,8 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .chooser-empty { padding-block: 24px; color: var(--muted); font-size: .9rem; }
 @media (max-width: 760px) {
   .editor-heading { grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  .editor-heading-actions { position: relative; grid-row: 2; justify-content: flex-end; flex-wrap: wrap; }
+  .editor-heading-actions { position: relative; grid-row: 2; flex-wrap: wrap; }
+  .editor-heading-actions > .button { flex: 1 1 auto; white-space: normal; }
   .editor-heading-actions .export-section { position: static; }
   .editor-actions > .draft-status { flex-basis: 100%; order: -1; text-align: start; }
   .editor-actions > .draft-protection { flex: 1 1 100%; }
@@ -483,7 +490,6 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
   .routine-heading { align-items: start; gap: 12px; flex-direction: column; }
   .transport { gap: 8px; }
   .transport .labeled { padding-inline: 10px; }
-  .field-grid { grid-template-columns: minmax(0, 1fr); }
   .reference-row { grid-template-columns: minmax(0, 1fr); }
   .reference-row > .field:first-child { grid-column: 1 / -1; }
 }
