@@ -584,6 +584,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
         value.setAttribute('aria-invalid', String(invalid.has(cue)));
       };
       configureValue();
+      // Reformat a normalized value (e.g. "0:60" -> "1:00.0") once the field isn't being typed into.
+      refreshers.push(() => { if (document.activeElement !== value && !invalid.has(cue)) configureValue(); });
       value.addEventListener('input', () => mutate(() => {
         const nextValue = cue.anchor.kind === 'count' ? /^\d+$/.test(value.value) ? Number(value.value) : null : parseCueTime(value.value);
         const valid = nextValue !== null && Number.isFinite(nextValue) && (cue.anchor.kind === 'count'

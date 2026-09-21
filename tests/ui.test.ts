@@ -96,13 +96,17 @@ describe('unified review source guards', () => {
 });
 
 describe('cue time text', () => {
-  it.each(['', ' ', '1:60', '1:60.1', '-1', 'NaN', 'Infinity', '1:2', '1:02:03', '1e2', '.5'])('rejects %j without coercion', value => {
+  it.each(['', ' ', '-1', 'NaN', 'Infinity', '1:2', '1:02:03', '1e2', '.5'])('rejects %j without coercion', value => {
     expect(parseCueTime(value)).toBeNull();
   });
   it.each([0, 59.999, 60, 60.125, 120, 3.14159, 1199.999])('round trips %s seconds', seconds => {
     expect(parseCueTime(formatCueTime(seconds))).toBe(seconds);
     expect(parseCueTime(String(seconds))).toBe(seconds);
   });
+  it.each([['0:60', 60], ['1:60', 120], ['1:60.1', 120.1], ['0:99', 99], ['2:99.5', 219.5]])(
+    'folds an overflowed seconds part %j into the total (%s) instead of rejecting it', (value, expected) => {
+      expect(parseCueTime(value)).toBe(expected);
+    });
   it('formats minute boundaries without rounding and accepts padded seconds', () => {
     expect(formatCueTime(60)).toBe('1:00.0');
     expect(formatCueTime(59.999)).toBe('0:59.999');
