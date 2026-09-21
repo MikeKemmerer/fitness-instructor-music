@@ -839,6 +839,26 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     else if (wasPaused) { state = { ...state, status: 'paused' }; emit(); }
   }
 
+  // Jumps directly to an arbitrary routine track (e.g. tapping it in the Track order list),
+  // anchored at the current elapsed clock so classElapsed/routineStart stay consistent.
+  async function skipToTrack(index: number): Promise<void> {
+    if (!ready || !routine || disposed || pendingNext) return;
+    if (!Number.isInteger(index) || index < 0 || index >= routine.tracks.length) return;
+    const now = position();
+    running = false;
+    cancelScheduled();
+    checkpoint = now;
+    alarmFloor = now;
+    firedAlarms.clear();
+    routineEnd = null;
+    segments = phasePlan('routine', now, index);
+    state = { ...initialState(), ducked: state.ducked, beepsMuted: state.beepsMuted };
+    if (context?.state === 'running') void context.suspend().catch(() => undefined);
+    project();
+    emit();
+    await play();
+  }
+
   async function seek(seconds: number): Promise<void> {
     if (disposed) throw new Error('player_disposed');
     if (!ready || !routine) throw new Error('routine_not_ready');
@@ -1045,6 +1065,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     unload,
     advance: () => requestNext(true),
     seek,
+    skipToTrack,
     updateCues,
     pause() { pauseWithError(); },
     stop: () => rewindTrack(),

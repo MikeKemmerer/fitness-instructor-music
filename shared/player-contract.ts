@@ -32,6 +32,7 @@ export interface Player {
   previous?(): Promise<void>;
   next(): Promise<void>;
   seek(seconds: number): Promise<void>;
+  skipToTrack?(index: number): Promise<void>;
   updateCues(trackIndex: number, cues: Cue[]): void;
   hold(): void;
   continue(): Promise<void>;

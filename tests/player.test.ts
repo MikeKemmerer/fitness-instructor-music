@@ -620,6 +620,26 @@ describe('local Web Audio player', () => {
     expect(state).toMatchObject({ phase: 'walk-in', phaseTrackIndex: 0, elapsed: 0 });
   });
 
+  it('skipToTrack jumps directly to the tapped track and starts playing', async () => {
+    await player.load(routine());
+    await player.play();
+    await advance(3);
+    await player.skipToTrack!(2);
+    expect(state).toMatchObject({ trackIndex: 2, elapsed: 0, status: 'playing' });
+    player.pause();
+    await player.skipToTrack!(0);
+    expect(state).toMatchObject({ trackIndex: 0, elapsed: 0, status: 'playing' });
+  });
+
+  it('skipToTrack ignores an out-of-range index', async () => {
+    await player.load(routine());
+    await player.play();
+    await advance(3);
+    await player.skipToTrack!(99);
+    expect(state.trackIndex).toBe(0);
+    expect(state.elapsed).toBeGreaterThan(0);
+  });
+
   it('Stop and Previous retain the walk-in playlist and announcement phase', async () => {
     await player.load(routine(), classAudio());
     await player.play();

@@ -687,8 +687,10 @@ describe('uploaded audio manager', () => {
   }
 
   it('browses text-only metadata and unknown intake without downloading, and searches loaded rows', async () => {
+    mocks.getTrackBlob.mockResolvedValue(undefined);
     const setup = await harness();
-    expect(setup.cloud.downloadTracks).not.toHaveBeenCalled(); expect(mocks.getTrackBlob).not.toHaveBeenCalled();
+    expect(setup.cloud.downloadTracks).not.toHaveBeenCalled();
+    expect(mocks.getTrackBlob).toHaveBeenCalledWith('library-asset-manager');
     const cells = setup.root.querySelectorAll('.media-cell');
     expect(cells.map(cell => cell.textContent)).toEqual([t('unknownValue'), '<House song>', '<Artist>', t('unknownValue'), t('unknownValue')]);
     expect(cells.every(cell => cell.children.length === 0)).toBe(true);

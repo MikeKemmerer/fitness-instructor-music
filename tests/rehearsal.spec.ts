@@ -1260,11 +1260,8 @@ test('readiness, undo and recovered drafts preserve the saved routine and prepar
   await expect(page.getByRole('button', { name: 'Start class', exact: true })).toBeEnabled({ timeout: 30000 });
   const readiness = page.getByRole('region', { name: 'Class readiness', exact: true });
   await expect(readiness).toContainText('Audio verified on this device');
-  await readiness.getByRole('button', { name: 'Test sound', exact: true }).click();
-  await readiness.getByRole('button', { name: 'Stop sound test', exact: true }).click();
   await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0');
   await page.getByRole('button', { name: 'Play', exact: true }).click();
-  await expect(readiness.getByRole('button', { name: 'Test sound', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Pause', exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await readiness.scrollIntoViewIfNeeded();

@@ -1394,13 +1394,7 @@ readyPanel.setAttribute('aria-label', t('readiness'));
 const readyIdentity = element('p');
 const readyState = element('p'); readyState.setAttribute('role', 'status');
 const readyQueue = element('dl');
-const readySound = iconButton(t('soundCheck'), Play, () => {
-  if (!loaded || editorBusy || transportOperation.pending || shell.classList.contains('class-mode') || ['playing', 'filler'].includes(state.status)) return;
-  void audioPreview.playFiller({ ...newRoutine().filler, mode: 'timed', seconds: 8, sound: 'soft', gain: 0.3 })
-    .catch(error => notify(errorMessage(error), true));
-}, true);
-const stopSound = iconButton(t('stopSoundCheck'), Square, () => audioPreview.stop());
-readyPanel.append(element('h2', '', t('readiness')), readyIdentity, readyState, readyQueue, readySound, stopSound);
+readyPanel.append(element('h2', '', t('readiness')), readyIdentity, readyState, readyQueue);
 panels.teach.insertBefore(readyPanel, rehearsal);
 
 function renderReadiness() {
@@ -1990,7 +1984,6 @@ function syncAvailability(): void {
   recoveries.element.hidden = !author;
   recoveries.sync();
   readyPanel.hidden = shell.classList.contains('class-mode');
-  readySound.disabled = !loaded || busy || ['playing', 'filler'].includes(state?.status);
   prepare.setAttribute('aria-busy', String(transportOperation.pending));
   startClass.hidden = !loaded;
   startClass.disabled = !loaded || editorBusy || transportOperation.pending || !!composition?.pending() || contentFingerprint(draft) !== contentFingerprint(loaded);
@@ -2232,6 +2225,20 @@ function updateText(node: HTMLElement, text: string): void {
   if (node.textContent !== text) node.textContent = text;
 }
 
+// Shrinks the move note's font size (bounded) so it fits the CSS max-height instead of pushing
+// the rest of the page down; resets first since the applicable class (long-note/multiline) alone
+// may already fit.
+function fitMoveNote(node: HTMLElement): void {
+  node.style.fontSize = '';
+  const max = node.clientHeight;
+  if (!max) return;
+  for (let step = 0; step < 10 && node.scrollHeight > max + 1; step++) {
+    const current = Number.parseFloat(getComputedStyle(node).fontSize);
+    if (!Number.isFinite(current) || current <= 10) break;
+    node.style.fontSize = `${current * 0.92}px`;
+  }
+}
+
 function phaseLabel(phase: ClassPhase): string {
   return t(({ 'walk-in': 'phaseWalkIn', before: 'phaseBefore', routine: 'phaseRoutine', after: 'phaseAfter',
     'walk-out': 'phaseWalkOut', finished: 'finished' } as const)[phase]);
@@ -2259,6 +2266,22 @@ function renderPlayback(): void {
       text.append(element('span', 'track-title', item.title), element('span', 'muted', item.bodyArea));
       row.append(element('span', 'track-number', String(trackIndex + 1).padStart(2, '0')), text,
         element('span', 'mono muted', formatTime(item.duration)));
+      if (loaded) {
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-label', t('loadTrack', { name: item.title }));
+        const load = () => {
+          if (cueEditing) return;
+          stopEditorAudio();
+          void transportOperation.run(() => player.skipToTrack?.(trackIndex) ?? Promise.resolve());
+        };
+        row.addEventListener('click', load);
+        row.addEventListener('keydown', event => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          load();
+        });
+      }
       playlist.append(row);
     });
     markers.replaceChildren();
@@ -2294,8 +2317,13 @@ function renderPlayback(): void {
   markers.hidden = filler || otherPhase;
   updateText(trackTitle, filler ? t('filler') : track?.title ?? t('emptyTracks'));
   bodyArea.hidden = filler;
-  updateText(currentNote, loaded && state.currentCue ? state.currentCue : filler ? t(state.holding ? 'holding' : 'filler') : t('noMove'));
-  currentNote.classList.toggle('long-note', currentNote.textContent!.length > 90);
+  const moveText = loaded && state.currentCue ? state.currentCue : filler ? t(state.holding ? 'holding' : 'filler') : t('noMove');
+  if (currentNote.textContent !== moveText) {
+    currentNote.textContent = moveText;
+    currentNote.classList.toggle('multiline', moveText.includes('\n'));
+    currentNote.classList.toggle('long-note', !moveText.includes('\n') && moveText.length > 90);
+    fitMoveNote(currentNote);
+  }
   updateText(nextNote, loaded && state.nextCue ? state.nextCue : t('noNextMove'));
   const nextTrackTitle = loaded ? state.nextCueTrackTitle : null;
   nextCueTrack.hidden = nextTrackTitle == null;

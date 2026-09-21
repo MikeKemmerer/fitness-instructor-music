@@ -161,7 +161,9 @@ export function createMediaLibrary(context: MediaLibraryContext) {
     return run(async (transfer, assert) => { stopPreview(); await load(transfer, assert, true); }, true);
   };
   const refreshButton = iconButton(t('refreshAudio'), RefreshCw, () => { void refresh(); }, true);
-  const more = iconButton(t('moreAudio'), RefreshCw, () => { if (cursor) void run((transfer, assert) => load(transfer, assert, false)); }, true);
+  const loadMore = () => { if (cursor) void run((transfer, assert) => load(transfer, assert, false)); };
+  const more = iconButton(t('moreAudio'), RefreshCw, loadMore, true);
+  const moreBottom = iconButton(t('moreAudio'), RefreshCw, loadMore, true);
   const pendingBatch = () => batch.some(entry => entry.phase !== 'done');
   const cancel = iconButton(t('cancel'), X, () => { controller?.abort(); stopPreview(); status.textContent = t(pendingBatch() ? 'audioBatchCancelled' : 'audioCheckIncomplete'); }, true);
   const tabButtons = new Map<ManagedAudioItem['kind'], HTMLButtonElement>();
@@ -451,8 +453,10 @@ export function createMediaLibrary(context: MediaLibraryContext) {
     root.hidden = !author();
     const unavailable = blocked() || !online();
     more.disabled = unavailable;
+    moreBottom.disabled = unavailable;
     refreshButton.disabled = blocked() || globalThis.navigator?.onLine === false;
     more.hidden = !cursor || items.length >= 2048;
+    moreBottom.hidden = more.hidden;
     files.disabled = unavailable || pendingBatch();
     upload.disabled = unavailable || !files.files?.length || pendingBatch();
     resume.hidden = !pendingBatch(); resume.disabled = unavailable;
@@ -487,6 +491,15 @@ export function createMediaLibrary(context: MediaLibraryContext) {
       for (const [label, value] of [[t('audioFilename'), metadata.filename], [t('audioTitle'), metadata.title], [t('audioArtist'), metadata.artist],
         [t('playlistDuration'), metadata.duration === undefined ? undefined : formatTime(metadata.duration)], [t('audioBpm'), metadata.bpm === undefined ? undefined : formatNumber(metadata.bpm)]]) {
         const cell = element('div', 'media-cell', value || t('unknownValue')); cell.setAttribute('role', 'cell'); cell.dataset.label = label; row.append(cell);
+        if (label === t('playlistDuration') && value === undefined) {
+          // The stored metadata never recorded a duration; if the audio is already cached on this
+          // device (no network fetch), decode it once to show the real duration instead of "Unknown".
+          const assetId = item.recording ? `filler-${item.asset.id}` : `library-${item.asset.id}`;
+          void offline.getTrackBlob(assetId).then(blob => blob && audioDuration(blob, new AbortController().signal)).then(seconds => {
+            if (disposed || !cell.isConnected || !seconds) return;
+            cell.textContent = formatTime(seconds);
+          }).catch(() => {});
+        }
       }
       const controls = element('div', 'media-actions'); controls.setAttribute('role', 'cell');
       const id = item.recording ? `filler-${item.asset.id}` : `library-${item.asset.id}`;
@@ -508,7 +521,7 @@ export function createMediaLibrary(context: MediaLibraryContext) {
   search.addEventListener('input', render); files.addEventListener('change', sync);
   const tools = element('div', 'media-tools'); tools.append(field(t('searchAudio'), search), refreshButton, more);
   const intake = element('div', 'media-intake'); intake.append(files, upload, resume, cancel);
-  panel.append(tools, rows, intake, progress, status); root.append(tabs, panel);
+  panel.append(tools, rows, moreBottom, intake, progress, status); root.append(tabs, panel);
   root.addEventListener('toggle', () => {
     if (!root.open) leave(); else { render(); if (!loaded) void refresh(); }
   });

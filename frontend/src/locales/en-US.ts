@@ -199,6 +199,7 @@ export const enUS = {
   title: 'Track title', bodyArea: 'Body area', bpm: 'BPM', firstBeat: 'First beat (seconds)', duration: 'Duration',
   moveUp: 'Move track up', moveDown: 'Move track down', deleteTrack: 'Remove track',
   reorderTrack: 'Reorder {name}', trackReordered: '{name} moved to position {position} of {count}.',
+  loadTrack: 'Play {name}',
   addCue: 'Add cue', deleteCue: 'Delete cue', source: 'Source', value: 'Value', note: 'Move / note', preview: 'Preview',
   cueBeep: 'Beep at cue',
   confirmDeleteCue: 'Delete cue "{cue}" from "{track}"?',
