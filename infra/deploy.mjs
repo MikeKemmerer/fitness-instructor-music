@@ -12,7 +12,9 @@ const execute = promisify(execFile);
 
 export const target = Object.freeze({
   resourceGroup: 'rg-fitness-instructor-pilot',
-  appName: 'fitness-instructor-music-pilot2'
+  appName: 'fitness-instructor-music-pilot2',
+  apiResourceGroup: 'rg-fitness-instructor-pilot',
+  apiAppName: 'fitness-instructor-music-pilot2-api'
 });
 export const apiDirectory = resolve(root, 'local-media/deployment/api');
 
@@ -48,6 +50,23 @@ export async function verifyTarget(settings, run = execute) {
   return site;
 }
 
+// The API is a standalone Function App (Microsoft.Web/sites), not an SWA-managed/linked backend --
+// the frontend and API are on different origins by design; see auth.ts's cross-site cookie handling.
+export async function verifyApiTarget(settings, run = execute) {
+  assert.match(settings.subscription, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i);
+  assert.equal(settings.apiResourceGroup, target.apiResourceGroup);
+  assert.equal(settings.apiAppName, target.apiAppName);
+  const options = { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 120000, env: childEnvironment(settings.environment) };
+  const app = JSON.parse((await run('az', ['functionapp', 'show', '--subscription', settings.subscription,
+    '--resource-group', settings.apiResourceGroup, '--name', settings.apiAppName, '--only-show-errors', '-o', 'json'], options)).stdout);
+  assert.equal(app.id.toLowerCase(), `/subscriptions/${settings.subscription}/resourceGroups/${settings.apiResourceGroup}/providers/Microsoft.Web/sites/${settings.apiAppName}`.toLowerCase());
+  assert.equal(app.name, settings.apiAppName);
+  assert.equal(app.kind, 'functionapp,linux');
+  assert.equal(app.state, 'Running');
+  assert.equal(app.defaultHostName, `${settings.apiAppName}.azurewebsites.net`);
+  return app;
+}
+
 export const publicEmulatorConnection = 'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;';
 
 function checkContent(content, allowEmulatorConstant) {
@@ -78,13 +97,11 @@ export function validateArtifact(files, sourceConfig, licensedAssets, { requireC
   const finalRoute = config.routes?.at(-1);
   assert.equal(finalRoute?.route, '/*', 'Missing public shell catch-all.');
   assert.deepEqual(finalRoute.allowedRoles, ['anonymous']);
-  assert.equal(config.platform?.apiRuntime, 'node:22');
   assert.equal(config.auth, undefined, 'Platform authentication must not replace server sessions.');
   assert.equal(config.responseOverrides, undefined, 'API errors must not become HTML redirects.');
   assert.equal(config.navigationFallback, undefined, 'Navigation fallback needs a separate authorization review.');
-  const apiRoute = config.routes.find(route => route.route === '/api/*');
-  assert(apiRoute, 'Missing forwarded API route.');
-  assert.deepEqual(apiRoute.allowedRoles, ['anonymous']);
+  assert.equal(config.platform, undefined, 'No managed/linked Functions runtime -- the API is a standalone Function App.');
+  assert(!config.routes.some(route => route.route === '/api/*'), 'Stale forwarded API route: the API is a separate origin, not SWA-managed.');
   // Azure always serves /.auth/me from the platform, so only the sign-in providers can be blocked by route.
   for (const path of ['/.auth/login/aad', '/.auth/login/github']) {
     assert.equal(config.routes.find(route => route.route === path)?.statusCode, 404, 'Missing exact platform auth block.');
@@ -97,7 +114,6 @@ export function validateArtifact(files, sourceConfig, licensedAssets, { requireC
       assert(['/.auth/login/aad', '/.auth/login/github', '/.auth/*', '/local-media/*'].includes(route.route) && route.statusCode === 404);
     } else assert.deepEqual(route.allowedRoles, ['anonymous']);
   }
-  assert.equal(apiRoute.statusCode, undefined, 'API requests must reach the server.');
   JSON.parse(files.get('.vite/manifest.json'));
   assert(/self\.REHEARSAL_HOSTED = true;/.test(files.get('sw.js').toString('utf8')), 'Refusing a local-mode build; rebuild with VITE_HOSTED_PILOT=true.');
   const codecs = validateCodecDistribution(files, { required: requireCodecs });
@@ -193,13 +209,15 @@ export function combineReports(frontend, api) {
 }
 
 export async function uploadApprovedArtifact(settings, run = execute) {
-  const { subscription, resourceGroup, appName, cliPath, workingDirectory, environment } = settings;
+  const { subscription, resourceGroup, appName, apiResourceGroup, apiAppName, cliPath, workingDirectory, environment } = settings;
   const scope = ['--subscription', subscription, '--resource-group', resourceGroup, '--name', appName];
+  const apiScope = ['--subscription', subscription, '--resource-group', apiResourceGroup, '--name', apiAppName];
   const options = { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 120000, env: childEnvironment(environment) };
   let token;
   let stage = 'target lookup and Free-plan verification';
   try {
     const site = await verifyTarget(settings, run);
+    const apiApp = await verifyApiTarget(settings, run);
     stage = 'deployment-token retrieval';
     const secretResult = await run('az', ['staticwebapp', 'secrets', 'list', ...scope, '--only-show-errors', '-o', 'json'], options);
     token = JSON.parse(secretResult.stdout).properties?.apiKey;
@@ -212,11 +230,12 @@ export async function uploadApprovedArtifact(settings, run = execute) {
       SWA_CLI_LOGIN_USE_KEYCHAIN: 'false',
       SWA_CLI_DEPLOYMENT_TOKEN: token
     });
+    // Frontend-only: the API is a separate origin (standalone Function App), not an SWA-managed
+    // or linked backend, so there is no --api-location for the SWA CLI to upload.
     stage = 'production upload and hostname verification';
     try {
       const result = await run(process.execPath, [cliPath, 'deploy', resolve(root, 'frontend/dist'),
         '--app-location', resolve(root, 'frontend/dist'), '--swa-config-location', resolve(root, 'frontend/dist'),
-        '--api-location', apiDirectory, '--api-language', 'node', '--api-version', '22',
         '--env', 'production', '--no-use-keychain', '--verbose', 'log'],
       { ...options, cwd: workingDirectory, env: childEnv, timeout: 15 * 60 * 1000 });
       const receipt = new RegExp(`^(?:[\\u2714\\u221a] )?Project deployed to https://${site.defaultHostname.replaceAll('.', '\\.')}(?: \\u{1f680})?$`, 'u');
@@ -226,7 +245,24 @@ export async function uploadApprovedArtifact(settings, run = execute) {
     } finally {
       delete childEnv.SWA_CLI_DEPLOYMENT_TOKEN;
     }
-    return `https://${site.defaultHostname}`;
+    // A prior zip-deploy can leave WEBSITE_RUN_FROM_PACKAGE set, which then blocks the next one
+    // with HTTP 409; clear it defensively (harmless if it was already absent).
+    stage = 'clearing a stale WEBSITE_RUN_FROM_PACKAGE setting';
+    try {
+      await run('az', ['functionapp', 'config', 'appsettings', 'delete', ...apiScope,
+        '--setting-names', 'WEBSITE_RUN_FROM_PACKAGE', '--only-show-errors', '-o', 'none'], options);
+    } catch { /* absent is fine */ }
+    stage = 'zipping the staged API artifact';
+    const apiZipPath = resolve(workingDirectory, 'api-deploy.zip');
+    await run('zip', ['-rq', apiZipPath, '.'], { ...options, cwd: apiDirectory });
+    stage = 'API upload to the standalone Function App';
+    try {
+      await run('az', ['functionapp', 'deployment', 'source', 'config-zip', ...apiScope,
+        '--src', apiZipPath, '--only-show-errors', '-o', 'none'], { ...options, timeout: 15 * 60 * 1000 });
+    } finally {
+      try { await run('rm', ['-f', apiZipPath], options); } catch { /* best effort cleanup */ }
+    }
+    return { hostname: `https://${site.defaultHostname}`, apiHostname: `https://${apiApp.defaultHostName}` };
   } catch {
     throw new Error(`Deployment stopped during ${stage}. Check Azure login, exact target, CLI/native dependencies and connectivity. Child output is withheld to protect credentials; do not enable debug logging.`);
   } finally {
@@ -241,16 +277,17 @@ async function main() {
   console.log(JSON.stringify(report, null, 2));
   if (args.length === 0) return;
   assert.equal(process.env.REVIEWED_ARTIFACT_SHA256, report.artifactSHA256, 'Missing or stale security-preflight artifact approval.');
-  const [subscription, resourceGroup, appName] = ['AZURE_SUBSCRIPTION_ID', 'AZURE_RESOURCE_GROUP', 'SWA_NAME'].map(key => {
-    assert(process.env[key]?.trim(), `Set ${key} explicitly.`);
-    return process.env[key];
-  });
+  const [subscription, resourceGroup, appName, apiResourceGroup, apiAppName] =
+    ['AZURE_SUBSCRIPTION_ID', 'AZURE_RESOURCE_GROUP', 'SWA_NAME', 'AZURE_API_RESOURCE_GROUP', 'API_APP_NAME'].map(key => {
+      assert(process.env[key]?.trim(), `Set ${key} explicitly.`);
+      return process.env[key];
+    });
   const workingDirectory = resolve(root, 'local-media/tools');
   const packageDirectory = resolve(workingDirectory, 'node_modules/@azure/static-web-apps-cli');
   assert.equal(JSON.parse(readFileSync(resolve(packageDirectory, 'package.json'), 'utf8')).version, '2.0.10');
-  const hostname = await uploadApprovedArtifact({ subscription, resourceGroup, appName,
+  const { hostname, apiHostname } = await uploadApprovedArtifact({ subscription, resourceGroup, appName, apiResourceGroup, apiAppName,
     cliPath: resolve(packageDirectory, 'dist/cli/bin.js'), workingDirectory, environment: process.env });
-  console.log(`Upload completed: ${hostname}. Live authorization and device acceptance are still required.`);
+  console.log(`Upload completed: ${hostname} (API: ${apiHostname}). Live authorization and device acceptance are still required.`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

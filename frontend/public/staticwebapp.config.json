@@ -18,11 +18,9 @@
     { "route": "/favicon.svg", "allowedRoles": ["anonymous"] },
     { "route": "/manifest.webmanifest", "allowedRoles": ["anonymous"] },
     { "route": "/.vite/manifest.json", "allowedRoles": ["anonymous"] },
-    { "route": "/api/*", "allowedRoles": ["anonymous"], "headers": { "Cache-Control": "no-store" } },
     { "route": "/local-media/*", "statusCode": 404 },
     { "route": "/*", "allowedRoles": ["anonymous"], "headers": { "Cache-Control": "max-age=0, must-revalidate" } }
   ],
-  "platform": { "apiRuntime": "node:22" },
   "globalHeaders": {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",

@@ -10,13 +10,12 @@ describe('hosted entry boundary', () => {
     'serves only the public static shell for %s', path => {
       expect(routeFor(path).allowedRoles).toEqual(['anonymous']);
     });
-  it('leaves private API authorization and JSON errors to the managed handler', () => {
+  it('has no managed/linked Functions route or runtime -- the API is a standalone Function App on a separate origin', () => {
     expect(config.navigationFallback).toBeUndefined();
     expect(JSON.stringify(config.routes)).not.toContain('"authenticated"');
     expect(config.responseOverrides).toBeUndefined();
-    expect(config.platform.apiRuntime).toBe('node:22');
-    expect(routeFor('/api/routines').allowedRoles).toEqual(['anonymous']);
-    expect(routeFor('/api/routines').statusCode).toBeUndefined();
+    expect(config.platform).toBeUndefined();
+    expect(config.routes.some((rule: { route: string }) => rule.route === '/api/*')).toBe(false);
   });
   it('allows custom sign-in and public build assets but no Microsoft or private-file routes', () => {
     for (const path of ['/.auth/login/aad', '/.auth/login/github']) {

@@ -3,11 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { apiDirectory, combineReports, publicEmulatorConnection, target, uploadApprovedArtifact, validateApiArtifact, validateArtifact } from './deploy.mjs';
+import { combineReports, publicEmulatorConnection, target, uploadApprovedArtifact, validateApiArtifact, validateArtifact } from './deploy.mjs';
 import { stageApi } from './stage.mjs';
 
-const config = Buffer.from(JSON.stringify({ platform: { apiRuntime: 'node:22' }, routes: [
-  { route: '/api/*', allowedRoles: ['anonymous'] },
+const config = Buffer.from(JSON.stringify({ routes: [
   { route: '/.auth/login/aad', statusCode: 404 },
   { route: '/.auth/login/github', statusCode: 404 },
   { route: '/*', allowedRoles: ['anonymous'] }
@@ -99,6 +98,7 @@ test('private media, configuration and source maps are rejected', () => {
 
 const settings = {
   subscription: '00000000-0000-0000-0000-000000000000', resourceGroup: target.resourceGroup, appName: target.appName,
+  apiResourceGroup: target.apiResourceGroup, apiAppName: target.apiAppName,
   cliPath: '/tools/cli.js', workingDirectory: '/tools', environment: {
     PATH: '/bin', SWA_CLI_DEBUG: 'silly', AZURE_CLIENT_SECRET: 'not-forwarded', SWA_EXPECTED_HOSTNAME: 'fixture-pilot.1.azurestaticapps.net'
   }
@@ -106,6 +106,8 @@ const settings = {
 const account = { id: settings.subscription, name: 'Visual Studio Enterprise Subscription', state: 'Enabled' };
 const site = { id: `/subscriptions/${settings.subscription}/resourceGroups/${settings.resourceGroup}/providers/Microsoft.Web/staticSites/${settings.appName}`,
   name: settings.appName, sku: { name: 'Free' }, location: 'West US 2', provider: 'Custom', defaultHostname: settings.environment.SWA_EXPECTED_HOSTNAME };
+const apiApp = { id: `/subscriptions/${settings.subscription}/resourceGroups/${settings.apiResourceGroup}/providers/Microsoft.Web/sites/${settings.apiAppName}`,
+  name: settings.apiAppName, kind: 'functionapp,linux', state: 'Running', defaultHostName: `${settings.apiAppName}.azurewebsites.net` };
 
 test('production upload uses a scoped token only in child env and bypasses keychain', async () => {
   const calls = [];
@@ -115,8 +117,14 @@ test('production upload uses a scoped token only in child env and bypasses keych
     if (command === 'az') {
       assert(args.includes(settings.subscription));
       if (args[0] === 'account') return { stdout: JSON.stringify(account) };
-      return { stdout: JSON.stringify(args.includes('show') ? site : { properties: { apiKey: 'test-only-token' } }) };
+      if (args[0] === 'staticwebapp' && args[1] === 'show') return { stdout: JSON.stringify(site) };
+      if (args[0] === 'functionapp' && args[1] === 'show') return { stdout: JSON.stringify(apiApp) };
+      if (args[0] === 'staticwebapp' && args[1] === 'secrets') return { stdout: JSON.stringify({ properties: { apiKey: 'test-only-token' } }) };
+      if (args[0] === 'functionapp' && args[1] === 'config') { assert(args.includes('WEBSITE_RUN_FROM_PACKAGE')); return { stdout: '' }; }
+      assert(args[0] === 'functionapp' && args[1] === 'deployment');
+      return { stdout: '' };
     }
+    if (command === 'zip' || command === 'rm') return { stdout: '' };
     assert.equal(options.env.SWA_CLI_DEPLOYMENT_TOKEN, 'test-only-token');
     assert.equal(options.env.SWA_CLI_DEBUG, 'log');
     assert.equal(options.env.AZURE_CLIENT_SECRET, undefined);
@@ -124,32 +132,37 @@ test('production upload uses a scoped token only in child env and bypasses keych
     assert.equal(options.env.SWA_CLI_LOGIN_USE_KEYCHAIN, 'false');
     assert(args.includes('production'));
     assert(args.includes('--no-use-keychain'));
-    assert.equal(args[args.indexOf('--api-location') + 1], apiDirectory);
-    assert.equal(args[args.indexOf('--api-language') + 1], 'node');
-    assert.equal(args[args.indexOf('--api-version') + 1], '22');
+    assert(!args.includes('--api-location'));
+    assert(!args.includes('--api-language'));
+    assert(!args.includes('--api-version'));
     assert(!args.includes('--deployment-token'));
     return { stdout: `Project deployed to https://${site.defaultHostname}` };
   };
-  assert.equal(await uploadApprovedArtifact(settings, mockRun), `https://${site.defaultHostname}`);
-  assert.equal(calls.length, 4);
+  const result = await uploadApprovedArtifact(settings, mockRun);
+  assert.deepEqual(result, { hostname: `https://${site.defaultHostname}`, apiHostname: `https://${apiApp.defaultHostName}` });
+  assert.equal(calls.length, 9);
 });
 
 for (const stream of ['stdout', 'stderr']) {
   test(`exact success receipt on ${stream} is accepted without exposing raw output`, async context => {
     const logs = ['log', 'info', 'warn', 'error', 'debug'].map(method => context.mock.method(console, method, () => {}));
     let childEnv;
-    const hostname = await uploadApprovedArtifact(settings, async (command, args, options) => {
+    const result = await uploadApprovedArtifact(settings, async (command, args, options) => {
       if (command === 'az') {
         if (args[0] === 'account') return { stdout: JSON.stringify(account) };
-        return { stdout: JSON.stringify(args.includes('show') ? site : { properties: { apiKey: 'test-only-token' } }) };
+        if (args[0] === 'staticwebapp' && args[1] === 'show') return { stdout: JSON.stringify(site) };
+        if (args[0] === 'functionapp' && args[1] === 'show') return { stdout: JSON.stringify(apiApp) };
+        if (args[0] === 'staticwebapp' && args[1] === 'secrets') return { stdout: JSON.stringify({ properties: { apiKey: 'test-only-token' } }) };
+        return { stdout: '' };
       }
+      if (command === 'zip' || command === 'rm') return { stdout: '' };
       childEnv = options.env;
       return {
         stdout: 'raw stdout test-only-token', stderr: 'raw stderr test-only-token',
         [stream]: `raw ${stream} test-only-token\n\u001b[32m\u2714 Project deployed to \u001b[4mhttps://${site.defaultHostname}\u001b[24m \u{1f680}\u001b[39m\r\n`
       };
     });
-    assert.equal(hostname, `https://${site.defaultHostname}`);
+    assert.deepEqual(result, { hostname: `https://${site.defaultHostname}`, apiHostname: `https://${apiApp.defaultHostName}` });
     assert.equal(childEnv.SWA_CLI_DEPLOYMENT_TOKEN, undefined);
     for (const log of logs) assert.equal(log.mock.callCount(), 0);
   });
@@ -168,7 +181,9 @@ for (const stream of ['stdout', 'stderr']) {
       await assert.rejects(uploadApprovedArtifact(settings, async (command, args) => {
         if (command === 'az') {
           if (args[0] === 'account') return { stdout: JSON.stringify(account) };
-          return { stdout: JSON.stringify(args.includes('show') ? site : { properties: { apiKey: 'test-only-token' } }) };
+          if (args[0] === 'staticwebapp' && args[1] === 'show') return { stdout: JSON.stringify(site) };
+          if (args[0] === 'functionapp' && args[1] === 'show') return { stdout: JSON.stringify(apiApp) };
+          return { stdout: JSON.stringify({ properties: { apiKey: 'test-only-token' } }) };
         }
         return { [stream]: `${output}\nraw ${stream} test-only-token` };
       }), error => error.message.includes('hostname verification') && error.message.includes('withheld') &&
@@ -210,6 +225,24 @@ test('matching expected hostname cannot bypass account or ARM identity verificat
   }
 });
 
+test('mismatched Function App identity, kind, state or hostname stops before token retrieval', async () => {
+  for (const apiAppChange of [
+    { id: `${apiApp.id}-other` }, { name: 'other-app' }, { kind: 'functionapp' },
+    { state: 'Stopped' }, { defaultHostName: 'other.azurewebsites.net' }
+  ]) {
+    let calls = 0;
+    await assert.rejects(uploadApprovedArtifact(settings, async (command, args) => {
+      calls += 1;
+      assert.equal(command, 'az');
+      assert(!args.includes('secrets'));
+      if (args[0] === 'account') return { stdout: JSON.stringify(account) };
+      if (args[0] === 'staticwebapp') return { stdout: JSON.stringify(site) };
+      return { stdout: JSON.stringify({ ...apiApp, ...apiAppChange }) };
+    }), /Deployment stopped/);
+    assert.equal(calls, 3);
+  }
+});
+
 test('wrong SKU prevents token retrieval', async () => {
   let calls = 0;
   await assert.rejects(uploadApprovedArtifact(settings, async () => {
@@ -237,7 +270,8 @@ test('nonzero child exit fails despite success receipts and never exposes raw ou
     calls += 1;
     if (calls === 1) return { stdout: JSON.stringify(account) };
     if (calls === 2) return { stdout: JSON.stringify(site) };
-    if (calls === 3) return { stdout: JSON.stringify({ properties: { apiKey: 'test-only-token' } }) };
+    if (calls === 3) return { stdout: JSON.stringify(apiApp) };
+    if (calls === 4) return { stdout: JSON.stringify({ properties: { apiKey: 'test-only-token' } }) };
     childEnv = options.env;
     throw Object.assign(new Error('raw process error test-only-token'), {
       code: 1,
@@ -258,12 +292,12 @@ test('local-mode offline worker cannot be deployed', () => {
 
 test('runtime, route forwarding and absence of platform auth are mandatory', () => {
   for (const change of [
-    value => { value.routes.splice(1, 1); },
-    value => { value.routes[1].statusCode = 302; },
-    value => { value.platform.apiRuntime = 'node:20'; },
+    value => { value.routes.splice(0, 1); },
+    value => { value.routes[0].statusCode = 302; },
+    value => { value.platform = { apiRuntime: 'node:22' }; },
+    value => { value.routes.push({ route: '/api/*', allowedRoles: ['anonymous'] }); },
     value => { value.auth = {}; },
     value => { value.responseOverrides = { 401: { redirect: '/signin.html' } }; },
-    value => { value.routes[0].statusCode = 404; },
     value => { value.routes[0].rewrite = '/index.html'; }
   ]) {
     const value = JSON.parse(config);
