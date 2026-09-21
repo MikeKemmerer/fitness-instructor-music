@@ -1583,16 +1583,19 @@ describe('parallel cloud downloads', () => {
       { ...harness.envelope.media, [cachedTrack.id]: harness.asset }, { signal: controller.signal, progress });
     const settled = Promise.allSettled([downloading]);
     try {
+      // The already-cached entry resolves before any network request is even dispatched (cache
+      // hits are checked up front, in order, so parallel network slots are only spent on misses).
+      await vi.waitFor(() => expect(progress).toHaveBeenCalledTimes(1));
       await vi.waitFor(() => expect(harness.requests).toHaveLength(2));
       harness.finish(harness.requests[1]!);
       await vi.waitFor(() => expect(harness.requests).toHaveLength(3));
       harness.finish(harness.requests[2]!);
-      await vi.waitFor(() => expect(progress).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(progress).toHaveBeenCalledTimes(3));
       harness.finish(harness.requests[0]!);
       await downloading;
       expect(progress.mock.calls).toEqual([
-        [CLOUD_CHUNK_BYTES, harness.asset.bytes * 2], [CLOUD_CHUNK_BYTES + 71, harness.asset.bytes * 2],
-        [harness.asset.bytes, harness.asset.bytes * 2], [harness.asset.bytes * 2, harness.asset.bytes * 2],
+        [harness.asset.bytes, harness.asset.bytes * 2], [harness.asset.bytes + CLOUD_CHUNK_BYTES, harness.asset.bytes * 2],
+        [harness.asset.bytes + CLOUD_CHUNK_BYTES + 71, harness.asset.bytes * 2], [harness.asset.bytes * 2, harness.asset.bytes * 2],
       ]);
       expect(harness.requests).toHaveLength(3);
       expect(harness.cacheTrack).toHaveBeenCalledOnce();

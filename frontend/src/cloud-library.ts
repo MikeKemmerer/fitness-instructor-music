@@ -5,8 +5,29 @@ import { cacheCloudRoutine, cacheCloudTrack, cacheFillerRecording, getFillerReco
 
 export const MAX_CLOUD_MEDIA_BYTES = 128 * 1024 * 1024;
 const CLOUD_DOWNLOAD_CONCURRENCY = 2;
+// The API host caps itself at 4 concurrent requests total (see http.ts `activeRequests >= 4`),
+// shared across the whole household -- keep this at or below CLOUD_DOWNLOAD_CONCURRENCY so a few
+// tracks' manifest fetches can overlap a slow chunk transfer without risking `server_busy` bursts.
+const CLOUD_TRACK_CONCURRENCY = 2;
 const downloadQueue: Array<() => void> = [];
 let activeDownloads = 0;
+
+// Runs `worker` over `items` with up to `limit` in flight at once, stopping early (without
+// force-cancelling already-started work) on the first failure and rethrowing it once settled.
+async function parallelForEach<Item>(items: Item[], limit: number, worker: (item: Item) => Promise<void>): Promise<void> {
+  let index = 0;
+  let failure: unknown;
+  let failed = false;
+  const run = async () => {
+    while (!failed && index < items.length) {
+      const item = items[index++]!;
+      try { await worker(item); }
+      catch (error) { failed = true; failure = error; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+  if (failed) throw failure;
+}
 
 function isLibraryIntakeFilename(filename: unknown): filename is string {
   return typeof filename === 'string' && filename.length <= 300 && !!filename.trim()
@@ -232,8 +253,8 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       || typeof item.published !== 'boolean' || (published && !item.published))) throw new Error('cloud_invalid_response');
     return structuredClone(value.routines);
   };
-  const downloadAsset = async (asset: CloudAsset, cached: Blob | undefined, transfer: CloudTransfer,
-    assert: () => void, progress: (bytes: number) => void, authority?: MediaAuthority): Promise<Blob> => {
+  const resolveCachedAsset = async (asset: CloudAsset, cached: Blob | undefined, assert: () => void,
+    progress: (bytes: number) => void): Promise<Blob | null> => {
     assert();
     if (cached?.size === asset.bytes && canonicalAudioType(cached.type) === asset.contentType
       && await cloudHash(cached) === asset.sha256) {
@@ -241,6 +262,10 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       progress(asset.bytes);
       return cached;
     }
+    return null;
+  };
+  const fetchAssetFromNetwork = async (asset: CloudAsset, transfer: CloudTransfer, assert: () => void,
+    progress: (bytes: number) => void, authority?: MediaAuthority): Promise<Blob> => {
     let suffix = '';
     if (authority && typeof authority === 'object') {
       const key = 'classId' in authority ? 'classId' : 'playlistId' in authority ? 'playlistId' : 'routineId';
@@ -299,6 +324,29 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     assert();
     return blob;
   };
+  const downloadAsset = async (asset: CloudAsset, cached: Blob | undefined, transfer: CloudTransfer,
+    assert: () => void, progress: (bytes: number) => void, authority?: MediaAuthority): Promise<Blob> =>
+    (await resolveCachedAsset(asset, cached, assert, progress)) ?? fetchAssetFromNetwork(asset, transfer, assert, progress, authority);
+  // Resolves cache hits for every entry first, in order (fast, local-only) -- only entries that
+  // still need real network bytes then run through the bounded-concurrency pool, so a routine
+  // with several already-cached tracks doesn't spend a parallel slot on tracks needing no network.
+  const downloadEntries = async <Item>(items: Item[],
+    describe: (item: Item) => Promise<{ asset: CloudAsset; cached: Blob | undefined; store: (blob: Blob) => Promise<void> }>,
+    transfer: CloudTransfer, assert: () => void, progress: (bytes: number) => void, authority: MediaAuthority | undefined): Promise<void> => {
+    const pending: { asset: CloudAsset; store: (blob: Blob) => Promise<void> }[] = [];
+    for (const item of items) {
+      const { asset, cached, store } = await describe(item);
+      assert();
+      if ((await resolveCachedAsset(asset, cached, assert, progress)) === null) pending.push({ asset, store });
+    }
+    await parallelForEach(pending, CLOUD_TRACK_CONCURRENCY, async ({ asset, store }) => {
+      assert();
+      const blob = await fetchAssetFromNetwork(asset, transfer, assert, progress, authority);
+      assert();
+      await store(blob);
+      assert();
+    });
+  };
   const ensureFiller = async (value: FillerRecording, transfer: CloudTransfer = {}, authority?: MediaAuthority): Promise<void> => {
     const assert = operation(transfer);
     const recording = recordingDescriptor(value);
@@ -325,24 +373,17 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       recordings.reduce((sum, recording) => sum + recording.asset.bytes, 0));
     let completed = 0;
     const progress = (bytes: number) => { completed += bytes; transfer.progress?.(completed, total); };
-    for (const track of allRoutineTracks(snapshot.routine)) {
-      assert();
+    await downloadEntries(allRoutineTracks(snapshot.routine), async track => {
       const asset = snapshot.media[track.id]!;
       const cached = await readBlob(track.id);
       assert();
-      const blob = await downloadAsset(asset, cached, transfer, assert, progress, mediaAuthority);
-      assert();
-      if (blob !== cached) await cacheTrack(track.id, blob, asset.sha256);
-      assert();
-    }
-    for (const recording of recordings) {
+      return { asset, cached, store: async blob => { if (blob !== cached) await cacheTrack(track.id, blob, asset.sha256); } };
+    }, transfer, assert, progress, mediaAuthority);
+    await downloadEntries(recordings, async recording => {
       const cached = await readFiller(recording);
       assert();
-      const blob = await downloadAsset(recording.asset, cached, transfer, assert, progress, mediaAuthority);
-      assert();
-      if (blob !== cached) await cacheFiller(recording, blob);
-      assert();
-    }
+      return { asset: recording.asset, cached, store: async blob => { if (blob !== cached) await cacheFiller(recording, blob); } };
+    }, transfer, assert, progress, mediaAuthority);
     assert();
     await cacheRoutine(snapshot.routine);
     assert();
@@ -612,17 +653,12 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     const entries = tracks.map(track => ({ track, asset: assetDescriptor(media[track.id]) }));
     const total = entries.reduce((sum, entry) => sum + entry.asset.bytes, 0);
     let completed = 0;
-    for (const { track, asset } of entries) {
+    const progress = (bytes: number) => { completed += bytes; transfer.progress?.(completed, total); };
+    await downloadEntries(entries, async ({ track, asset }) => {
       const cached = await readBlob(track.id);
       assert();
-      const blob = await downloadAsset(asset, cached, transfer, assert, bytes => {
-        completed += bytes;
-        transfer.progress?.(completed, total);
-      }, authority);
-      assert();
-      if (blob !== cached) await cacheTrack(track.id, blob, asset.sha256);
-      assert();
-    }
+      return { asset, cached, store: async blob => { if (blob !== cached) await cacheTrack(track.id, blob, asset.sha256); } };
+    }, transfer, assert, progress, authority);
   };
   const stage = async (routine: Routine, reusableMedia: Record<string, CloudAsset> = {}, transfer: CloudTransfer = {}): Promise<CloudRoutine> => {
     const assert = operation(transfer, true);
