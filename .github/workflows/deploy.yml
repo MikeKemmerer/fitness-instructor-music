@@ -1,14 +1,15 @@
 name: Deploy
 
 # Manual-dispatch only. The original resource (fitness-instructor-music-pilot) had a
-# server-side "Failed to deploy the Azure Functions" fault isolated (2026-09-20) to that
-# specific resource's own internal state -- confirmed via two controlled experiments
-# (a trivial app AND the real production bundle both deployed successfully from GitHub
-# Actions to fresh disposable SWA resources, ruling out GH Actions/network/Node-version/
-# app-content causes). Production now targets a replacement resource,
-# fitness-instructor-music-pilot2, with identical app settings (same storage account/
-# container and FIM_ACCOUNTS_JSON, so the same songs/routines/accounts are visible with
-# no data migration needed) and a new hostname.
+# server-side "Failed to deploy the Azure Functions" fault that looked resource-specific
+# at first, but turned out to correlate perfectly with this job's `environment: production`
+# block: 5/5 real deploys with that block failed (against both the old and new resource,
+# and with both a stale and a corrected deployment-token secret); 1/1 real deploy without
+# it succeeded. Root cause of *why* the GitHub Environment context breaks the SWA CLI's
+# native StaticSitesClient binary is still unconfirmed, but the correlation is strong
+# enough to act on. The `environment:` block (and its required-reviewer gate) is removed
+# here; workflow_dispatch itself already restricts who can trigger a deploy to repo
+# collaborators, which remains the operative human gate.
 on:
   workflow_dispatch:
 
@@ -23,7 +24,6 @@ jobs:
   deploy:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: production
     defaults:
       run:
         shell: bash
