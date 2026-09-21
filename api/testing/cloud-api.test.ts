@@ -1812,13 +1812,13 @@ describe('shared filler library (Blob fake)', () => {
       }
       const recording = JSON.parse(String(result.body)) as FillerRecording;
       for (const [method, path, body] of [['POST', 'fillers', input], ['DELETE', `fillers/${recording.id}`, undefined]] as const) {
-        for (const invalid of ['no-csrf', 'bad-csrf', 'no-origin', 'bad-origin', 'cross-site']) {
+        for (const invalid of ['no-csrf', 'bad-csrf', 'no-origin', 'bad-origin', 'same-site']) {
           const denied = new Headers(headers);
           if (invalid === 'no-csrf') denied.delete('x-csrf-token');
           if (invalid === 'bad-csrf') denied.set('x-csrf-token', 'forged');
           if (invalid === 'no-origin') denied.delete('origin');
           if (invalid === 'bad-origin') denied.set('origin', 'https://other.invalid');
-          if (invalid === 'cross-site') denied.set('sec-fetch-site', 'cross-site');
+          if (invalid === 'same-site') denied.set('sec-fetch-site', 'same-site');
           expect((await api.handle(request(path, method, denied, body))).status).toBe(403);
         }
       }
@@ -2109,7 +2109,7 @@ describe('cloud configuration and Blob-backed auth (in-process Blob fake, not Az
   it('creates opaque secure cookies and authenticates through an independent service', async () => {
     const context = fixture();
     const { result, headers } = await context.login();
-    expect(result.setCookie).toContain('Path=/; HttpOnly; Secure; SameSite=Strict');
+    expect(result.setCookie).toContain('Path=/; HttpOnly; Secure; SameSite=None');
     expect(result.session.expiresAt).toBe(1900000000000 + 12 * 3600000);
     const independent = new CloudAuth(context.store, context.env, () => 1900000000000);
     expect((await independent.authenticate(headers, true)).account.id).toBe('owner');
@@ -2117,6 +2117,21 @@ describe('cloud configuration and Blob-backed auth (in-process Blob fake, not Az
     missingCsrf.delete('x-csrf-token');
     await expect(independent.authenticate(missingCsrf, true)).rejects.toMatchObject({ status: 403, code: 'csrf_invalid' });
     await expect(independent.authenticate(new Headers({ 'x-ms-client-principal': 'spoofed' }))).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('accepts cross-site Sec-Fetch-Site (separate frontend/API origins) but rejects same-site and mismatched Origin', async () => {
+    const context = fixture();
+    const { headers } = await context.login();
+    const independent = new CloudAuth(context.store, context.env, () => 1900000000000);
+    const crossSite = new Headers(headers);
+    crossSite.set('sec-fetch-site', 'cross-site');
+    await expect(independent.authenticate(crossSite, true)).resolves.toMatchObject({ account: { id: 'owner' } });
+    const sameSite = new Headers(headers);
+    sameSite.set('sec-fetch-site', 'same-site');
+    await expect(independent.authenticate(sameSite, true)).rejects.toMatchObject({ status: 403, code: 'origin_forbidden' });
+    const mismatchedOrigin = new Headers(headers);
+    mismatchedOrigin.set('origin', 'https://other.invalid');
+    await expect(independent.authenticate(mismatchedOrigin, true)).rejects.toMatchObject({ status: 403, code: 'origin_forbidden' });
   });
 
   it.each(['enabled', 'authVersion', 'role', 'passwordHash', 'username'] as const)('invalidates sessions on %s changes', async field => {

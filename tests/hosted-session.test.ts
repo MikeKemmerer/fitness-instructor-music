@@ -100,7 +100,7 @@ describe('hosted session admission', () => {
     const harness = sessionHarness();
     expect(await establishHostedSession(harness)).toBe(true);
     expect(harness.fetch).toHaveBeenCalledWith('/api/auth/session', expect.objectContaining({
-      credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
+      credentials: 'include', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
     }));
     expect(harness.storage.values).toEqual(new Map([[hostedUserKey, marker()]]));
     expect(harness.deleteDatabase).not.toHaveBeenCalled();
@@ -368,7 +368,7 @@ describe('runtime cloud session isolation', () => {
       headers: { 'X-CSRF-Token': 'caller-token', 'If-Match': '"1"' },
     });
     const write = harness.fetch.mock.calls.at(-1)![1]!;
-    expect(write).toMatchObject({ credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal) });
+    expect(write).toMatchObject({ credentials: 'include', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal) });
     expect(new Headers(write.headers).get('X-CSRF-Token')).toBe('test-csrf');
     expect(new Headers(write.headers).get('If-Match')).toBe('"1"');
     expect(harness.client.getRole()).toBe('owner');
@@ -690,7 +690,7 @@ function cookieApi(passwordHash: string) {
     const headers = new Headers(options?.headers);
     headers.set('sec-fetch-site', 'same-origin');
     if (method !== 'GET') headers.set('origin', origin);
-    if (options?.credentials === 'same-origin' && cookie) headers.set('cookie', cookie);
+    if (options?.credentials !== 'omit' && cookie) headers.set('cookie', cookie);
     const bytes = options?.body === undefined ? null : Buffer.from(String(options.body));
     const result = await api.handle({ method, url: new URL(path, origin).href, headers,
       body: bytes === null ? null : new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }),
@@ -775,7 +775,7 @@ describe('sign-in with real CloudApi handler and synthetic cookie/Blob stores', 
     harness.fetch.mockRejectedValueOnce(new TypeError('offline'));
     await expect(signin.signIn(harness)).rejects.toThrow('offline');
     expect(harness.fetch).toHaveBeenCalledExactlyOnceWith('/api/auth/session', expect.objectContaining({
-      method: 'GET', credentials: 'same-origin', cache: 'no-store',
+      method: 'GET', credentials: 'include', cache: 'no-store',
     }));
     expect(harness.jar.cookie()).toBe(originalCookie);
     expect(harness.storage.setItem).not.toHaveBeenCalled();
@@ -860,10 +860,10 @@ describe('public custom sign-in', () => {
     });
     await signin.signIn(harness);
     expect(harness.fetch).toHaveBeenNthCalledWith(1, '/api/auth/session', expect.objectContaining({
-      method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
+      method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
     }));
     expect(harness.fetch).toHaveBeenNthCalledWith(2, '/api/auth/login', expect.objectContaining({
-      method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
+      method: 'POST', credentials: 'include', cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal),
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': 'test-csrf' },
       body: JSON.stringify({ username: 'instructor', password: 'test-password' }),
     }));
@@ -1142,7 +1142,7 @@ describe('public hosted sign-out purge', () => {
     expect(harness.replace).toHaveBeenCalledExactlyOnceWith(signout.logoutUrl);
     expect(harness.cacheStorage.delete.mock.calls.map(([name]) => name)).toEqual(['fitness-rehearsal-v1', 'fitness-rehearsal-v2']);
     expect(harness.fetch).toHaveBeenNthCalledWith(2, '/api/auth/logout', expect.objectContaining({
-      method: 'POST', headers: { 'X-CSRF-Token': 'test-csrf' }, credentials: 'same-origin', cache: 'no-store',
+      method: 'POST', headers: { 'X-CSRF-Token': 'test-csrf' }, credentials: 'include', cache: 'no-store',
     }));
   });
 

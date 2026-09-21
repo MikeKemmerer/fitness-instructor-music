@@ -1,24 +1,35 @@
 name: Deploy
 
-# Manual-dispatch only. The original resource (fitness-instructor-music-pilot) had a
-# server-side "Failed to deploy the Azure Functions" fault that looked resource-specific
-# at first, but turned out to correlate perfectly with this job's `environment: production`
-# block: 5/5 real deploys with that block failed (against both the old and new resource,
-# and with both a stale and a corrected deployment-token secret); 1/1 real deploy without
-# it succeeded. Root cause of *why* the GitHub Environment context breaks the SWA CLI's
-# native StaticSitesClient binary is still unconfirmed, but the correlation is strong
-# enough to act on. The `environment:` block (and its required-reviewer gate) is removed
-# here; workflow_dispatch itself already restricts who can trigger a deploy to repo
-# collaborators, which remains the operative human gate.
+# Split deploy topology: the frontend (static files only) deploys to the Static Web App via
+# the pinned SWA CLI -- this path has been reliable in this session's real-world testing. The
+# API deploys separately to a standalone Azure Function App (fitness-instructor-music-pilot2-api)
+# via the standard `az functionapp` zip-deploy mechanism, authenticated via OIDC (no long-lived
+# secret). This replaces SWA's bundled/managed Functions deploy path, which failed 100% of the
+# time in this session's testing (5+ real attempts; environment gate removed, artifact bloat
+# fixed, both the original and a brand-new SWA resource tried) with an opaque "Failed to deploy
+# the Azure Functions" error and zero actionable server-side diagnostics (AppLens and Resource
+# Health don't support the staticSites resource type; Activity Log doesn't capture the SWA CLI's
+# token-based upload channel). The standalone Function App is a real Microsoft.Web/sites
+# resource, which both of those diagnostic tools DO support, going forward.
+#
+# The frontend and API are on different origins by design (SWA Free tier does not support
+# linked/BYO backends, which require the Standard tier). Cross-origin auth is handled via
+# SameSite=None session cookies, a relaxed (but still Origin-header-checked) CSRF/Fetch-Metadata
+# check, CORS with credentials on the Function App, and a relaxed connect-src CSP.
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: deploy-production
   cancel-in-progress: false
+
+env:
+  VITE_HOSTED_PILOT: 'true'
+  VITE_API_ORIGIN: 'https://fitness-instructor-music-pilot2-api.azurewebsites.net'
 
 jobs:
   deploy:
@@ -41,8 +52,6 @@ jobs:
           npm --prefix frontend ci --no-audit --no-fund
           npm --prefix api ci --ignore-scripts --no-audit --no-fund
       - name: Build hosted frontend
-        env:
-          VITE_HOSTED_PILOT: 'true'
         run: npm run build
       - name: Stage production API bundle
         run: |
@@ -52,9 +61,7 @@ jobs:
         run: npm run check:privacy
       - name: Install pinned SWA CLI
         run: npm install --global @azure/static-web-apps-cli@2.0.10
-      - name: Deploy to Azure Static Web Apps
-        id: deploy
-        continue-on-error: true
+      - name: Deploy frontend to Azure Static Web Apps
         env:
           SWA_CLI_DEPLOYMENT_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           SWA_CLI_DEBUG: 'log'
@@ -62,25 +69,25 @@ jobs:
           swa deploy frontend/dist \
             --app-location frontend/dist \
             --swa-config-location frontend/dist \
-            --api-location local-media/deployment/api \
-            --api-language node \
-            --api-version 22 \
             --env production \
             --no-use-keychain \
             --verbose log
-      - name: Diagnose native StaticSitesClient failure
-        if: steps.deploy.outcome == 'failure'
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Zip the staged API artifact
+        run: (cd local-media/deployment/api && zip -rq /tmp/api-deploy.zip .)
+      - name: Deploy API to the standalone Function App
         run: |
-          echo "--- StaticSitesClient binaries found ---"
-          find "$HOME/.swa" -maxdepth 4 -iname 'StaticSitesClient*' -print
-          for bin in $(find "$HOME/.swa" -maxdepth 4 -iname 'StaticSitesClient' -type f); do
-            echo "--- ldd: $bin ---"
-            ldd "$bin" || true
-            echo "--- file: $bin ---"
-            file "$bin" || true
-          done
-          echo "--- OS release ---"
-          cat /etc/os-release
+          az functionapp deployment source config-zip \
+            --name fitness-instructor-music-pilot2-api \
+            --resource-group rg-fitness-instructor-pilot \
+            --src /tmp/api-deploy.zip
+      - run: az logout
+        if: always()
+
       - name: Fail if deploy failed
         if: steps.deploy.outcome == 'failure'
         run: exit 1

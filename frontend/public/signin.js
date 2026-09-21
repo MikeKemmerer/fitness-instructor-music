@@ -1,3 +1,5 @@
+import { API_ORIGIN } from './api-config.js';
+
 export const accessKeys = {
   user: 'fitness-hosted-user', reset: 'fitness-hosted-reset', preferences: 'barre.appearance.v1',
 };
@@ -33,8 +35,8 @@ export async function requestAuth(path, options, fetcher = window.fetch.bind(win
     timer = setTimeout(() => { controller.abort(); reject(new Error('auth_timeout')); }, timeoutMs);
   });
   const request = async () => {
-    const response = await fetcher(path, {
-      ...options, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal,
+    const response = await fetcher(API_ORIGIN + path, {
+      ...options, credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal,
     });
     if (response.redirected) throw new Error('auth_failed');
     if (!response.ok) throw Object.assign(new Error('auth_failed'), { status: response.status });
