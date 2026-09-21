@@ -305,9 +305,15 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
   .editor-heading-actions { position: relative; grid-row: 2; flex-wrap: wrap; }
   .editor-heading-actions > .button { flex: 1 1 auto; white-space: normal; }
   .editor-heading-actions .export-section { position: static; }
-  .editor-actions > .draft-status { flex-basis: 100%; order: -1; text-align: start; }
-  .editor-actions > .draft-protection { flex: 1 1 100%; }
-  .editor-actions > .primary { margin-inline-start: auto; }
+  /* Keep the sticky bar to two compact rows: icon controls on row 1, status text on row 2 --
+     otherwise Undo/Redo/status text/Save/menu compete for one row and Save+menu wrap awkwardly. */
+  .editor-actions { padding-block: 8px; gap: 6px 8px; }
+  .editor-actions > .draft-protection { order: 1; flex: none; }
+  .editor-actions > .draft-protection > .muted { max-inline-size: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .editor-actions > .primary { order: 1; margin-inline-start: 0; inline-size: 44px; padding: 10px; }
+  .editor-actions > .primary span { display: none; }
+  .editor-actions > .command-menu { order: 1; }
+  .editor-actions > .draft-status { order: 2; flex: 1 1 100%; text-align: start; font-size: .78rem; }
 }
 @media (max-width: 480px) {
   .chooser-dialog { inline-size: calc(100% - 16px); max-block-size: calc(100dvh - 16px); padding: 16px; }
@@ -420,7 +426,8 @@ input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
 .button.danger { color: var(--error); }
 .cue-editor { padding-block-start: 26px; }
 .cue-editor h3 { margin-block-end: 16px; }
-.cue-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; gap: 8px 12px; align-items: start; padding-block: 10px; border-block-start: 1px solid var(--border); }
+.cue-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; gap: 6px 10px; align-items: start; padding-block: 8px; border-block-start: 1px solid var(--border); }
+.cue-row > .field { gap: 4px; }
 .cue-row > .field:nth-child(1) { grid-column: 1 / 3; }
 .cue-row > .field:nth-child(2) { grid-column: 1; }
 .cue-row > .field:nth-child(3) { grid-column: 1 / -1; grid-row: 3; }
