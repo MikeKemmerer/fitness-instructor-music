@@ -402,6 +402,14 @@ describe('unified routine controls', () => {
     expect(feedback.textContent).toBe('Invalid'); expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('hides an empty node on its very first refresh instead of leaving it visibly blank', () => {
+    const feedback = new TestElement('p');
+    const error = transientText(feedback as unknown as HTMLElement);
+    error.refresh('', false);
+    expect(feedback.hidden).toBe(true);
+    error.dispose();
+  });
+
   it('keeps an enabled unselected phase incomplete and restores it without a second save or history', () => {
     const routine = newRoutine(); const changed = vi.fn();
     const composition = createClassComposition({ hosted: false, routine: () => routine, source: () => 'local', busy: () => false,

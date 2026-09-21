@@ -274,6 +274,7 @@ export function transientText(node: HTMLElement, visibility?: (visible: boolean)
   let deadline = 0;
   let lastText = '';
   let lastError = false;
+  let initialized = false;
   const owner = node.ownerDocument;
   const expire = () => {
     if (!disposed && deadline && Date.now() >= deadline) {
@@ -292,7 +293,11 @@ export function transientText(node: HTMLElement, visibility?: (visible: boolean)
   const display = {
     show(text: string, error = true, refresh = false) {
       if (disposed) return;
-      if (refresh && text === lastText && error === lastError) { expire(); return; }
+      // On the very first call, lastText/lastError still hold their unset defaults, which can
+      // equal an empty first render -- without `initialized`, that call would short-circuit below
+      // and skip applying `node.hidden`, leaving the node visible (but empty) indefinitely.
+      if (refresh && initialized && text === lastText && error === lastError) { expire(); return; }
+      initialized = true;
       clearTimeout(timer); const current = ++generation;
       lastText = text; lastError = error;
       deadline = error && text ? Date.now() + 30_000 : 0;
