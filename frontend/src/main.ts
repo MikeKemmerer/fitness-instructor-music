@@ -2227,12 +2227,12 @@ function updateText(node: HTMLElement, text: string): void {
 
 // Shrinks the move note's font size (bounded) so it fits the CSS max-height instead of pushing
 // the rest of the page down; resets first since the applicable class (long-note/multiline) alone
-// may already fit.
+// may already fit. max-height is defined in em, so it shrinks together with the font -- re-read
+// clientHeight every iteration instead of caching it, or the loop stops against a stale (larger) target.
 function fitMoveNote(node: HTMLElement): void {
   node.style.fontSize = '';
-  const max = node.clientHeight;
-  if (!max) return;
-  for (let step = 0; step < 10 && node.scrollHeight > max + 1; step++) {
+  if (!node.clientHeight) return;
+  for (let step = 0; step < 10 && node.scrollHeight > node.clientHeight + 1; step++) {
     const current = Number.parseFloat(getComputedStyle(node).fontSize);
     if (!Number.isFinite(current) || current <= 10) break;
     node.style.fontSize = `${current * 0.92}px`;
