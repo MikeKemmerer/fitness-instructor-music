@@ -28,7 +28,7 @@ test('template leaves existing site untouched and adds only private Hot LRS Blob
     'Microsoft.Storage/storageAccounts/managementPolicies', 'Microsoft.Consumption/budgets'
   ]);
   assert.deepEqual(template.parameters.location.allowedValues, ['westus2']);
-  assert.deepEqual(template.parameters.staticSiteName.allowedValues, ['fitness-instructor-music-pilot']);
+  assert.deepEqual(template.parameters.staticSiteName.allowedValues, ['fitness-instructor-music-pilot2']);
   const [storage, blobs, container, lifecycle] = template.resources;
   assert.equal(storage.sku.name, 'Standard_LRS');
   assert.equal(storage.properties.accessTier, 'Hot');

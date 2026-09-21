@@ -1,13 +1,14 @@
 name: Deploy
 
-# Manual-dispatch only. The push-to-master trigger is disabled: this workflow's
-# "Deploy to Azure Static Web Apps" step (both via the official wrapper action and via
-# the pinned SWA CLI directly) fails server-side with "Failed to deploy the Azure
-# Functions" when run from GitHub-hosted Actions runners against this SWA resource --
-# confirmed not a build/staging/CLI-version/missing-shared-library issue (ldd is clean).
-# Root cause unconfirmed (possibly network/IP-based rejection, possibly this
-# resource's `Provider: SwaCli` origin). Production deploys still go through the
-# proven manual pipeline (infra/deploy.mjs) until this is investigated further.
+# Manual-dispatch only. The original resource (fitness-instructor-music-pilot) had a
+# server-side "Failed to deploy the Azure Functions" fault isolated (2026-09-20) to that
+# specific resource's own internal state -- confirmed via two controlled experiments
+# (a trivial app AND the real production bundle both deployed successfully from GitHub
+# Actions to fresh disposable SWA resources, ruling out GH Actions/network/Node-version/
+# app-content causes). Production now targets a replacement resource,
+# fitness-instructor-music-pilot2, with identical app settings (same storage account/
+# container and FIM_ACCOUNTS_JSON, so the same songs/routines/accounts are visible with
+# no data migration needed) and a new hostname.
 on:
   workflow_dispatch:
 

@@ -4,8 +4,8 @@
   "parameters": {
     "staticSiteName": {
       "type": "string",
-      "defaultValue": "fitness-instructor-music-pilot",
-      "allowedValues": ["fitness-instructor-music-pilot"],
+      "defaultValue": "fitness-instructor-music-pilot2",
+      "allowedValues": ["fitness-instructor-music-pilot2"],
       "metadata": {
         "description": "Retain the approved existing Free site; never replace or upgrade it."
       }

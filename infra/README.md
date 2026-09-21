@@ -452,11 +452,18 @@ offline and Bluetooth rehearsal remain user-device checks.
 
 Preparation runbook: the commands below require their stated lead/user approvals.
 Do not execute writes as documentation checks. The approved existing Free/Custom site
-has ARM name `fitness-instructor-music-pilot` in `rg-fitness-instructor-pilot`,
-`westus2`, under the approved Visual Studio Enterprise subscription.
+has ARM name `fitness-instructor-music-pilot2` in `rg-fitness-instructor-pilot`,
+`westus2`, under the approved Visual Studio Enterprise subscription. It replaces the
+original `fitness-instructor-music-pilot` resource, which had a server-side "Failed to
+deploy the Azure Functions" fault isolated (2026-09-20) to that specific resource's own
+internal state -- confirmed via controlled experiments deploying both a trivial app and
+the real production bundle successfully from GitHub Actions to fresh disposable SWA
+resources. The replacement shares the same storage account/container and
+`FIM_ACCOUNTS_JSON`, so songs/routines/accounts are identical with no data migration.
 Its URL is `https://<approved-production-hostname>`; real hostnames, subscription IDs,
 IP addresses and credentials belong only in authorized runtime inputs, not tracked
-documentation or configuration. Never recreate the site or use Standard.
+documentation or configuration. Never recreate the site again without the same
+lead/user approval this replacement had, or use Standard.
 
 Both helpers require `SWA_EXPECTED_HOSTNAME` from an independently approved operational
 record, not automatically copied from the lookup being checked. Before retrieving
