@@ -39,12 +39,15 @@ export async function derivePassword(password: string, salt: Buffer): Promise<Bu
   } finally { activeHashes--; }
 }
 
+// SameSite=None: the API is hosted on a separate origin (standalone Function App) from the
+// frontend (Static Web App); the session cookie must be sent cross-site. The Origin header
+// exact-match and CSRF token checks in origin()/authenticate() remain the binding defenses.
 export function cookie(token: string, expiresAt: number): string {
-  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Expires=${new Date(expiresAt).toUTCString()}`;
+  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Expires=${new Date(expiresAt).toUTCString()}`;
 }
 
 export function clearCookie(): string {
-  return `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+  return `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`;
 }
 
 export class CloudAuth {
@@ -53,8 +56,11 @@ export class CloudAuth {
   config(): CloudConfig { return loadConfig(this.env()); }
 
   origin(headers: Headers): void {
+    // The frontend and API are on different origins by design; 'cross-site' is expected and
+    // accepted here, but the exact Origin header match below remains the binding check.
+    const site = headers.get('sec-fetch-site');
     if (headers.get('origin') !== this.config().origin ||
-        (headers.has('sec-fetch-site') && headers.get('sec-fetch-site') !== 'same-origin')) {
+        (site !== null && site !== 'same-origin' && site !== 'cross-site')) {
       throw new ApiError(403, 'origin_forbidden');
     }
   }

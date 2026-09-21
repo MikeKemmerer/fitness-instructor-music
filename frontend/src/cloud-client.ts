@@ -13,6 +13,10 @@ export const CLOUD_CHUNK_BYTES = 2 * 1024 * 1024;
 export const CLOUD_TIMEOUT_MS = 40_000;
 const deadline = (value = CLOUD_TIMEOUT_MS) => Number.isFinite(value) ? Math.max(1, Math.min(45_000, value)) : CLOUD_TIMEOUT_MS;
 
+// Set only for the split-origin topology (frontend on Static Web Apps, API on a standalone
+// Function App); empty means same-origin '/api/...' requests (local dev, tests, SWA-managed API).
+export const apiOrigin = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.replace(/\/+$/, '') ?? '';
+
 export class CloudRequestError extends Error {
   readonly code: CloudErrorCode;
   readonly status?: number;
@@ -110,13 +114,14 @@ async function httpError(response: Response, signal: AbortSignal): Promise<Cloud
   return new CloudRequestError(status === 401 ? 'signin_required' : status === 403 ? 'forbidden' : 'cloud_http_error', status, serverCode);
 }
 
-export async function fetchCloudSession(fetcher: typeof fetch, timeoutMs = CLOUD_TIMEOUT_MS): Promise<CloudSession> {
+export async function fetchCloudSession(fetcher: typeof fetch, timeoutMs = CLOUD_TIMEOUT_MS,
+  origin = apiOrigin): Promise<CloudSession> {
   let receivedResponse = false;
   return boundedRequest(async signal => {
     let response: Response;
     try {
-      response = await fetcher('/api/auth/session', {
-        credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
+      response = await fetcher(`${origin}/api/auth/session`, {
+        credentials: 'include', cache: 'no-store', redirect: 'error', signal,
       });
     } catch (error) {
       throw new CloudRequestError(error instanceof TypeError || signal.aborted ? 'network_unavailable' : 'invalid_session');
@@ -243,8 +248,8 @@ export function createCloudClient(dependencies: CloudClientDependencies = {}) {
         assertCurrent();
         let response: Response;
         try {
-          response = await fetcher(url.pathname + url.search, {
-            ...options, method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
+          response = await fetcher(apiOrigin + url.pathname + url.search, {
+            ...options, method, headers, credentials: 'include', cache: 'no-store', redirect: 'error', signal,
           });
         } catch { throw new CloudRequestError('network_unavailable'); }
         assertCurrent();

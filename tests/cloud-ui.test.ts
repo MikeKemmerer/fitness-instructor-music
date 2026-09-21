@@ -631,7 +631,7 @@ describe('bounded cloud binary requests', () => {
     harness.fetcher.mockResolvedValue(binary(blob));
     expect((await harness.client.requestBlob('/api/media/asset-a/chunks/0')).size).toBe(CLOUD_CHUNK_BYTES);
     const options = harness.fetcher.mock.calls[0]![1]!;
-    expect(options).toMatchObject({ credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
+    expect(options).toMatchObject({ credentials: 'include', cache: 'no-store', redirect: 'error' });
     expect(new Headers(options.headers).has('X-CSRF-Token')).toBe(false);
   });
 
