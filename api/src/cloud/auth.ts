@@ -66,6 +66,14 @@ export class CloudAuth {
   }
 
   token(headers: Headers): string | null {
+    // Authorization header takes precedence: a same-site cookie would be masked by it anyway, and
+    // browsers that reject the cross-site session cookie (Safari ITP, third-party-cookie blocking)
+    // still work via the bearer token the frontend stores after login.
+    const bearer = headers.get('authorization');
+    if (bearer !== null) {
+      if (bearer.length > 128 || !/^Bearer [A-Za-z0-9_-]{43}$/.test(bearer)) throw new ApiError(401, 'signin_required');
+      return bearer.slice(7);
+    }
     const raw = headers.get('cookie') ?? '';
     if (raw.length > 8192) throw new ApiError(401, 'signin_required');
     const matches = raw.split(';').map(part => part.trim()).filter(part => part.startsWith(`${COOKIE_NAME}=`));
@@ -114,7 +122,7 @@ export class CloudAuth {
     await charge(`throttle/account-${Number.parseInt(digest(username).slice(0, 4), 16) % 64}`, 5);
   }
 
-  async login(headers: Headers, input: unknown): Promise<{ session: CloudSession; setCookie: string }> {
+  async login(headers: Headers, input: unknown): Promise<{ session: CloudSession; setCookie: string; token: string }> {
     this.origin(headers);
     const config = this.config();
     if (!input || typeof input !== 'object' || Array.isArray(input) ||
@@ -142,7 +150,7 @@ export class CloudAuth {
       csrfToken: randomBytes(32).toString('base64url'), expiresAt: this.now() + LIMITS.sessionMs, revoked: false };
     await this.store.put(`sessions/${digest(token)}`, encode(record), null);
     return { session: { user: { id: account.id, username: account.username, role: account.role, authVersion: account.authVersion },
-      csrfToken: record.csrfToken, expiresAt: record.expiresAt }, setCookie: cookie(token, record.expiresAt) };
+      csrfToken: record.csrfToken, expiresAt: record.expiresAt }, setCookie: cookie(token, record.expiresAt), token };
   }
 
   async logout(headers: Headers): Promise<void> {

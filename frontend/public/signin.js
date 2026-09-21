@@ -1,5 +1,10 @@
 import { API_ORIGIN } from './api-config.js';
 
+// Must match SESSION_TOKEN_STORAGE_KEY in frontend/src/cloud-client.ts: a bearer-token fallback
+// for browsers (Safari ITP, and increasingly Chrome/Firefox) that block the cross-site session
+// cookie set by the standalone API origin.
+const SESSION_TOKEN_KEY = 'fitness-cloud-session-token';
+
 export const accessKeys = {
   user: 'fitness-hosted-user', reset: 'fitness-hosted-reset', preferences: 'barre.appearance.v1',
 };
@@ -27,7 +32,7 @@ export function isCloudSession(value) {
     && typeof value.csrfToken === 'string' && value.csrfToken.trim());
 }
 
-export async function requestAuth(path, options, fetcher = window.fetch.bind(window), timeoutMs = 10_000) {
+export async function requestAuth(path, options, fetcher = window.fetch.bind(window), timeoutMs = 10_000, storage = window.localStorage) {
   if (!['/api/auth/session', '/api/auth/login', '/api/auth/logout'].includes(path)) throw new Error('auth_failed');
   const controller = new AbortController();
   let timer;
@@ -35,8 +40,12 @@ export async function requestAuth(path, options, fetcher = window.fetch.bind(win
     timer = setTimeout(() => { controller.abort(); reject(new Error('auth_timeout')); }, timeoutMs);
   });
   const request = async () => {
+    let token;
+    try { token = storage.getItem(SESSION_TOKEN_KEY); } catch {}
+    const headers = { ...(options?.headers ?? {}) };
+    if (typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token)) headers.Authorization = `Bearer ${token}`;
     const response = await fetcher(API_ORIGIN + path, {
-      ...options, credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal,
+      ...options, headers, credentials: 'include', cache: 'no-store', redirect: 'error', signal: controller.signal,
     });
     if (response.redirected) throw new Error('auth_failed');
     if (!response.ok) throw Object.assign(new Error('auth_failed'), { status: response.status });
@@ -57,7 +66,7 @@ export async function signIn({ username, password, fetch: fetcher, storage, repl
   };
   let currentSession;
   try {
-    currentSession = await requestAuth('/api/auth/session', { method: 'GET' }, fetcher, timeoutMs);
+    currentSession = await requestAuth('/api/auth/session', { method: 'GET' }, fetcher, timeoutMs, storage);
     if (!isCloudSession(currentSession)) throw new Error('auth_failed');
   } catch (error) {
     if (error?.status !== 401) throw error;
@@ -67,9 +76,12 @@ export async function signIn({ username, password, fetch: fetcher, storage, repl
   if (currentSession) headers['X-CSRF-Token'] = currentSession.csrfToken;
   const session = await requestAuth('/api/auth/login', {
     method: 'POST', headers, body: JSON.stringify({ username, password }),
-  }, fetcher, timeoutMs);
+  }, fetcher, timeoutMs, storage);
   if (!isCloudSession(session)) throw new Error('auth_failed');
   assertCurrent();
+  if (typeof session.token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(session.token)) {
+    storage.setItem(SESSION_TOKEN_KEY, session.token);
+  }
   let remembered;
   try { remembered = JSON.parse(previousUser ?? 'null'); } catch {}
   if (remembered?.id !== session.user.id || remembered?.authVersion !== session.user.authVersion

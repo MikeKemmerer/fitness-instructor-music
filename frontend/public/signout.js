@@ -65,6 +65,7 @@ export async function purgeHostedSession({ storage, cacheStorage, database, repl
   storage.removeItem(signoutKeys.user);
   storage.removeItem(signoutKeys.preferences);
   storage.removeItem('fitness-class-active');
+  storage.removeItem('fitness-cloud-session-token');
   const checkLogout = () => {
     if (storage.getItem(signoutKeys.reset) !== reset || storage.getItem(signoutKeys.user) !== null) {
       throw new Error('session_changed');
@@ -72,10 +73,10 @@ export async function purgeHostedSession({ storage, cacheStorage, database, repl
   };
   try {
     checkLogout();
-    const session = await requestAuth('/api/auth/session', { method: 'GET' }, fetcher, timeoutMs);
+    const session = await requestAuth('/api/auth/session', { method: 'GET' }, fetcher, timeoutMs, storage);
     checkLogout();
     if (!isCloudSession(session)) throw new Error('auth_failed');
-    await requestAuth('/api/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': session.csrfToken } }, fetcher, timeoutMs);
+    await requestAuth('/api/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': session.csrfToken } }, fetcher, timeoutMs, storage);
   } catch (error) {
     if (error?.status !== 401) throw new Error('server_logout_failed');
   }

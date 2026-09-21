@@ -17,6 +17,30 @@ const deadline = (value = CLOUD_TIMEOUT_MS) => Number.isFinite(value) ? Math.max
 // Function App); empty means same-origin '/api/...' requests (local dev, tests, SWA-managed API).
 export const apiOrigin = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.replace(/\/+$/, '') ?? '';
 
+// Bearer token fallback for the cross-site session cookie: real browsers (Safari ITP, and
+// increasingly Chrome/Firefox) block or purge third-party cookies set by a different site than the
+// page, which the standalone API origin is. signin.js writes this key after login; it must match.
+export const SESSION_TOKEN_STORAGE_KEY = 'fitness-cloud-session-token';
+type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+const noopStorage: StorageLike = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+// Lazy + try/catch: evaluated at createCloudClient()/fetchCloudSession() call time (including the
+// eager module-scope `cloudClient` singleton below), so a hostile or unavailable localStorage
+// (tests simulating storage failures, privacy modes that throw on access) can't break module load.
+function getDefaultStorage(): StorageLike {
+  try { return typeof window !== 'undefined' ? window.localStorage : noopStorage; }
+  catch { return noopStorage; }
+}
+function readStoredToken(storage: StorageLike): string | null {
+  try {
+    const value = storage.getItem(SESSION_TOKEN_STORAGE_KEY);
+    return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value) ? value : null;
+  } catch { return null; }
+}
+function authorizationHeader(storage: StorageLike): Record<string, string> {
+  const token = readStoredToken(storage);
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export class CloudRequestError extends Error {
   readonly code: CloudErrorCode;
   readonly status?: number;
@@ -115,13 +139,14 @@ async function httpError(response: Response, signal: AbortSignal): Promise<Cloud
 }
 
 export async function fetchCloudSession(fetcher: typeof fetch, timeoutMs = CLOUD_TIMEOUT_MS,
-  origin = apiOrigin): Promise<CloudSession> {
+  origin = apiOrigin, storage: StorageLike = getDefaultStorage()): Promise<CloudSession> {
   let receivedResponse = false;
   return boundedRequest(async signal => {
     let response: Response;
     try {
       response = await fetcher(`${origin}/api/auth/session`, {
         credentials: 'include', cache: 'no-store', redirect: 'error', signal,
+        headers: authorizationHeader(storage),
       });
     } catch (error) {
       throw new CloudRequestError(error instanceof TypeError || signal.aborted ? 'network_unavailable' : 'invalid_session');
@@ -142,11 +167,13 @@ export interface CloudClientDependencies {
   fetch?: typeof fetch;
   timeoutMs?: number;
   now?: () => number;
+  storage?: StorageLike;
 }
 
 export function createCloudClient(dependencies: CloudClientDependencies = {}) {
   const fetcher: typeof fetch = (...args) => (dependencies.fetch ?? globalThis.fetch)(...args);
   const now = dependencies.now ?? Date.now;
+  const storage = dependencies.storage ?? getDefaultStorage();
   let context: CloudContext = { access: 'signin-required', user: null, expiresAt: null };
   let csrfToken: string | null = null;
   let generation = 0;
@@ -207,7 +234,7 @@ export function createCloudClient(dependencies: CloudClientDependencies = {}) {
     assertAdmission();
     const version = generation;
     try {
-      const session = await fetchCloudSession(fetcher, dependencies.timeoutMs);
+      const session = await fetchCloudSession(fetcher, dependencies.timeoutMs, apiOrigin, storage);
       assertAdmission();
       if (version !== generation) throw new CloudRequestError('session_changed');
       if (context.user && (context.user.id !== session.user.id || context.user.authVersion !== session.user.authVersion
@@ -243,6 +270,7 @@ export function createCloudClient(dependencies: CloudClientDependencies = {}) {
     const method = (options.method ?? 'GET').toUpperCase();
     headers.delete('X-CSRF-Token');
     if (!['GET', 'HEAD'].includes(method)) headers.set('X-CSRF-Token', csrfToken);
+    for (const [name, value] of Object.entries(authorizationHeader(storage))) headers.set(name, value);
     try {
       return await boundedRequest(async signal => {
         assertCurrent();

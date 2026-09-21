@@ -27,7 +27,7 @@ export interface ApiResponse {
 
 const responseHeaders = { 'cache-control': 'private, no-store, max-age=0', pragma: 'no-cache',
   'x-content-type-options': 'nosniff', 'content-type': 'application/json; charset=utf-8',
-  'cross-origin-resource-policy': 'same-origin', vary: 'Cookie, Origin' };
+  'cross-origin-resource-policy': 'cross-origin', vary: 'Cookie, Origin' };
 export const failure = (status: number, code: string): ApiResponse => ({ status, headers: { ...responseHeaders,
   ...(status === 429 ? { 'retry-after': code === 'login_throttled' ? '900' : '60' } : {}) }, body: JSON.stringify({ error: code }) });
 
@@ -175,7 +175,9 @@ export class CloudApi {
       };
       if (parts.join('/') === 'auth/login' && method === 'POST') {
         const result = await this.auth.login(request.headers, await jsonBody(request, 4096));
-        return json(result.session, 200, { 'set-cookie': result.setCookie });
+        // Bearer token in the body backs up the cookie for browsers that reject the cross-site
+        // Set-Cookie (Safari ITP, third-party-cookie blocking); see auth.ts token().
+        return json({ ...result.session, token: result.token }, 200, { 'set-cookie': result.setCookie });
       }
       const actor = await this.auth.authenticate(request.headers, writing);
       const accountBucket = createHash('sha256').update(actor.account.id).digest()[0]! % 64;

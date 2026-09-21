@@ -1,4 +1,4 @@
-import { cloudClient, CloudRequestError, fetchCloudSession, parseCloudIdentity, parseCloudSession,
+import { apiOrigin, cloudClient, CloudRequestError, fetchCloudSession, parseCloudIdentity, parseCloudSession,
   type CloudClient, type CloudIdentity } from './cloud-client';
 
 export const hostedUserKey = 'fitness-hosted-user';
@@ -100,7 +100,7 @@ export async function establishHostedSession(dependencies: HostedSessionDependen
       throw new CloudRequestError('session_changed');
     };
     let session;
-    try { session = await fetchCloudSession(dependencies.fetch, dependencies.timeoutMs); }
+    try { session = await fetchCloudSession(dependencies.fetch, dependencies.timeoutMs, apiOrigin, storage); }
     catch (error) {
       if (invalidated) return false;
       const identity = readHostedIdentity(remembered);

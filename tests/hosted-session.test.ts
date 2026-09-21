@@ -739,13 +739,15 @@ describe('sign-in with real CloudApi handler and synthetic cookie/Blob stores', 
     await signin.signIn(harness);
     expect(harness.jar.replies).toEqual([{ path: '/api/auth/session', status: 200 }, { path: '/api/auth/login', status: 200 }]);
     expect(harness.jar.cookie()).not.toBe(originalCookie);
-    expect(harness.storage.setItem).not.toHaveBeenCalled();
+    expect(harness.storage.setItem).toHaveBeenCalledExactlyOnceWith('fitness-cloud-session-token', expect.any(String));
     expect(harness.stopAudio).not.toHaveBeenCalled();
     expect(assertLocal).not.toThrow();
     expect(await establishHostedSession({ ...harness, client: createCloudClient({ fetch: harness.fetch }),
       events: new EventTarget() as HostedSessionDependencies['events'] })).toBe(true);
     expect(harness.deleteDatabase).not.toHaveBeenCalled();
-    expect(harness.storage.values).toEqual(new Map([[hostedUserKey, marker()]]));
+    expect(harness.storage.values.get(hostedUserKey)).toBe(marker());
+    expect(harness.storage.values.get('fitness-cloud-session-token')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(harness.storage.values.size).toBe(2);
     const current = parseCloudSession(await (await harness.fetch('/api/auth/session', { credentials: 'same-origin' })).json())!;
     const writes = JSON.stringify(harness.storage.setItem.mock.calls);
     expect(writes).not.toContain(current.csrfToken);
@@ -798,7 +800,10 @@ describe('sign-in with real CloudApi handler and synthetic cookie/Blob stores', 
       await signin.signIn(harness);
       expect(harness.jar.replies).toEqual([{ path: '/api/auth/session', status: 401 }, { path: '/api/auth/login', status: 200 }]);
       expect(new Headers(harness.fetch.mock.calls[1]![1]!.headers).has('X-CSRF-Token')).toBe(false);
-      expect(harness.storage.setItem).not.toHaveBeenCalled();
+      // A fresh session token is stored on every successful login (bearer-token fallback for the
+      // cross-site cookie), but the hostedUserKey/hostedResetKey markers stay untouched since the
+      // admitted identity itself is unchanged -- no cross-tab invalidation should be triggered.
+      expect(harness.storage.setItem).toHaveBeenCalledExactlyOnceWith('fitness-cloud-session-token', expect.any(String));
       expect(harness.storage.removeItem).not.toHaveBeenCalled();
       expect(harness.stopAudio).not.toHaveBeenCalled();
       expect(assertLocal).not.toThrow();
