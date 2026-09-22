@@ -385,9 +385,10 @@ input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
 .preview-clock { text-align: end; font-size: .8rem; white-space: nowrap; }
 .preview-timeline { min-inline-size: 0; }
 .preview-markers { position: relative; block-size: 32px; margin-inline: 12px; }
-.button.preview-cue-marker { position: absolute; inset-block-start: 0; inline-size: 24px; min-inline-size: 24px; block-size: 30px; min-block-size: 30px; padding: 4px; transform: translateX(-50%); background: var(--surface); border-color: var(--accent); }
+.button.preview-cue-marker { position: absolute; inset-block-start: 0; inline-size: 24px; min-inline-size: 24px; block-size: 30px; min-block-size: 30px; padding: 4px; transform: translateX(-50%); background: var(--surface); border-color: var(--accent); touch-action: none; cursor: grab; }
+.preview-cue-marker.dragging { cursor: grabbing; background: var(--accent); color: var(--on-accent); }
 .preview-cue-marker svg { inline-size: 12px; block-size: 12px; }
-.preview-cue-marker:focus-visible, .preview-cue-marker:hover { z-index: 2; }
+.preview-cue-marker:focus-visible, .preview-cue-marker:hover, .preview-cue-marker.dragging { z-index: 2; }
 .preview-add-cue { grid-column: 2 / -1; justify-self: end; max-inline-size: 100%; }
 .gain-control { min-inline-size: 0; margin-block-start: 16px; }
 .gain-control .field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: center; }

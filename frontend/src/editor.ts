@@ -200,19 +200,67 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     previewMarkers.setAttribute('role', 'group');
     previewMarkers.setAttribute('aria-label', t('cueTiming'));
     previewTimeline.append(seek, previewMarkers);
+    let markerDrag: { pointerId: number; cueId: string; startX: number; startSeconds: number; seconds: number; moved: boolean } | null = null;
+    let suppressMarkerClick = false;
+    const cancelMarkerDrag = () => { markerDrag = null; };
     const syncMarkers = () => {
       const focusedId = (document.activeElement as HTMLElement | null)?.dataset?.previewCueId;
       previewMarkers.replaceChildren();
       for (const { cue, seconds } of sortedCues(track)) {
         if (invalid.has(cue)) continue;
         const marker = iconButton(t('cuePreview', { time: formatCueTime(seconds), note: cue.note }), Play, () => {
+          if (suppressMarkerClick) { suppressMarkerClick = false; return; }
           const state = preview.getState();
           if (available() && trackCurrent() && state.kind === 'track' && state.trackId === track.id && !state.loading) preview.seek(seconds);
         });
         marker.classList.add('preview-cue-marker');
         marker.dataset.previewCueId = cue.id;
-        marker.style.insetInlineStart = `${Math.max(0, Math.min(100, seconds / track.duration * 100))}%`;
+        const position = (value: number) => { marker.style.insetInlineStart = `${Math.max(0, Math.min(100, value / track.duration * 100))}%`; };
+        position(seconds);
         marker.addEventListener('click', event => event.stopPropagation());
+        marker.addEventListener('pointerdown', event => {
+          if (!trackEditable() || markerDrag || event.button !== 0 || !event.isPrimary) return;
+          const current = track.cues.find(item => item.id === cue.id);
+          if (!current) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const startSeconds = cueSeconds(current, track);
+          markerDrag = { pointerId: event.pointerId, cueId: cue.id, startX: event.clientX, startSeconds, seconds: startSeconds, moved: false };
+          try { marker.setPointerCapture(event.pointerId); } catch { cancelMarkerDrag(); return; }
+          marker.classList.add('dragging');
+        });
+        marker.addEventListener('pointermove', event => {
+          const drag = markerDrag;
+          if (!drag || drag.pointerId !== event.pointerId || drag.cueId !== cue.id) return;
+          const width = previewMarkers.getBoundingClientRect().width;
+          if (width <= 0) { cancelMarkerDrag(); return; }
+          drag.moved ||= Math.abs(event.clientX - drag.startX) > 2;
+          if (!drag.moved) return;
+          const current = track.cues.find(item => item.id === cue.id);
+          const updated = current && cueAtSeconds(track, current, drag.startSeconds + (event.clientX - drag.startX) / width * track.duration, track.duration);
+          if (!updated) return;
+          drag.seconds = cueSeconds(updated, track);
+          position(drag.seconds);
+        });
+        const endDrag = (event: PointerEvent, commitChange: boolean) => {
+          const drag = markerDrag;
+          if (!drag || drag.pointerId !== event.pointerId || drag.cueId !== cue.id) return;
+          markerDrag = null;
+          marker.classList.remove('dragging');
+          if (marker.hasPointerCapture(event.pointerId)) marker.releasePointerCapture(event.pointerId);
+          if (!drag.moved) return;
+          suppressMarkerClick = true;
+          if (!commitChange || !trackEditable()) { position(seconds); return; }
+          const current = track.cues.find(item => item.id === cue.id);
+          const updated = current && cueAtSeconds(track, current, drag.seconds, track.duration);
+          if (!updated) { position(seconds); return; }
+          mutate(() => { current.anchor = updated.anchor; });
+          commitTiming();
+          rows.get(cue.id)?.update();
+          syncMarkers();
+        };
+        marker.addEventListener('pointerup', event => { event.preventDefault(); event.stopPropagation(); endDrag(event, true); });
+        for (const name of ['pointercancel', 'lostpointercapture'] as const) marker.addEventListener(name, event => endDrag(event, false));
         previewMarkers.append(marker);
         if (focusedId === cue.id) marker.focus({ preventScroll: true });
       }

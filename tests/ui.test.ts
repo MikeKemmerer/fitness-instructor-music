@@ -1697,6 +1697,33 @@ describe('editor committed controls', () => {
     expect(preview.stop).not.toHaveBeenCalled(); session.dispose();
   });
 
+  it('drags a preview marker to live-preview a new time and only commits it on release', async () => {
+    const { host, track } = await setup();
+    const marker = () => host.querySelectorAll('.preview-cue-marker').find(node => node.dataset.previewCueId === 'later')!;
+    const handle = marker();
+    const before = structuredClone(track.cues);
+    pointer(handle, 'pointerdown', 150);
+    expect(handle.hasPointerCapture(7)).toBe(true);
+    pointer(handle, 'pointermove', 250);
+    expect(track.cues).toEqual(before);
+    expect(Number.parseFloat(marker().style.insetInlineStart)).toBeCloseTo(20 / 30 * 100);
+    pointer(handle, 'pointerup', 250);
+    expect(handle.hasPointerCapture(7)).toBe(false);
+    expect(track.cues.find(cue => cue.id === 'later')!.anchor).toEqual({ kind: 'timestamp', seconds: 20 });
+  });
+
+  it('cancels a marker drag on pointercancel without retiming the cue', async () => {
+    const { host, track } = await setup();
+    const marker = () => host.querySelectorAll('.preview-cue-marker').find(node => node.dataset.previewCueId === 'later')!;
+    const handle = marker();
+    const before = structuredClone(track.cues);
+    pointer(handle, 'pointerdown', 150);
+    pointer(handle, 'pointermove', 250);
+    pointer(handle, 'pointercancel', 250);
+    expect(handle.hasPointerCapture(7)).toBe(false);
+    expect(track.cues).toEqual(before);
+  });
+
   it('keeps saved gains independent and applies a loudness suggestion only explicitly', async () => {
     const { routine, track, preview, input, button, session } = await setup();
     expect(input(t('trackGain')).value).toBe('100'); expect(input(t('fillerGain')).value).toBe('100');
