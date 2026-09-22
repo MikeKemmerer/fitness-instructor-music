@@ -822,6 +822,14 @@ routineSelect.addEventListener('change', () => {
   });
 });
 const editorActions = element('div', 'action-row editor-actions');
+// Lets the sticky per-track preview bar (.track-preview) stack below the sticky save bar instead
+// of both pinning to the same inset-block-start and overlapping -- the bar's height varies (mobile
+// 2-row layout, wrapped status text), so measure it instead of guessing a fixed offset.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    document.documentElement.style.setProperty('--editor-actions-height', `${Math.ceil(editorActions.getBoundingClientRect().height)}px`);
+  }).observe(editorActions);
+}
 const newDraft = iconButton(t('newRoutine'), Plus, () => {
   if (routineOpen || editorBusy || transportOperation.pending || (hostedPilot && getCloudRole() === 'player')) return;
   if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;

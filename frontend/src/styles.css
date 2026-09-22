@@ -380,7 +380,7 @@ input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
   .track-editor > summary .mono { grid-column: 4; grid-row: 2; align-self: center; }
   .track-editor > summary .after-track-button { grid-column: 5; grid-row: 2; }
 }
-.track-preview { position: sticky; inset-block-start: 0; z-index: 4; background: var(--background); display: grid; grid-template-columns: 44px minmax(0, 1fr) 11ch; gap: 4px 12px; align-items: center; padding-block: 8px; margin-block-end: 18px; border-block-end: 1px solid var(--border); }
+.track-preview { position: sticky; inset-block-start: var(--editor-actions-height, 64px); z-index: 4; background: var(--background); display: grid; grid-template-columns: 44px minmax(0, 1fr) 11ch; gap: 4px 12px; align-items: center; padding-block: 8px; margin-block-end: 18px; border-block-end: 1px solid var(--border); }
 .track-preview .preview-status:empty { display: none; }
 .preview-clock { text-align: end; font-size: .8rem; white-space: nowrap; }
 .preview-timeline { min-inline-size: 0; }
