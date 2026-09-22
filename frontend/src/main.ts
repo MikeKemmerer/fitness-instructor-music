@@ -793,6 +793,9 @@ const classMode = createClassMode(shell, exitClass,
     panels.teach.removeAttribute('aria-label');
     panels.teach.setAttribute('aria-labelledby', 'tab-teach');
   }
+  // Class mode applies larger .move-note font-size rules -- re-measure, or a max-height computed
+  // for the smaller Teach-mode size stays stale and clips the (now taller) current move text.
+  fitMoveNote(currentNote);
   syncPracticeControls();
 });
 classToolbar.append(iconButton(t('fullscreen'), Maximize2, () => classMode.enter()));
@@ -2475,8 +2478,17 @@ void (async () => {
 function onBeforeUnload(event: BeforeUnloadEvent): void {
   if (dirty || playlistEditor?.hasUnsaved() || classPanel?.hasUnsaved() || composition?.hasUnsaved() || (loaded && ['playing', 'filler', 'paused'].includes(state.status))) event.preventDefault();
 }
+let moveNoteResizeScheduled = false;
+function onWindowResize(): void {
+  // A resize can cross a breakpoint that changes .move-note's font-size (e.g. rotating a phone,
+  // or the class-mode landscape layout), which would otherwise leave fitMoveNote's max-height stale.
+  if (moveNoteResizeScheduled) return;
+  moveNoteResizeScheduled = true;
+  requestAnimationFrame(() => { moveNoteResizeScheduled = false; if (!appDisposed) fitMoveNote(currentNote); });
+}
 window.addEventListener('beforeunload', onBeforeUnload);
 window.addEventListener('blur', cancelCueDrag);
+window.addEventListener('resize', onWindowResize);
 document.addEventListener('keydown', cancelDragOnEscape);
 document.addEventListener('visibilitychange', cancelHiddenDrag);
 if (import.meta.env.PROD) {
@@ -2520,6 +2532,7 @@ function disposeApp(): void {
   window.removeEventListener('pagehide', onPageHide);
   window.removeEventListener('beforeunload', onBeforeUnload);
   window.removeEventListener('blur', cancelCueDrag);
+  window.removeEventListener('resize', onWindowResize);
   document.removeEventListener('keydown', cancelDragOnEscape);
   document.removeEventListener('visibilitychange', cancelHiddenDrag);
 }
