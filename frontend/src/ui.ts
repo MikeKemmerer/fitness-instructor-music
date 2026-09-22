@@ -243,6 +243,22 @@ export function makeRange(label: string, minimum: number, maximum: number, value
   return labelElement;
 }
 
+// Equal-loudness (dB-taper) knob position: raw linear gain steps sound compressed at the
+// top of the range and exaggerated at the bottom, so the slider's own position is mapped
+// through a log/exponential curve while the stored gain and displayed percent stay linear.
+const GAIN_SLIDER_MIN = 0.001;
+const GAIN_SLIDER_MAX = 1.25;
+
+export function gainToPosition(gain: number): number {
+  if (gain <= 0) return 0;
+  const clamped = Math.min(GAIN_SLIDER_MAX, Math.max(GAIN_SLIDER_MIN, gain));
+  return Math.round(125 * Math.log(clamped / GAIN_SLIDER_MIN) / Math.log(GAIN_SLIDER_MAX / GAIN_SLIDER_MIN));
+}
+
+export function positionToGain(position: number): number {
+  return position <= 0 ? 0 : GAIN_SLIDER_MIN * (GAIN_SLIDER_MAX / GAIN_SLIDER_MIN) ** (position / 125);
+}
+
 export function gainSlider(label: string, read: () => number, write: (gain: number) => void, editable: () => boolean = () => true) {
   const root = element('div', 'gain-control');
   const input = element('input'); input.type = 'range'; input.min = '0'; input.max = '125'; input.step = '1';
@@ -250,16 +266,17 @@ export function gainSlider(label: string, read: () => number, write: (gain: numb
   const warning = element('span', 'muted gain-warning'); warning.setAttribute('role', 'status');
   const wrapper = field(label, input); wrapper.append(output); root.append(wrapper, warning);
   const sync = () => {
-    const percent = Math.round(read() * 100);
-    input.value = String(Math.min(125, percent));
+    const gain = read();
+    const percent = Math.round(gain * 100);
+    input.value = String(gainToPosition(gain));
     output.textContent = `${percent}%`; input.setAttribute('aria-valuetext', output.textContent);
     input.disabled = !editable(); warning.hidden = percent <= 125;
     warning.textContent = percent > 125 ? t('legacyGain', { percent }) : '';
   };
   input.addEventListener('input', () => {
     if (!editable()) { sync(); return; }
-    const value = input.valueAsNumber;
-    if (Number.isFinite(value) && value >= 0 && value <= 125) write(value / 100);
+    const position = input.valueAsNumber;
+    if (Number.isFinite(position) && position >= 0 && position <= 125) write(Math.min(GAIN_SLIDER_MAX, positionToGain(position)));
     sync();
   });
   sync(); return { element: root, sync };

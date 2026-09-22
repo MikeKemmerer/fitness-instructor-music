@@ -321,7 +321,7 @@ export function createFillerLibrary(context: FillerLibraryContext) {
     field(t('customFillers'), selection), details, actions, levelResult, clippingWarning,
     field(t('fillerBpmMetadata'), bpmInput), bpmResult, progress, feedback);
   const builtins = element('ul', 'filler-builtins');
-  for (const sound of ['lofi', 'soft', 'bright', 'drums'] as const) {
+  for (const sound of ['lofi', 'soft', 'bright', 'drums', 'silence'] as const) {
     const bpm = getFillerSoundBpm({ mode: 'hold', seconds: 0, sound, bpm: 100 });
     builtins.append(element('li', '', `${t(sound)}: ${bpm === undefined ? t('fillerBpmUnknown') : `${formatNumber(bpm)} BPM`}`));
   }

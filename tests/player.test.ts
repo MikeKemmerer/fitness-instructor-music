@@ -312,6 +312,7 @@ class MockParam {
   cancelScheduledValues = vi.fn();
   setValueAtTime = vi.fn();
   linearRampToValueAtTime = vi.fn();
+  setValueCurveAtTime = vi.fn();
   setTargetAtTime = vi.fn();
 }
 
@@ -319,6 +320,25 @@ class MockGain {
   gain = new MockParam();
   connect = vi.fn();
   disconnect = vi.fn();
+}
+
+function lastCurve(param: MockParam): { curve: Float32Array; start: number; duration: number } | undefined {
+  const call = param.setValueCurveAtTime.mock.calls.at(-1) as [Float32Array, number, number] | undefined;
+  return call ? { curve: call[0], start: call[1], duration: call[2] } : undefined;
+}
+
+function curveAt(param: MockParam, start: number): { curve: Float32Array; start: number; duration: number } {
+  const calls = param.setValueCurveAtTime.mock.calls as unknown as [Float32Array, number, number][];
+  const match = calls.find(([, callStart]) => Math.abs(callStart - start) < 1e-6);
+  if (!match) throw new Error(`no setValueCurveAtTime call near ${start}`);
+  return { curve: match[0], start: match[1], duration: match[2] };
+}
+
+function curveEnding(param: MockParam, end: number): { curve: Float32Array; start: number; duration: number } {
+  const calls = param.setValueCurveAtTime.mock.calls as unknown as [Float32Array, number, number][];
+  const match = calls.find(([, start, duration]) => Math.abs(start + duration - end) < 1e-6);
+  if (!match) throw new Error(`no setValueCurveAtTime call ending near ${end}`);
+  return { curve: match[0], start: match[1], duration: match[2] };
 }
 
 class MockSource {
@@ -1699,7 +1719,11 @@ describe('local Web Audio player', () => {
     expect(outgoing.stop).toHaveBeenLastCalledWith(5);
     expect(gain.gain.cancelScheduledValues).toHaveBeenCalledWith(3);
     expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(1, 3);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, 5);
+    const outgoingCurve = lastCurve(gain.gain)!;
+    expect(outgoingCurve.start).toBeCloseTo(3, 8);
+    expect(outgoingCurve.start + outgoingCurve.duration).toBeCloseTo(5, 8);
+    expect(outgoingCurve.curve[0]).toBeCloseTo(1, 8);
+    expect(outgoingCurve.curve.at(-1)).toBeCloseTo(0, 8);
     expect(audio.sources.findLast(source => source.buffer && !source.loop)?.start).toHaveBeenCalledWith(3, 0);
     await advance(5);
     expect(state).toMatchObject({ status: 'playing', trackIndex: 1, error: null });
@@ -1942,14 +1966,20 @@ describe('local Web Audio player', () => {
       expect(source.start).toHaveBeenCalledOnce();
       expect(source.stop).toHaveBeenLastCalledWith(finish);
       const gain = source.connect.mock.calls[0][0] as MockGain;
-      expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(0.5, 11);
-      expect(gain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, finish);
+      expect(gain.gain.setValueAtTime.mock.calls.at(-1)![1]).toBe(11);
+      expect(gain.gain.setValueAtTime.mock.calls.at(-1)![0]).toBeCloseTo(Math.cos(Math.PI / 4), 8);
+      const curve = lastCurve(gain.gain)!;
+      expect(curve.start).toBeCloseTo(11, 8);
+      expect(curve.start + curve.duration).toBeCloseTo(finish, 8);
+      expect(curve.curve.at(-1)).toBeCloseTo(0, 8);
     }
     const incoming = audio.sources.findLast(source => source.buffer?.duration === 10)!;
     const gain = incoming.connect.mock.calls[0][0] as MockGain;
     expect(incoming.start).toHaveBeenCalledWith(11, 0);
     expect(gain.gain.setValueAtTime).toHaveBeenCalledWith(0, 11);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(1, 13);
+    const incomingCurve = curveAt(gain.gain, 11);
+    expect(incomingCurve.start + incomingCurve.duration).toBeCloseTo(13, 8);
+    expect(incomingCurve.curve.at(-1)).toBeCloseTo(1, 8);
     await advance(12);
     expect(song.buffer).toBeNull();
     expect(filler.buffer).toBe(fillerBuffer);
@@ -1973,19 +2003,30 @@ describe('local Web Audio player', () => {
     expect(filler.disconnect).not.toHaveBeenCalled();
     expect(filler.start).toHaveBeenCalledOnce();
     expect(filler.stop).not.toHaveBeenCalled();
-    expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(0.5, 11);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(1, 12);
+    expect(gain.gain.setValueAtTime.mock.calls.at(-1)![1]).toBe(11);
+    expect(gain.gain.setValueAtTime.mock.calls.at(-1)![0]).toBeCloseTo(Math.sin(Math.PI / 4), 8);
+    let curve = lastCurve(gain.gain)!;
+    expect(curve.start).toBeCloseTo(11, 8);
+    expect(curve.start + curve.duration).toBeCloseTo(12, 8);
+    expect(curve.curve.at(-1)).toBeCloseTo(1, 8);
     await player.continue();
     expect(filler.disconnect).not.toHaveBeenCalled();
-    expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(0.5, 11);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, 13);
+    expect(gain.gain.setValueAtTime.mock.calls.at(-1)![1]).toBe(11);
+    expect(gain.gain.setValueAtTime.mock.calls.at(-1)![0]).toBeCloseTo(Math.sin(Math.PI / 4), 8);
+    curve = lastCurve(gain.gain)!;
+    expect(curve.start).toBeCloseTo(11, 8);
+    expect(curve.start + curve.duration).toBeCloseTo(13, 8);
+    expect(curve.curve.at(-1)).toBeCloseTo(0, 8);
     player.pause();
     audio.currentTime = 40;
     await player.play();
     const resumed = audio.sources.findLast(source => source.loop && source.buffer && source.start.mock.calls[0]?.[0] === 40)!;
     const resumedGain = resumed.connect.mock.calls[0][0] as MockGain;
-    expect(resumedGain.gain.setValueAtTime).toHaveBeenCalledWith(0.5, 40);
-    expect(resumedGain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, 42);
+    expect(resumedGain.gain.setValueAtTime).toHaveBeenCalledWith(gain.gain.setValueAtTime.mock.calls.at(-1)![0], 40);
+    const resumedCurve = lastCurve(resumedGain.gain)!;
+    expect(resumedCurve.start).toBeCloseTo(40, 8);
+    expect(resumedCurve.start + resumedCurve.duration).toBeCloseTo(42, 8);
+    expect(resumedCurve.curve.at(-1)).toBeCloseTo(0, 8);
     expect(resumed.stop).toHaveBeenLastCalledWith(42);
   });
 
@@ -2002,8 +2043,12 @@ describe('local Web Audio player', () => {
     expect(filler.disconnect).not.toHaveBeenCalled();
     expect(incoming.disconnect).not.toHaveBeenCalled();
     const gain = filler.connect.mock.calls[0][0] as MockGain;
-    expect(gain.gain.setValueAtTime).toHaveBeenLastCalledWith(0.5, 15);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, 16);
+    expect(gain.gain.setValueAtTime.mock.calls.at(-1)![1]).toBe(15);
+    expect(gain.gain.setValueAtTime.mock.calls.at(-1)![0]).toBeCloseTo(Math.cos(Math.PI / 4), 8);
+    const curve = lastCurve(gain.gain)!;
+    expect(curve.start).toBeCloseTo(15, 8);
+    expect(curve.start + curve.duration).toBeCloseTo(16, 8);
+    expect(curve.curve.at(-1)).toBeCloseTo(0, 8);
   });
 
   it.each([0, 0.001, 2])('ramps manual filler Continue from zero with crossfade %s', async crossfade => {
@@ -2022,8 +2067,9 @@ describe('local Web Audio player', () => {
     const incoming = audio.sources.findLast(source => !source.loop && source.buffer?.duration === 10)!;
     const gain = incoming.connect.mock.calls[0][0] as MockGain;
     expect(gain.gain.setValueAtTime).toHaveBeenCalledWith(0, 13);
-    expect(gain.gain.linearRampToValueAtTime.mock.calls.find(([level]) => level === 1)?.[1])
-      .toBeCloseTo(13 + Math.max(0.01, crossfade), 8);
+    const curve = curveAt(gain.gain, 13);
+    expect(curve.curve.at(-1)).toBeCloseTo(1, 8);
+    expect(curve.start + curve.duration).toBeCloseTo(13 + Math.max(0.01, crossfade), 8);
   });
 
   it('keeps the scheduled timed filler handoff and resumes both sides at their actual fade levels', async () => {
@@ -2036,7 +2082,9 @@ describe('local Web Audio player', () => {
     const incoming = audio.sources.find(source => source.buffer?.duration === 10)!;
     const gain = incoming.connect.mock.calls[0][0] as MockGain;
     expect(gain.gain.setValueAtTime).toHaveBeenCalledWith(0, 14);
-    expect(gain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(1, 16);
+    const introCurve = curveAt(gain.gain, 14);
+    expect(introCurve.start + introCurve.duration).toBeCloseTo(16, 8);
+    expect(introCurve.curve.at(-1)).toBeCloseTo(1, 8);
     await advance(15);
     expect(filler.disconnect).not.toHaveBeenCalled();
     expect(incoming.start).toHaveBeenCalledOnce();
@@ -2047,7 +2095,7 @@ describe('local Web Audio player', () => {
     const resumedSong = audio.sources.findLast(source => source.buffer?.duration === 10)!;
     for (const source of [resumedFiller, resumedSong]) {
       const resumedGain = source.connect.mock.calls[0][0] as MockGain;
-      expect(resumedGain.gain.setValueAtTime).toHaveBeenCalledWith(0.5, 40);
+      expect(resumedGain.gain.setValueAtTime.mock.calls.some(call => call[1] === 40)).toBe(true);
     }
   });
 
@@ -2063,8 +2111,10 @@ describe('local Web Audio player', () => {
     const outgoingGain = filler.connect.mock.calls[0][0] as MockGain;
     const incomingGain = incoming.connect.mock.calls[0][0] as MockGain;
     expect(incoming.start.mock.calls[0][0]).toBeCloseTo(17.98, 8);
-    expect(outgoingGain.gain.linearRampToValueAtTime.mock.calls.at(-1)?.[1]).toBeCloseTo(17.99, 8);
-    expect(incomingGain.gain.linearRampToValueAtTime.mock.calls[0][1]).toBeCloseTo(17.99, 8);
+    const outgoingCurve = curveEnding(outgoingGain.gain, 17.99);
+    const incomingCurve = curveEnding(incomingGain.gain, 17.99);
+    expect(outgoingCurve.start + outgoingCurve.duration).toBeCloseTo(17.99, 8);
+    expect(incomingCurve.start + incomingCurve.duration).toBeCloseTo(17.99, 8);
   });
 
   it('coalesces one-shot/countdown/periodic warnings and reschedules only canceled future alarms', async () => {

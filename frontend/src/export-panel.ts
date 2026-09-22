@@ -3,17 +3,18 @@ import type { Routine } from '../../shared/routine';
 import { createExcelBlob, createExportSnapshot, createPdfBlob, defaultExportColumns, defaultPdfColumns, downloadExport,
   exportColumns, exportFilename, pdfExportColumns, type ExportSnapshot } from './exports';
 import { errorMessage, t } from './i18n';
+import { exportPalette, readPreferences, type ExportPalette } from './theme';
 import { element, field, iconButton, setButtonIcon, transientText } from './ui';
 
 interface ExportPanelState { routine: Routine; unsaved: boolean; busy: boolean }
 interface ExportActions {
-  excel: (snapshot: ExportSnapshot, selected: readonly string[]) => Promise<Blob>;
-  pdf: (snapshot: ExportSnapshot, selected: readonly string[]) => Promise<Blob>;
+  excel: (snapshot: ExportSnapshot, selected: readonly string[], palette: ExportPalette) => Promise<Blob>;
+  pdf: (snapshot: ExportSnapshot, selected: readonly string[], palette: ExportPalette) => Promise<Blob>;
   download: (blob: Blob, filename: string) => void;
 }
 
 export function createExportPanel(readState: () => ExportPanelState, actions: ExportActions = {
-  excel: createExcelBlob, pdf: (snapshot, selected) => createPdfBlob(snapshot, undefined, selected), download: downloadExport,
+  excel: createExcelBlob, pdf: (snapshot, selected, palette) => createPdfBlob(snapshot, undefined, selected, palette), download: downloadExport,
 }) {
   const root = element('details', 'export-section command-menu');
   root.open = false;
@@ -108,7 +109,8 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
           { walkIn: walkInBox.checked, walkOut: walkOutBox.checked });
         const name = exportFilename(filename.value, format);
         const fields = [...selected];
-        const blob = await (format === 'xlsx' ? actions.excel(snapshot, fields) : actions.pdf(snapshot, fields));
+        const palette = exportPalette(readPreferences());
+        const blob = await (format === 'xlsx' ? actions.excel(snapshot, fields, palette) : actions.pdf(snapshot, fields, palette));
         if (disposed || generation !== operation || !dialog.open) return;
         actions.download(blob, name); close();
       } catch (error) {

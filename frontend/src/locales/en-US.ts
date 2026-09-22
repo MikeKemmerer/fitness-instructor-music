@@ -222,7 +222,7 @@ export const enUS = {
   newCue: 'New move', cueNumber: 'Cue {count}', cuePreview: '{time}: {note}', invalidPreview: 'Check timing',
   transitions: 'Between tracks', fillerMode: 'Filler mode', none: 'None', timed: 'Timed',
   fillerDuration: 'Filler duration (seconds)', fillerBpm: 'Filler BPM', fillerSound: 'Filler sound',
-  soft: 'Synthetic soft', bright: 'Synthetic bright', drums: 'Synthetic drums', crossfade: 'Crossfade (seconds)',
+  soft: 'Synthetic soft', bright: 'Synthetic bright', drums: 'Synthetic drums', silence: 'Silence', crossfade: 'Crossfade (seconds)',
   lofi: 'Lo-fi instrumental (CC0)', originalTempo: 'Original tempo',
   fillerLibrary: 'Filler library', localFillerLibrary: 'Library on this device',
   customFillers: 'Custom recordings', builtInFillers: 'Built-in', retainedFillers: 'Retained by this routine',

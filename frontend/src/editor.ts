@@ -548,7 +548,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     }));
     bpmInput.required = false; bpmInput.value = track.bpm === undefined ? '' : String(track.bpm);
     const firstBeatInput = numberInput(track.firstBeat, 0, track.duration, value => mutate(() => {
-      track.firstBeat = value; invalidateDetection(); updatePreviews();
+      track.firstBeat = Math.round(value * 100) / 100; invalidateDetection(); updatePreviews();
     }));
     for (const input of [bpmInput, firstBeatInput]) {
       input.addEventListener('change', commitTiming);
@@ -559,7 +559,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       const estimate = suggestion!;
       mutate(() => {
         track.bpm = estimate.bpm;
-        track.firstBeat = estimate.firstBeat;
+        track.firstBeat = Math.round(estimate.firstBeat * 100) / 100;
         bpmInput.value = String(track.bpm);
         firstBeatInput.value = String(track.firstBeat);
         invalidateDetection();
@@ -753,7 +753,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
   const fillerFields = element('div', 'field-grid');
   const duration = numberInput(routine.filler.seconds, 0, 600, value => { if (routine.filler.mode === 'timed') mutate(() => { stopFiller(); routine.filler.seconds = value; }); });
   const bpm = numberInput(routine.filler.bpm, 40, 220, value => {
-    if (!['lofi', 'recording'].includes(routine.filler.sound)) mutate(() => { stopFiller(); routine.filler.bpm = value; });
+    if (!['lofi', 'recording', 'silence'].includes(routine.filler.sound)) mutate(() => { stopFiller(); routine.filler.bpm = value; });
   });
   const originalTempo = element('output', 'muted', t('originalTempo'));
   const bpmField = field(t('fillerBpm'), bpm);
@@ -763,7 +763,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     sound.replaceChildren();
     const builtins = element('optgroup');
     builtins.label = t('builtInFillers');
-    for (const value of ['lofi', 'soft', 'bright', 'drums'] as const) {
+    for (const value of ['lofi', 'soft', 'bright', 'drums', 'silence'] as const) {
       const option = element('option', '', fillerSoundLabel({ ...routine.filler, sound: value, recording: undefined }));
       option.value = value; builtins.append(option);
     }
@@ -789,8 +789,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     const recording = context.fillerRecordings?.().find(item => `recording:${item.id}` === sound.value);
     if (recording) {
       stopFiller(); routine.filler.sound = 'recording'; routine.filler.recording = structuredClone(recording);
-    } else if (['lofi', 'soft', 'bright', 'drums'].includes(sound.value)) {
-      stopFiller(); routine.filler.sound = sound.value as 'lofi' | 'soft' | 'bright' | 'drums';
+    } else if (['lofi', 'soft', 'bright', 'drums', 'silence'].includes(sound.value)) {
+      stopFiller(); routine.filler.sound = sound.value as 'lofi' | 'soft' | 'bright' | 'drums' | 'silence';
       delete routine.filler.recording;
     }
     refreshFillers(); syncFiller();
@@ -801,7 +801,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     duration.value = routine.filler.mode === 'hold' ? '' : String(routine.filler.seconds);
     duration.required = routine.filler.mode === 'timed';
     sound.disabled = routine.filler.mode === 'none';
-    bpm.disabled = sound.disabled || ['lofi', 'recording'].includes(routine.filler.sound);
+    bpm.disabled = sound.disabled || ['lofi', 'recording', 'silence'].includes(routine.filler.sound);
     try { const known = getFillerSoundBpm(routine.filler); bpm.value = known === undefined ? '' : String(known); } catch { bpm.value = String(routine.filler.bpm); }
     originalTempo.hidden = !['lofi', 'recording'].includes(routine.filler.sound);
   };

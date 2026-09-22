@@ -12,7 +12,7 @@ export const LOFI_ASSET = Object.freeze({
 
 export function getFillerSoundBpm(filler: Filler): number | undefined {
   if (filler.sound === 'lofi') return LOFI_ASSET.measuredBpm;
-  if (filler.sound === 'recording') return undefined;
+  if (filler.sound === 'recording' || filler.sound === 'silence') return undefined;
   if (!['soft', 'bright', 'drums'].includes(filler.sound) || !Number.isFinite(filler.bpm) || filler.bpm < 40 || filler.bpm > 220) {
     throw new Error('invalid_filler');
   }
@@ -25,6 +25,7 @@ export function getFillerSoundDuration(filler: Filler): number {
     if (!validFillerRecording(filler.recording)) throw new Error('invalid_filler_recording');
     return filler.recording.duration;
   }
+  if (filler.sound === 'silence') throw new Error('no_fixed_duration');
   return Math.round(22050 * 240 / getFillerSoundBpm(filler)!) / 22050;
 }
 
@@ -143,6 +144,10 @@ export async function getFillerBuffer(audio: BaseAudioContext, filler: Filler): 
       .finally(() => clearTimeout(timer));
   }
   if (filler.recording !== undefined) throw new Error('invalid_filler_recording');
+  if (filler.sound === 'silence') {
+    const length = Math.round(22050 * 240 / Math.min(220, Math.max(40, filler.bpm)));
+    return audio.createBuffer(1, length, 22050);
+  }
   if (filler.sound !== 'lofi') {
     const release = reserveRuntimePcm(Math.round(22050 * 240 / filler.bpm) * 8);
     try {

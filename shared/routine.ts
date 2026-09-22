@@ -45,7 +45,7 @@ export interface Filler {
   mode: 'none' | 'timed' | 'hold';
   seconds: number;
   bpm: number;
-  sound: 'soft' | 'bright' | 'drums' | 'lofi' | 'recording';
+  sound: 'soft' | 'bright' | 'drums' | 'lofi' | 'recording' | 'silence';
   gain?: number;
   recording?: FillerRecording;
 }
@@ -126,7 +126,7 @@ export function validateRoutine(routine: Routine): string[] {
   if (routine.beepOnceRemaining !== undefined && (!nonnegative(routine.beepOnceRemaining) || routine.beepOnceRemaining > 1200)) errors.push('Invalid beep timing');
   if (routine.beepVolume !== undefined && (!nonnegative(routine.beepVolume) || routine.beepVolume > 1)) errors.push('Invalid beep volume');
   if (!routine.filler || typeof routine.filler !== 'object' || Array.isArray(routine.filler)) return [...errors, 'Invalid filler'];
-  if (!['none', 'timed', 'hold'].includes(routine.filler.mode) || !['soft', 'bright', 'drums', 'lofi', 'recording'].includes(routine.filler.sound)) errors.push('Invalid filler');
+  if (!['none', 'timed', 'hold'].includes(routine.filler.mode) || !['soft', 'bright', 'drums', 'lofi', 'recording', 'silence'].includes(routine.filler.sound)) errors.push('Invalid filler');
   if (routine.filler.sound === 'recording') {
     if (!validFillerRecording(routine.filler.recording)) errors.push('Invalid filler recording');
   } else if (routine.filler.recording !== undefined) errors.push('Invalid filler recording');

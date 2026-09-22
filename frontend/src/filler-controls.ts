@@ -21,11 +21,11 @@ export function fillerControls(filler: Filler, recordings: () => FillerRecording
   const choices = [...recordings()];
   if (filler.recording && !choices.some(value => value.id === filler.recording!.id)) choices.push(filler.recording);
   const sound = selectInput<string>(filler.recording ? `recording:${filler.recording.id}` : filler.sound,
-    [...(['lofi', 'soft', 'bright', 'drums'] as const).map(value => ({ value, label: fillerSoundLabel({ ...filler, sound: value, recording: undefined }) })),
+    [...(['lofi', 'soft', 'bright', 'drums', 'silence'] as const).map(value => ({ value, label: fillerSoundLabel({ ...filler, sound: value, recording: undefined }) })),
       ...choices.map(recording => ({ value: `recording:${recording.id}`, label: fillerSoundLabel({ ...filler, sound: 'recording', recording }) }))], value => mutate(() => {
       const recording = choices.find(item => `recording:${item.id}` === value);
       if (recording) { filler.sound = 'recording'; filler.recording = structuredClone(recording); }
-      else if (['lofi', 'soft', 'bright', 'drums'].includes(value)) {
+      else if (['lofi', 'soft', 'bright', 'drums', 'silence'].includes(value)) {
         filler.sound = value as Filler['sound']; delete filler.recording;
       }
     }));
@@ -33,7 +33,7 @@ export function fillerControls(filler: Filler, recordings: () => FillerRecording
   const sync = () => {
     duration.readOnly = filler.mode === 'hold'; duration.disabled = filler.mode === 'none';
     duration.value = filler.mode === 'hold' ? '' : String(filler.seconds); duration.required = filler.mode === 'timed';
-    bpm.disabled = ['recording', 'lofi'].includes(filler.sound) || filler.mode === 'none';
+    bpm.disabled = ['recording', 'lofi', 'silence'].includes(filler.sound) || filler.mode === 'none';
     if (['recording', 'lofi'].includes(filler.sound)) { const known = getFillerSoundBpm(filler); bpm.value = known === undefined ? '' : String(known); }
     else bpm.value = String(filler.bpm);
     sound.disabled = filler.mode === 'none';

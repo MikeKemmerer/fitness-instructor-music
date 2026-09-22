@@ -484,13 +484,26 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     return points;
   }
 
+  // Equal-power (constant combined loudness) taper: linear amplitude ramps leave a
+  // perceptible loudness dip mid-crossfade, which reads as the transition dragging on.
+  // Generalized to arbitrary from/to levels (not just 0/1) for mid-fade retire/recover cases.
+  function curveShape(fraction: number, rising: boolean): number {
+    const theta = Math.max(0, Math.min(1, fraction)) * Math.PI / 2;
+    return rising ? Math.sin(theta) : 1 - Math.cos(theta);
+  }
+
+  function curveValue(fraction: number, from: number, to: number): number {
+    return from + (to - from) * curveShape(fraction, to > from);
+  }
+
   function envelope(segment: Segment, seconds: number): number {
     const points = gainPoints(segment);
     let previous = points[0];
     for (const point of points.slice(1)) {
       if (point.seconds > seconds) {
+        if (previous.level === point.level) return previous.level;
         const fraction = Math.max(0, (seconds - previous.seconds) / (point.seconds - previous.seconds));
-        return previous.level + (point.level - previous.level) * fraction;
+        return curveValue(fraction, previous.level, point.level);
       }
       previous = point;
     }
@@ -503,12 +516,27 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     gain.gain.cancelScheduledValues(when);
     let level = envelope(segment, start);
     gain.gain.setValueAtTime(level, when);
-    for (const point of gainPoints(segment)) {
-      if (point.seconds <= start) continue;
-      const at = anchor + point.seconds - checkpoint;
-      if (point.level === level) gain.gain.setValueAtTime(point.level, at);
-      else gain.gain.linearRampToValueAtTime(point.level, at);
-      level = point.level;
+    const points = gainPoints(segment);
+    for (let index = 1; index < points.length; index += 1) {
+      const from = points[index - 1]!;
+      const to = points[index]!;
+      if (to.seconds <= start) continue;
+      const windowStart = anchor + from.seconds - checkpoint;
+      const windowEnd = anchor + to.seconds - checkpoint;
+      const rampStart = Math.max(windowStart, when);
+      if (from.level === to.level) {
+        gain.gain.setValueAtTime(to.level, windowEnd);
+      } else if (windowEnd > rampStart) {
+        const totalDuration = windowEnd - windowStart;
+        const resumeFraction = totalDuration > 0 ? (rampStart - windowStart) / totalDuration : 0;
+        const samples = 48;
+        const curve = new Float32Array(samples + 1);
+        for (let sample = 0; sample <= samples; sample += 1) {
+          curve[sample] = curveValue(resumeFraction + (1 - resumeFraction) * (sample / samples), from.level, to.level);
+        }
+        gain.gain.setValueCurveAtTime(curve, rampStart, windowEnd - rampStart);
+      }
+      level = to.level;
     }
   }
 

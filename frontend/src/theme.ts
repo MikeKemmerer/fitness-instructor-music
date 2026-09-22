@@ -77,3 +77,51 @@ export function applyTheme(preferences: Preferences): void {
   root.style.setProperty('--progress-height', `${preferences.progressHeight}px`);
   root.style.colorScheme = preferences.mode;
 }
+
+function srgbToLinear(channel: number): number {
+  const value = channel / 255;
+  return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function relativeLuminance(hex: string): number {
+  const value = hex.replace('#', '');
+  const channel = (offset: number) => srgbToLinear(Number.parseInt(value.slice(offset, offset + 2), 16));
+  return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+}
+
+export function contrastRatio(first: string, second: string): number {
+  const [lighter, darker] = [relativeLuminance(first), relativeLuminance(second)].sort((left, right) => right - left);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function bestContrastText(background: string): string {
+  return contrastRatio(background, '#ffffff') >= contrastRatio(background, '#000000') ? '#ffffff' : '#000000';
+}
+
+function mixWithWhite(hex: string, whiteFraction: number): string {
+  const value = hex.replace('#', '');
+  const channel = (offset: number) => {
+    const source = Number.parseInt(value.slice(offset, offset + 2), 16);
+    return Math.round(source + (255 - source) * whiteFraction);
+  };
+  return `#${[0, 2, 4].map(offset => channel(offset).toString(16).padStart(2, '0')).join('')}`;
+}
+
+export interface ExportPalette {
+  readonly headerFill: string;
+  readonly headerText: string;
+  readonly stripeFill: string;
+  readonly bodyText: string;
+  readonly mutedText: string;
+}
+
+// Export documents always render on a light page (print/portability), so this uses the light-mode
+// accent shade and a fixed dark body text regardless of the app's own light/dark mode.
+export function exportPalette(preferences: Preferences): ExportPalette {
+  const headerFill = preferences.highContrast ? '#000000' : palette[preferences.accent].light;
+  const bodyText = '#1b1e20';
+  return {
+    headerFill, headerText: bestContrastText(headerFill),
+    stripeFill: mixWithWhite(headerFill, 0.92), bodyText, mutedText: mixWithWhite(bodyText, 0.35),
+  };
+}

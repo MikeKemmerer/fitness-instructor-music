@@ -349,9 +349,9 @@ describe('PDF packet layout data', () => {
     }
     const font = readFileSync(new URL('../frontend/src/assets/fonts/NotoSans-Regular.ttf', import.meta.url));
     const text = pdfText(Buffer.from(await (await createPdfBlob(createExportSnapshot(routine, false), font, allIds())).arrayBuffer())).replace(/\s+/g, ' ');
-    for (const column of exportColumns.filter(column => !['track.index', 'track.title'].includes(column.id))) expect(text).toContain(t(column.label));
+    for (const column of exportColumns.filter(column => !['track.index', 'track.title', 'track.bodyArea'].includes(column.id))) expect(text).toContain(t(column.label));
     for (let index = 0; index < 4; index++) {
-      expect(text).toContain(`${index + 1}. Opening song`);
+      expect(text).toContain(`${index + 1}. Opening song (Legs)`);
       expect(text).toContain(`Complete note ${index}:`);
       expect(text).toContain(`entry-${index}`); expect(text).toContain(`cue-${index}`);
     }
@@ -432,12 +432,12 @@ describe('PDF packet layout data', () => {
     const packet = buildPdfPacket(snapshot, fields);
     expect(packet.settings).toEqual([]);
     expect(packet.tracks[0]!.details).toBe('');
-    expect(packet.tracks[0]!.cues).toEqual([['0:12.375']]);
+    expect(packet.tracks[0]!.cues).toEqual([['0:12.38']]);
     expect(JSON.stringify(buildPdfTables(packet))).not.toContain('EXCLUDED');
     const font = readFileSync(new URL('../frontend/src/assets/fonts/NotoSans-Regular.ttf', import.meta.url));
     const blob = await createPdfBlob(snapshot, font, fields);
     const text = pdfText(Buffer.from(await blob.arrayBuffer()));
-    expect(text).toContain('Selected Song'); expect(text).toContain('0:12.375');
+    expect(text).toContain('Selected Song'); expect(text).toContain('0:12.38');
     expect(text).not.toContain('EXCLUDED');
     expect(text).not.toContain(t('fillerSound'));
     expect(() => buildPdfPacket(snapshot, [])).toThrow(t('exportNoColumns'));

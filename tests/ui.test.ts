@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createClassMode, createTransportOperation, cueAtSeconds, gainSlider, nextMoveCountdown, transientText, watchOfflineShell } from '../frontend/src/ui';
+import { createClassMode, createTransportOperation, cueAtSeconds, gainSlider, gainToPosition, nextMoveCountdown, positionToGain, transientText, watchOfflineShell } from '../frontend/src/ui';
+
+// The gain slider's own position is on a log/exponential taper with integer (1-step) positions,
+// so round-tripping a target gain through it doesn't reproduce the target exactly.
+function sliderGain(target: number): number { return positionToGain(gainToPosition(target)); }
 import { fillerControls, fillerSoundLabel } from '../frontend/src/filler-controls';
 import { createRoutineSave, sameSavedContent } from '../frontend/src/routine-save';
 import { createAudioLibraryPicker } from '../frontend/src/audio-library-picker';
@@ -437,14 +441,14 @@ describe('unified routine controls', () => {
     composition.sync();
     for (const [root, phase] of [[composition.beforeTracks, 'walkIn'], [composition.afterTracks, 'walkOut']] as const) {
       const slider = (root as unknown as TestElement).querySelector('.gain-control')!.querySelector('input')!;
-      slider.value = '110'; slider.dispatchEvent(new Event('input'));
-      expect(routine.sequence[phase]!.tracks[0]!.gain).toBe(1.1);
+      slider.value = String(gainToPosition(1.1)); slider.dispatchEvent(new Event('input'));
+      expect(routine.sequence[phase]!.tracks[0]!.gain).toBe(sliderGain(1.1));
     }
     expect(changed).toHaveBeenCalledTimes(2); expect(track.gain).toBe(1.4);
     routine.locked = true;
     const slider = (composition.beforeTracks as unknown as TestElement).querySelector('.gain-control')!.querySelector('input')!;
-    slider.value = '50'; slider.dispatchEvent(new Event('input'));
-    expect(routine.sequence.walkIn!.tracks[0]!.gain).toBe(1.1); composition.dispose();
+    slider.value = String(gainToPosition(0.5)); slider.dispatchEvent(new Event('input'));
+    expect(routine.sequence.walkIn!.tracks[0]!.gain).toBe(sliderGain(1.1)); composition.dispose();
   });
 
   it('reenables owned phase sliders after preparation and lock transitions without rebuilding the sequence', () => {
@@ -1530,8 +1534,8 @@ describe('editor committed controls', () => {
     expect(routine.filler.recording!.asset).not.toBe(recording.asset);
     expect(contentFingerprint(routine)).not.toBe(before);
     expect(input(t('fillerBpm')).disabled).toBe(true);
-    input(t('fillerGain')).value = '50'; input(t('fillerGain')).dispatchEvent(new Event('input'));
-    expect(routine.filler.gain).toBe(0.5);
+    input(t('fillerGain')).value = String(gainToPosition(0.5)); input(t('fillerGain')).dispatchEvent(new Event('input'));
+    expect(routine.filler.gain).toBe(sliderGain(0.5));
     recordings.length = 0;
     const fingerprint = contentFingerprint(routine);
     session.refreshFillers();
@@ -1540,7 +1544,7 @@ describe('editor committed controls', () => {
     expect(host.querySelectorAll('option').find(option => option.value === 'recording:custom-a')!.textContent).toContain(recording.name);
     expect(host.querySelectorAll('option').find(option => option.value === 'recording:custom-a')!.textContent).toContain('8 s');
     button(t('previewFiller')).click();
-    expect(preview.playFiller).toHaveBeenCalledWith(expect.objectContaining({ sound: 'recording', recording, gain: 0.5 }));
+    expect(preview.playFiller).toHaveBeenCalledWith(expect.objectContaining({ sound: 'recording', recording, gain: sliderGain(0.5) }));
     sound.value = 'drums'; sound.dispatchEvent(new Event('change'));
     expect(routine.filler.recording).toBeUndefined();
     expect(routine.filler.sound).toBe('drums');
@@ -1726,15 +1730,15 @@ describe('editor committed controls', () => {
 
   it('keeps saved gains independent and applies a loudness suggestion only explicitly', async () => {
     const { routine, track, preview, input, button, session } = await setup();
-    expect(input(t('trackGain')).value).toBe('100'); expect(input(t('fillerGain')).value).toBe('100');
-    input(t('fillerGain')).value = '75'; input(t('fillerGain')).dispatchEvent(new Event('input'));
-    expect(routine.filler.gain).toBe(0.75); expect(track.gain).toBeUndefined();
+    expect(input(t('trackGain')).value).toBe(String(gainToPosition(1))); expect(input(t('fillerGain')).value).toBe(String(gainToPosition(1)));
+    input(t('fillerGain')).value = String(gainToPosition(0.75)); input(t('fillerGain')).dispatchEvent(new Event('input'));
+    expect(routine.filler.gain).toBe(sliderGain(0.75)); expect(track.gain).toBeUndefined();
     expect(preview.stop).not.toHaveBeenCalled();
     button(t('analyzeLoudness')).click();
     await vi.waitFor(() => expect(button(t('applyGain')).disabled).toBe(false));
     expect(track.gain).toBeUndefined(); expect(preview.stop).not.toHaveBeenCalled();
     button(t('applyGain')).click();
-    expect(track.gain).toBe(1.25); expect(routine.filler.gain).toBe(0.75);
+    expect(track.gain).toBe(1.25); expect(routine.filler.gain).toBe(sliderGain(0.75));
     expect(preview.stop).toHaveBeenCalledOnce(); session.dispose();
   });
 
@@ -1748,9 +1752,9 @@ describe('editor committed controls', () => {
     expect(warning.hidden).toBe(!clippingRisk);
     expect(warning.textContent).toBe(clippingRisk ? t('clippingWarning') : '');
     expect(host.querySelectorAll('.loudness-analysis')[0]!.children.some(node => node.textContent?.includes('100%'))).toBe(true);
-    expect(input(t('trackGain')).value).toBe('100');
+    expect(input(t('trackGain')).value).toBe(String(gainToPosition(1)));
     expect(track.gain).toBeUndefined();
-    input(t('trackGain')).value = '80'; input(t('trackGain')).dispatchEvent(new Event('input'));
+    input(t('trackGain')).value = String(gainToPosition(0.8)); input(t('trackGain')).dispatchEvent(new Event('input'));
     expect(warning.hidden).toBe(true); session.dispose();
   });
 
@@ -1763,11 +1767,11 @@ describe('editor committed controls', () => {
     if (reason === 'replaced') guards.current = false;
     if (reason === 'removed') routine.tracks = [];
     if (reason === 'busy') guards.busy = true;
-    if (reason === 'gain') { input(t('trackGain')).value = '50'; input(t('trackGain')).dispatchEvent(new Event('input')); }
+    if (reason === 'gain') { input(t('trackGain')).value = String(gainToPosition(0.5)); input(t('trackGain')).dispatchEvent(new Event('input')); }
     session.syncAvailability(); wait.resolve();
     await wait.promise; await Promise.resolve();
     expect(button(t('applyGain')).disabled).toBe(true);
-    expect(track.gain).toBe(reason === 'gain' ? 0.5 : undefined); session.dispose();
+    expect(track.gain).toBe(reason === 'gain' ? sliderGain(0.5) : undefined); session.dispose();
   });
 
   it('authors beep volume per routine, defaulting missing values without editing them', async () => {
@@ -1916,7 +1920,7 @@ describe('editor committed controls', () => {
     expect(sound.children).toHaveLength(1);
     expect(sound.children[0]!.tag).toBe('optgroup');
     expect(sound.querySelectorAll('option').map(option => option.textContent)).toEqual(
-      (['lofi', 'soft', 'bright', 'drums'] as const).map(sound => fillerSoundLabel({ ...routine.filler, sound })));
+      (['lofi', 'soft', 'bright', 'drums', 'silence'] as const).map(sound => fillerSoundLabel({ ...routine.filler, sound })));
     expect(routine.filler.sound).toBe('soft');
     sound.value = 'lofi';
     sound.dispatchEvent(new Event('change'));
@@ -2890,15 +2894,15 @@ describe('class panel saved references and local actions', () => {
     expect(harness.root.querySelectorAll('.playlist-track-duration').map(node => node.textContent)).toEqual(['0:30', '0:30']);
     expect(harness.root.querySelectorAll('label').some(node => node.textContent === t('bpm'))).toBe(false);
     expect(harness.button(t('existingAudio')).disabled).toBe(false);
-    const input = inputs()[0]!; input.value = '75'; input.dispatchEvent(new Event('input'));
+    const input = inputs()[0]!; input.value = String(gainToPosition(0.75)); input.dispatchEvent(new Event('input'));
     expect(harness.button(t('undoEdit')).disabled).toBe(false);
-    harness.button(t('undoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['100', '100']);
-    harness.button(t('redoEdit')).click(); expect(inputs().map(input => input.value)).toEqual(['75', '100']);
+    harness.button(t('undoEdit')).click(); expect(inputs().map(input => input.value)).toEqual([String(gainToPosition(1)), String(gainToPosition(1))]);
+    harness.button(t('redoEdit')).click(); expect(inputs().map(input => input.value)).toEqual([String(gainToPosition(0.75)), String(gainToPosition(1))]);
     mocks.saveMusicPlaylist.mockImplementation(async value => ({ ...structuredClone(value), revision: 6 }));
     harness.button(t('librarySave', { name: playlist.name, destination: t('localDestination') })).click();
     await vi.waitFor(() => expect(mocks.saveMusicPlaylist).toHaveBeenCalledOnce());
     expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks.map((entry: Track) => entry.bpm)).toEqual([undefined, 100]);
-    expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks[0]!.gain).toBe(0.75);
+    expect(mocks.saveMusicPlaylist.mock.calls[0]![0].tracks[0]!.gain).toBe(sliderGain(0.75));
     expect(routine).toEqual(original); expect(playlist.tracks[0]!.bpm).toBeUndefined(); expect(playlist.tracks[1]!.bpm).toBe(100);
     harness.panel.dispose();
   });
@@ -3131,10 +3135,10 @@ describe('UI persistence and transport wiring', () => {
     source.sequence = { crossfade: 2, walkIn: { name: 'Arrival', tracks: [{ ...source.tracks[0]!, id: 'arrival', gain: 1.4 }] } };
     records.set(source.id, structuredClone(source)); await open(); await settled();
     const slider = () => nodes.filter(node => node.className === 'before-routine-phases').at(-1)!.querySelector('.gain-control')!.querySelector('input')!;
-    slider().value = '115'; slider().dispatchEvent(new Event('input'));
-    expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(1.15);
+    slider().value = String(gainToPosition(1.15)); slider().dispatchEvent(new Event('input'));
+    expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(sliderGain(1.15));
     button(t('undoEdit')).click(); expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(1.4);
-    button(t('redoEdit')).click(); expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(1.15);
+    button(t('redoEdit')).click(); expect(currentDraft().sequence!.walkIn!.tracks[0]!.gain).toBe(sliderGain(1.15));
     expect(source.sequence.walkIn!.tracks[0]!.gain).toBe(1.4);
   });
 
@@ -3440,9 +3444,9 @@ describe('UI persistence and transport wiring', () => {
     await open(); button(t('settings')).click();
     const library = nodes.find(node => node.classList.contains('filler-library'))!;
     const items = library.querySelectorAll('.filler-builtins')[0]!.children;
-    expect(items).toHaveLength(4);
-    for (const [index, sound] of (['lofi', 'soft', 'bright', 'drums'] as const).entries()) {
-      expect(items[index]!.textContent).toBe(`${t(sound)}: ${sound === 'lofi' ? 120 : 100} BPM`);
+    expect(items).toHaveLength(5);
+    for (const [index, sound] of (['lofi', 'soft', 'bright', 'drums', 'silence'] as const).entries()) {
+      expect(items[index]!.textContent).toBe(sound === 'silence' ? `${t(sound)}: ${t('fillerBpmUnknown')}` : `${t(sound)}: ${sound === 'lofi' ? 120 : 100} BPM`);
     }
   });
 

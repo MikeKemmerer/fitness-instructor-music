@@ -2,7 +2,10 @@ import { cueSeconds, transitionAfter, validateRoutine, type Cue, type Filler, ty
 import type { CellObject, Feature, Sheet } from 'write-excel-file/browser';
 import type { UserOptions } from 'jspdf-autotable';
 import { t, validationMessage, type MessageKey } from './i18n';
+import { exportPalette, type ExportPalette } from './theme';
 import pdfFontUrl from './assets/fonts/NotoSans-Regular.ttf?url';
+
+export const defaultExportPalette: ExportPalette = exportPalette({ mode: 'light', accent: 'teal', highContrast: false, progressHeight: 64 });
 
 export interface ExportRow {
   readonly routine: Routine;
@@ -98,12 +101,16 @@ export interface ExportColumn {
   readonly value: (row: ExportRow) => ExportValue | undefined;
 }
 
+function round2(value: number | undefined): number | undefined {
+  return value === undefined || !Number.isFinite(value) ? value : Math.round(value * 100) / 100;
+}
+
 export function exportTime(seconds: number | null): string | null {
   if (seconds === null || !Number.isFinite(seconds)) return null;
-  const milliseconds = Math.round(Math.abs(seconds) * 1000);
-  const minutes = Math.floor(milliseconds / 60000);
-  const remainder = String(Math.floor(milliseconds / 1000) % 60).padStart(2, '0');
-  const fraction = milliseconds % 1000 ? `.${String(milliseconds % 1000).padStart(3, '0').replace(/0+$/, '')}` : '';
+  const centiseconds = Math.round(Math.abs(seconds) * 100);
+  const minutes = Math.floor(centiseconds / 6000);
+  const remainder = String(Math.floor(centiseconds / 100) % 60).padStart(2, '0');
+  const fraction = centiseconds % 100 ? `.${String(centiseconds % 100).padStart(2, '0').replace(/0$/, '')}` : '';
   return `${seconds < 0 ? '-' : ''}${minutes}:${remainder}${fraction}`;
 }
 
@@ -118,38 +125,38 @@ export const exportColumns: readonly ExportColumn[] = freezeTree([
   { id: 'track.index', label: 'exportTrackIndex', group: 'exportTrackFields', type: 'number', width: 12, default: true, value: row => row.trackIndex },
   { id: 'track.id', label: 'exportTrackId', group: 'exportTrackFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.track.id },
   { id: 'track.title', label: 'title', group: 'exportTrackFields', type: 'string', width: 32, default: true, value: row => row.track.title },
-  { id: 'track.duration', label: 'exportDurationSeconds', group: 'exportTrackFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => row.track.duration },
+  { id: 'track.duration', label: 'exportDurationSeconds', group: 'exportTrackFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => round2(row.track.duration) },
   { id: 'track.durationTime', label: 'exportDurationTime', group: 'exportTrackFields', type: 'string', width: 16, default: true, value: row => exportTime(row.track.duration) },
   { id: 'track.bpm', label: 'bpm', group: 'exportTrackFields', type: 'number', width: 12, default: true, value: row => row.track.bpm },
-  { id: 'track.firstBeat', label: 'firstBeat', group: 'exportTrackFields', type: 'number', width: 18, default: false, value: row => row.track.firstBeat },
+  { id: 'track.firstBeat', label: 'firstBeat', group: 'exportTrackFields', type: 'number', width: 18, default: false, value: row => round2(row.track.firstBeat) },
   { id: 'track.bodyArea', label: 'bodyArea', group: 'exportTrackFields', type: 'string', width: 24, default: true, value: row => row.track.bodyArea },
   { id: 'track.gain', label: 'trackGain', group: 'exportTrackFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => row.track.gain ?? 1 },
   { id: 'track.after.mode', label: 'exportAfter', group: 'exportTrackFields', type: 'string', width: 20, default: false, value: row => row.track.after?.mode ?? 'inherit' },
   { id: 'track.after.crossfade', label: 'exportAfterFade', group: 'exportTrackFields', type: 'number', width: 20, default: false,
-    value: row => row.track.after?.mode === 'custom' ? row.track.after.crossfade : undefined },
+    value: row => row.track.after?.mode === 'custom' ? round2(row.track.after.crossfade) : undefined },
   { id: 'track.after.filler', label: 'exportAfterFiller', group: 'exportTrackFields', type: 'string', width: 60, default: false,
     value: row => row.track.after?.mode === 'custom' ? JSON.stringify(row.track.after.filler) : undefined },
   { id: 'cue.id', label: 'exportCueId', group: 'exportCueFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.cue?.id },
   { id: 'cue.order', label: 'exportCueOrder', group: 'exportCueFields', type: 'number', width: 14, default: false, value: row => row.cueOrder },
   { id: 'cue.anchor.kind', label: 'exportAnchorKind', group: 'exportCueFields', type: 'string', width: 16, default: true, value: row => row.cue?.anchor.kind },
-  { id: 'cue.anchor.value', label: 'exportAnchorValue', group: 'exportCueFields', type: 'number', width: 20, default: true, value: row => row.cue ? row.cue.anchor.kind === 'count' ? row.cue.anchor.count : row.cue.anchor.seconds : null },
-  { id: 'cue.seconds', label: 'exportCueSeconds', group: 'exportCueFields', type: 'number', width: 20, default: false, pdfHidden: true, value: row => row.effectiveSeconds },
+  { id: 'cue.anchor.value', label: 'exportAnchorValue', group: 'exportCueFields', type: 'number', width: 20, default: true, value: row => row.cue ? row.cue.anchor.kind === 'count' ? row.cue.anchor.count : round2(row.cue.anchor.seconds) : null },
+  { id: 'cue.seconds', label: 'exportCueSeconds', group: 'exportCueFields', type: 'number', width: 20, default: false, pdfHidden: true, value: row => round2(row.effectiveSeconds ?? undefined) },
   { id: 'cue.time', label: 'exportCueTime', group: 'exportCueFields', type: 'string', width: 18, default: true, value: row => exportTime(row.effectiveSeconds) },
   { id: 'cue.note', label: 'note', group: 'exportCueFields', type: 'string', width: 60, default: true, value: row => row.cue?.note },
   { id: 'cue.beep', label: 'cueBeep', group: 'exportCueFields', type: 'boolean', width: 12, default: true, value: row => row.cue ? row.cue.beep ?? false : null },
   { id: 'filler.mode', label: 'fillerMode', group: 'exportFillerFields', type: 'string', width: 16, default: false, value: row => row.routine.filler.mode },
-  { id: 'filler.seconds', label: 'exportFillerSeconds', group: 'exportFillerFields', type: 'number', width: 16, default: false, value: row => row.routine.filler.seconds },
+  { id: 'filler.seconds', label: 'exportFillerSeconds', group: 'exportFillerFields', type: 'number', width: 16, default: false, value: row => round2(row.routine.filler.seconds) },
   { id: 'filler.bpm', label: 'exportFillerBpm', group: 'exportFillerFields', type: 'number', width: 20, default: false, value: row => row.routine.filler.bpm },
   { id: 'filler.sound', label: 'fillerSound', group: 'exportFillerFields', type: 'string', width: 28, default: false, value: row => fillerSoundName(row.routine) },
   { id: 'filler.gain', label: 'fillerGain', group: 'exportFillerFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => row.routine.filler.gain ?? 1 },
   { id: 'filler.recording.id', label: 'exportFillerId', group: 'exportFillerFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.id },
   { id: 'filler.recording.name', label: 'exportFillerName', group: 'exportFillerFields', type: 'string', width: 30, default: false, value: row => row.routine.filler.recording?.name },
-  { id: 'filler.recording.duration', label: 'exportFillerDuration', group: 'exportFillerFields', type: 'number', width: 22, default: false, value: row => row.routine.filler.recording?.duration },
+  { id: 'filler.recording.duration', label: 'exportFillerDuration', group: 'exportFillerFields', type: 'number', width: 22, default: false, value: row => round2(row.routine.filler.recording?.duration) },
   { id: 'filler.recording.asset.id', label: 'exportFillerAssetId', group: 'exportFillerFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.id },
   { id: 'filler.recording.asset.sha256', label: 'exportFillerHash', group: 'exportFillerFields', type: 'string', width: 66, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.sha256 },
   { id: 'filler.recording.asset.bytes', label: 'exportFillerBytes', group: 'exportFillerFields', type: 'number', width: 20, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.bytes },
   { id: 'filler.recording.asset.contentType', label: 'exportFillerType', group: 'exportFillerFields', type: 'string', width: 22, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.contentType },
-  { id: 'routine.crossfade', label: 'crossfade', group: 'exportFillerFields', type: 'number', width: 18, default: false, value: row => row.routine.crossfade },
+  { id: 'routine.crossfade', label: 'crossfade', group: 'exportFillerFields', type: 'number', width: 18, default: false, value: row => round2(row.routine.crossfade) },
   { id: 'routine.beepEvery', label: 'beepEvery', group: 'exportBeepFields', type: 'number', width: 22, default: false, value: row => row.routine.beepEvery },
   { id: 'routine.beepRemaining', label: 'beepRemaining', group: 'exportBeepFields', type: 'number', width: 24, default: false, value: row => row.routine.beepRemaining },
   { id: 'routine.beepOnceRemaining', label: 'beepOnceRemaining', group: 'exportBeepFields', type: 'number', width: 24, default: false, value: row => row.routine.beepOnceRemaining },
@@ -164,14 +171,14 @@ function fillerSoundName(routine: Routine): string {
 
 function sequenceFillerSummary(filler: Filler): string {
   const sound = filler.sound === 'recording' ? filler.recording?.name ?? t('customFillers') : t(filler.sound);
-  return filler.mode === 'none' ? t('exportOff') : `${filler.mode === 'hold' ? t('exportOpenEnded') : t('exportSeconds', { seconds: filler.seconds })} / ${sound}`;
+  return filler.mode === 'none' ? t('exportOff') : `${filler.mode === 'hold' ? t('exportOpenEnded') : t('exportSeconds', { seconds: round2(filler.seconds) ?? filler.seconds })} / ${sound}`;
 }
 
 function sequenceSummary(routine: Routine): string | undefined {
   if (!routine.sequence) return undefined;
   const { crossfade, before, after, walkIn, walkOut } = routine.sequence;
   const parts = [
-    `${t('crossfade')}: ${t('exportSeconds', { seconds: crossfade })}`,
+    `${t('crossfade')}: ${t('exportSeconds', { seconds: round2(crossfade) ?? crossfade })}`,
     walkIn ? `${t('phaseWalkIn')}: ${walkIn.name} (${walkIn.tracks.length})` : undefined,
     before ? `${t('phaseBefore')}: ${sequenceFillerSummary(before)}` : undefined,
     after ? `${t('phaseAfter')}: ${sequenceFillerSummary(after)}` : undefined,
@@ -216,7 +223,8 @@ export function columnValue(column: ExportColumn, row: ExportRow): ExportValue {
 
 function stringCell(value: string): CellObject { return { type: String, value, wrap: true, alignVertical: 'top' }; }
 
-export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: readonly string[]): Sheet<File | Blob | ArrayBuffer>[] {
+export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: readonly string[],
+  palette: ExportPalette = defaultExportPalette): Sheet<File | Blob | ArrayBuffer>[] {
   const columns = selectedExportColumns(selectedIds);
   if (!columns.length) throw new Error(t('exportNoColumns'));
   const selected = new Set(columns.map(column => column.id));
@@ -249,18 +257,18 @@ export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: reado
     sheet: t('exportSheet'), showGridLines: false, stickyRowsCount: 1,
     columns: columns.map(column => ({ width: column.width })),
     data: [columns.map(column => ({ ...stringCell(t(column.label)), fontWeight: 'bold',
-      backgroundColor: '#176B68', textColor: '#FFFFFF', height: 44 })),
+      backgroundColor: palette.headerFill, textColor: palette.headerText, height: 44 })),
     ...snapshot.rows.map((row, rowIndex) => columns.map(column => {
       const value = columnValue(column, row);
       const type = column.type === 'number' ? Number : column.type === 'boolean' ? Boolean : String;
       return { value: value ?? undefined, type, wrap: true, alignVertical: 'top' as const,
-        backgroundColor: row.issues.length ? '#FCE9E7' : rowIndex % 2 ? '#F0F6F5' : '#FFFFFF',
-        textColor: '#243B39' };
+        backgroundColor: row.issues.length ? '#FCE9E7' : rowIndex % 2 ? palette.stripeFill : '#FFFFFF',
+        textColor: palette.bodyText };
     }))],
   }, {
     sheet: t('exportOverview'), showGridLines: false, columns: [{ width: 42 }, { width: 65 }],
     data: overview.map(([label, value]) => [
-      { ...stringCell(label), fontWeight: 'bold', backgroundColor: '#F0F6F5' },
+      { ...stringCell(label), fontWeight: 'bold', backgroundColor: palette.stripeFill },
       typeof value === 'number' ? { type: Number, value } : stringCell(value),
     ]),
   }];
@@ -273,11 +281,11 @@ export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: reado
       sheet: t('exportWalkSheet'), showGridLines: false, stickyRowsCount: 1,
       columns: [{ width: 16 }, { width: 32 }, { width: 18 }],
       data: [[t('exportWalkPhase'), t('title'), t('exportDurationTime')].map(label => ({ ...stringCell(label),
-        fontWeight: 'bold', backgroundColor: '#176B68', textColor: '#FFFFFF', height: 44 })),
+        fontWeight: 'bold', backgroundColor: palette.headerFill, textColor: palette.headerText, height: 44 })),
       ...walkRows.map(([phase, track], rowIndex) => [
-        { ...stringCell(phase), backgroundColor: rowIndex % 2 ? '#F0F6F5' : '#FFFFFF', textColor: '#243B39' },
-        { ...stringCell(track.title), backgroundColor: rowIndex % 2 ? '#F0F6F5' : '#FFFFFF', textColor: '#243B39' },
-        { ...stringCell(exportTime(track.duration) ?? ''), backgroundColor: rowIndex % 2 ? '#F0F6F5' : '#FFFFFF', textColor: '#243B39' },
+        { ...stringCell(phase), backgroundColor: rowIndex % 2 ? palette.stripeFill : '#FFFFFF', textColor: palette.bodyText },
+        { ...stringCell(track.title), backgroundColor: rowIndex % 2 ? palette.stripeFill : '#FFFFFF', textColor: palette.bodyText },
+        { ...stringCell(exportTime(track.duration) ?? ''), backgroundColor: rowIndex % 2 ? palette.stripeFill : '#FFFFFF', textColor: palette.bodyText },
       ])],
     });
   }
@@ -352,17 +360,22 @@ export function buildPdfPacket(snapshot: ExportSnapshot, selectedIds: readonly s
     settings,
     walkIn: walkSection(snapshot.walkIn, 'exportWalkInHeading'),
     walkOut: walkSection(snapshot.walkOut, 'exportWalkOutHeading'),
-    tracks: routine.tracks.map((track, index) => ({
-      heading: [selected.has('track.index') ? String(index + 1) : '', selected.has('track.title') ? track.title : ''].filter(Boolean).join('. '),
-      details: columns.filter(column => column.group === 'exportTrackFields' && !['track.index', 'track.title'].includes(column.id))
-        .map(column => `${t(column.label)}: ${display(columnValue(column, snapshot.rows.find(row => row.trackIndex === index + 1)!))}`).join(' / '),
-      columns: cueColumns,
-      cues: snapshot.rows.filter(row => row.trackIndex === index + 1 && row.cue)
-        .map(row => cueColumns.map(column => {
-          const value = columnValue(column, row);
-          return value === null && ['cue.time', 'cue.seconds'].includes(column.id) ? t('exportNeedsReview') : display(value);
-        })),
-    })),
+    tracks: routine.tracks.map((track, index) => {
+      const title = selected.has('track.title') ? track.title : '';
+      const bodyArea = selected.has('track.bodyArea') ? track.bodyArea : '';
+      const titleLine = title && bodyArea ? `${title} (${bodyArea})` : title || bodyArea;
+      return {
+        heading: [selected.has('track.index') ? String(index + 1) : '', titleLine].filter(Boolean).join('. '),
+        details: columns.filter(column => column.group === 'exportTrackFields' && !['track.index', 'track.title', 'track.bodyArea'].includes(column.id))
+          .map(column => `${t(column.label)}: ${display(columnValue(column, snapshot.rows.find(row => row.trackIndex === index + 1)!))}`).join(' / '),
+        columns: cueColumns,
+        cues: snapshot.rows.filter(row => row.trackIndex === index + 1 && row.cue)
+          .map(row => cueColumns.map(column => {
+            const value = columnValue(column, row);
+            return value === null && ['cue.time', 'cue.seconds'].includes(column.id) ? t('exportNeedsReview') : display(value);
+          })),
+      };
+    }),
   };
 }
 
@@ -376,8 +389,9 @@ export function worksheetFilterRange(columnCount: number, rowCount: number): str
   return `A1:${columnName}${rowCount}`;
 }
 
-export async function createExcelBlob(snapshot: ExportSnapshot, selectedIds: readonly string[]): Promise<Blob> {
-  const sheets = buildWorkbookSheets(snapshot, selectedIds);
+export async function createExcelBlob(snapshot: ExportSnapshot, selectedIds: readonly string[],
+  palette: ExportPalette = defaultExportPalette): Promise<Blob> {
+  const sheets = buildWorkbookSheets(snapshot, selectedIds, palette);
   const range = worksheetFilterRange(sheets[0]!.columns!.length, sheets[0]!.data.length);
   const filters: Feature<File | Blob | ArrayBuffer> = {
     files: { transform: { 'xl/worksheets/sheet{id}.xml': {
@@ -413,13 +427,13 @@ export function assertPdfCharacters(texts: readonly string[], hasGlyph: (codePoi
   }
 }
 
-export function buildPdfTables(packet: PdfPacket): UserOptions[] {
+export function buildPdfTables(packet: PdfPacket, palette: ExportPalette = defaultExportPalette): UserOptions[] {
   const common: UserOptions = {
     margin: { top: 36, right: 36, bottom: 42, left: 36 },
     styles: { font: 'NotoSans', fontStyle: 'normal', fontSize: 9, cellPadding: 6,
-      textColor: '#243B39', overflow: 'linebreak', valign: 'top' },
-    headStyles: { font: 'NotoSans', fontStyle: 'normal', fillColor: '#176B68', textColor: '#FFFFFF' },
-    alternateRowStyles: { fillColor: '#F0F6F5' },
+      textColor: palette.bodyText, overflow: 'linebreak', valign: 'top' },
+    headStyles: { font: 'NotoSans', fontStyle: 'normal', fillColor: palette.headerFill, textColor: palette.headerText },
+    alternateRowStyles: { fillColor: palette.stripeFill },
     tableWidth: 540, pageBreak: 'auto', rowPageBreak: 'avoid', showHead: 'everyPage',
   };
   const settingsTables = packet.settings.map(section => ({
@@ -433,7 +447,7 @@ export function buildPdfTables(packet: PdfPacket): UserOptions[] {
   }];
   return [
     { ...common, theme: 'plain', body: [
-      [{ content: packet.title, styles: { fontSize: 20, textColor: '#176B68' } }],
+      [{ content: packet.title, styles: { fontSize: 20, textColor: palette.headerFill } }],
       [{ content: packet.metadata.join('\n'), styles: { fontSize: 9 } }],
     ] },
     ...settingsTables,
@@ -464,7 +478,8 @@ export function buildPdfTables(packet: PdfPacket): UserOptions[] {
   ];
 }
 
-export async function createPdfBlob(snapshot: ExportSnapshot, fontBytes?: Uint8Array, selectedIds: readonly string[] = defaultPdfColumns()): Promise<Blob> {
+export async function createPdfBlob(snapshot: ExportSnapshot, fontBytes?: Uint8Array, selectedIds: readonly string[] = defaultPdfColumns(),
+  palette: ExportPalette = defaultExportPalette): Promise<Blob> {
   const packet = buildPdfPacket(snapshot, selectedIds);
   const [{ jsPDF }, { autoTable }, bytes] = await Promise.all([
     import('jspdf'), import('jspdf-autotable'), fontBytes ? Promise.resolve(fontBytes) : loadPdfFont(),
@@ -488,7 +503,7 @@ export async function createPdfBlob(snapshot: ExportSnapshot, fontBytes?: Uint8A
   assertPdfCharacters(texts, codePoint => metadata.characterToGlyph!(codePoint) !== 0);
   document.setProperties({ title: packet.title, subject: t('exportPacket'), creator: t('appName') });
   let nextY = 36;
-  for (const table of buildPdfTables(packet)) {
+  for (const table of buildPdfTables(packet, palette)) {
     if (nextY > 630) { document.addPage(); nextY = 36; }
     autoTable(document, { ...table, startY: nextY, didDrawPage: data => {
       if (data.cursor) nextY = data.cursor.y + 18;
@@ -499,7 +514,7 @@ export async function createPdfBlob(snapshot: ExportSnapshot, fontBytes?: Uint8A
     document.setPage(page);
     document.setFont('NotoSans', 'normal');
     document.setFontSize(8);
-    document.setTextColor('#49625F');
+    document.setTextColor(palette.mutedText);
     document.text(t('exportPacket'), 36, 768);
     document.text(t('exportPage', { page, total: pages }), 576, 768, { align: 'right' });
   }
