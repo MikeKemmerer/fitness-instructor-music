@@ -2005,9 +2005,10 @@ describe('export panel controls', () => {
     expect(root.tag).toBe('details'); expect(root.open).toBe(false);
     button(t('exportExcel')).click();
     expect(actions.excel).not.toHaveBeenCalled();
-    const checkboxes = active().querySelectorAll('input').filter(input => input.type === 'checkbox');
+    const columnCheckboxes = () => active().querySelectorAll('.export-column-groups')[0]!.querySelectorAll('input').filter(input => input.type === 'checkbox');
+    const checkboxes = columnCheckboxes();
     expect(checkboxes).toHaveLength(exportColumns.length);
-    expect(active().querySelectorAll('legend')).toHaveLength(5);
+    expect(active().querySelectorAll('legend')).toHaveLength(6);
     for (const checkbox of checkboxes) {
       expect(checkbox.disabled).toBe(false);
       expect(checkbox.parentNode!.tag).toBe('label');
@@ -2031,10 +2032,11 @@ describe('export panel controls', () => {
     }));
     button(t('cancel')).click();
     button(t('exportPdf')).click();
-    expect(active().querySelectorAll('input').filter(input => input.checked)).toHaveLength(defaultPdfColumns().length);
+    expect(columnCheckboxes().filter(input => input.checked)).toHaveLength(defaultPdfColumns().length);
+    expect(active().querySelectorAll('legend')).toHaveLength(5);
     button(t('exportNone')).click(); expect(button(t('exportDownload')).disabled).toBe(true);
     button(t('cancel')).click(); button(t('exportExcel')).click();
-    expect(active().querySelectorAll('input').filter(input => input.checked)).toHaveLength(defaultExportColumns().length + 1);
+    expect(columnCheckboxes().filter(input => input.checked)).toHaveLength(defaultExportColumns().length + 1);
   });
 
   it('expires zero-column feedback without enabling Download or closing the dialog on rerender', () => {

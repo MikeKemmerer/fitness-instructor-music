@@ -340,6 +340,7 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .export-column input { flex: none; inline-size: 18px; block-size: 18px; accent-color: var(--accent); }
 .export-column span { min-inline-size: 0; overflow-wrap: anywhere; }
 .export-column-count { font-variant-numeric: tabular-nums; }
+.export-walk-options { border-block-end: 1px solid var(--border); padding-block-end: 14px; }
 .export-feedback, .export-error { font-size: .85rem; }
 .export-error, .export-feedback[role='alert'] { color: var(--error); }
 .export-feedback:empty { display: none; }

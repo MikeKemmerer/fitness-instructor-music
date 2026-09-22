@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { newRoutine, type Cue, type Routine, type Track } from '../shared/routine';
 import { assertPdfCharacters, buildPdfPacket, buildPdfTables, buildWorkbookSheets, columnValue,
-  createExportSnapshot, createPdfBlob, defaultExportColumns, exportColumns, exportFilename, exportTime,
-  selectedExportColumns, worksheetFilterRange } from '../frontend/src/exports';
+  createExportSnapshot, createPdfBlob, defaultExportColumns, defaultPdfColumns, exportColumns, exportFilename, exportTime,
+  pdfExportColumns, selectedExportColumns, worksheetFilterRange } from '../frontend/src/exports';
 import { t } from '../frontend/src/i18n';
 
 function fixture(): Routine {
@@ -31,20 +31,30 @@ function pdfText(bytes: Buffer): string {
 }
 
 describe('export registry and snapshots', () => {
-  it('exports unified phases in order with unknown BPM blank and no excluded cue leakage', () => {
+  it('keeps walk-in/walk-out separate from the numbered routine list, includes them only when requested, and never renumbers tracks', () => {
     const routine = fixture();
+    routine.tracks[0]!.bpm = undefined;
     routine.tracks[0]!.cues.push({ id: 'private-note', note: 'Excluded private move', anchor: { kind: 'timestamp', seconds: 1 } });
     routine.sequence = { crossfade: 2,
-      walkIn: { name: 'Arrival', tracks: [{ ...routine.tracks[0]!, id: 'walk-in', title: 'Arrival audio', bpm: undefined, cues: [] }] },
+      walkIn: { name: 'Arrival', tracks: [{ ...routine.tracks[0]!, id: 'walk-in', title: 'Arrival audio', cues: [] }] },
       walkOut: { name: 'Exit', tracks: [{ ...routine.tracks[0]!, id: 'walk-out', title: 'Exit audio', cues: [] }] } };
     const snapshot = createExportSnapshot(routine, false);
-    expect(snapshot.rows.map(row => row.track.id)).toEqual(['walk-in', 'first-entry', 'second-entry', 'walk-out']);
+    expect(snapshot.rows.map(row => row.track.id)).toEqual(['first-entry', 'second-entry']);
+    expect(snapshot.walkIn).toBeNull();
+    expect(snapshot.walkOut).toBeNull();
     expect(snapshot.issues).toEqual([]);
     expect(columnValue(exportColumns.find(column => column.id === 'track.bpm')!, snapshot.rows[0]!)).toBeNull();
-    const columns = ['track.phase', 'track.title', 'track.bpm', 'routine.sequence'];
-    const packet = buildPdfPacket(snapshot, columns); expect(packet.tracks.map(track => track.heading)).toEqual(['Arrival audio', 'Opening song', 'Closing song', 'Exit audio']);
+    const included = createExportSnapshot(routine, false, new Date(), { walkIn: true, walkOut: true });
+    expect(included.rows.map(row => row.trackIndex)).toEqual([1, 2]);
+    expect(included.walkIn).toEqual({ name: 'Arrival', tracks: [{ title: 'Arrival audio', duration: 90.25 }] });
+    expect(included.walkOut).toEqual({ name: 'Exit', tracks: [{ title: 'Exit audio', duration: 90.25 }] });
+    const columns = ['track.title', 'track.bpm', 'routine.sequence'];
+    const packet = buildPdfPacket(included, columns);
+    expect(packet.tracks.map(track => track.heading)).toEqual(['Opening song', 'Closing song']);
+    expect(packet.walkIn).toEqual({ heading: `${t('exportWalkInHeading')}: Arrival`, rows: [['Arrival audio', '1:30.25']] });
+    expect(packet.walkOut).toEqual({ heading: `${t('exportWalkOutHeading')}: Exit`, rows: [['Exit audio', '1:30.25']] });
     expect(JSON.stringify(packet)).not.toContain('Excluded private move');
-    expect(JSON.stringify(buildWorkbookSheets(snapshot, columns))).not.toContain('Excluded private move');
+    expect(JSON.stringify(buildWorkbookSheets(included, columns))).not.toContain('Excluded private move');
   });
   it('retains only selected routine settings for a draft without tracks', () => {
     const routine = fixture();
@@ -78,16 +88,15 @@ describe('export registry and snapshots', () => {
   }, 30000);
   it('covers every current scalar schema field and stable derived order without invented song metadata', () => {
     expect(allIds()).toEqual([
-      'track.phase', 'routine.sequence',
+      'routine.sequence',
       'routine.id', 'routine.name', 'routine.revision', 'routine.schemaVersion', 'routine.locked', 'routine.published',
       'track.index', 'track.id', 'track.title', 'track.duration', 'track.durationTime', 'track.bpm', 'track.firstBeat', 'track.bodyArea', 'track.gain',
       'track.after.mode', 'track.after.crossfade', 'track.after.filler',
       'cue.id', 'cue.order', 'cue.anchor.kind', 'cue.anchor.value', 'cue.seconds', 'cue.time', 'cue.note', 'cue.beep',
       'filler.mode', 'filler.seconds', 'filler.bpm', 'filler.sound', 'filler.gain',
       'filler.recording.id', 'filler.recording.name', 'filler.recording.duration', 'filler.recording.asset.id',
-      'filler.recording.asset.sha256', 'filler.recording.asset.bytes', 'filler.recording.asset.contentType',
-      'routine.crossfade', 'routine.beepEvery',
-      'routine.beepRemaining', 'routine.beepOnceRemaining', 'routine.beepVolume', 'row.status',
+      'filler.recording.asset.sha256', 'filler.recording.asset.bytes', 'filler.recording.asset.contentType', 'routine.crossfade',
+      'routine.beepEvery', 'routine.beepRemaining', 'routine.beepOnceRemaining', 'routine.beepVolume', 'row.status',
     ]);
     expect(new Set(allIds()).size).toBe(exportColumns.length);
     for (const column of exportColumns) {
@@ -96,6 +105,14 @@ describe('export registry and snapshots', () => {
       expect(['string', 'number', 'boolean']).toContain(column.type);
     }
     expect(defaultExportColumns()).toContain('row.status');
+    expect(pdfExportColumns().map(column => column.id)).not.toContain('row.status');
+    expect(pdfExportColumns().map(column => column.id)).toEqual(defaultPdfColumns());
+    for (const hidden of ['routine.id', 'routine.schemaVersion', 'track.id', 'track.duration', 'track.gain', 'cue.id', 'cue.seconds',
+      'filler.gain', 'filler.recording.id', 'filler.recording.asset.id', 'filler.recording.asset.sha256',
+      'filler.recording.asset.bytes', 'filler.recording.asset.contentType']) {
+      expect(pdfExportColumns().map(column => column.id)).not.toContain(hidden);
+      expect(defaultExportColumns()).not.toContain(hidden);
+    }
     expect(Object.isFrozen(exportColumns)).toBe(true);
   });
 
@@ -118,8 +135,9 @@ describe('export registry and snapshots', () => {
       expect(JSON.stringify(buildPdfPacket(snapshot, ['cue.note']))).not.toContain(value);
     }
     if (tracks) expect(sheets[0]!.data[1]![0]).toMatchObject({ type: String, value: '=Private filler' });
-    expect(packet.settings).toContainEqual([t('exportFillerDuration'), '8']);
-    expect(packet.settings).toContainEqual([t('exportFillerBytes'), '128']);
+    const settingsRows = packet.settings.flatMap(section => section.rows);
+    expect(settingsRows).toContainEqual([t('exportFillerDuration'), '8']);
+    expect(settingsRows).toContainEqual([t('exportFillerBytes'), '128']);
   });
 
   it('exports per-gap rules only when selected and ignores a dormant final hold in duration status', () => {
@@ -318,7 +336,7 @@ describe('PDF packet layout data', () => {
       cues: [{ id: `cue-${index}`, note: `Complete note ${index}: ${'Long instruction. '.repeat(20)}`,
         anchor: { kind: 'timestamp' as const, seconds: 65.5 }, beep: true }] }));
     const packet = buildPdfPacket(createExportSnapshot(routine, false), allIds());
-    const tables = buildPdfTables(packet).slice(2);
+    const tables = buildPdfTables(packet).slice(1 + packet.settings.length);
     expect(tables).toHaveLength(8);
     for (const table of tables) {
       expect(table.horizontalPageBreak).toBe(false);
@@ -351,24 +369,25 @@ describe('PDF packet layout data', () => {
     const packet = buildPdfPacket(createExportSnapshot(routine, true, exportedAt));
     expect(packet.tracks).toHaveLength(2);
     expect(packet.tracks[0]!.heading).toContain(longTitle);
-    expect(packet.tracks[0]!.cues[0]![3]).toContain(longNote);
-    expect(packet.tracks[0]!.cues[0]!.slice(0, 3)).toEqual(['count', '5', '0:04']);
-    expect(packet.tracks[0]!.cues[0]![4]).toBe(t('exportYes'));
-    expect(packet.tracks[0]!.cues[1]![3]).toBe('Last move');
+    expect(packet.tracks[0]!.cues[0]![4]).toContain(longNote);
+    expect(packet.tracks[0]!.cues[0]!.slice(1, 4)).toEqual(['count', '5', '0:04']);
+    expect(packet.tracks[0]!.cues[0]![5]).toBe(t('exportYes'));
+    expect(packet.tracks[0]!.cues[1]![4]).toBe('Last move');
     expect(packet.tracks[1]!.cues).toHaveLength(0);
     expect(packet.metadata).toContain(t('exportUnsaved'));
     expect(packet.metadata).toContain(exportedAt.toISOString());
     const tables = buildPdfTables(packet);
-    expect(tables).toHaveLength(4);
+    expect(tables).toHaveLength(1 + packet.settings.length + 2);
     for (const table of tables) {
       expect(table.tableWidth).toBe(540);
       expect(table.styles?.overflow).toBe('linebreak');
       expect(table.rowPageBreak).toBe('avoid');
       expect(table.showHead).toBe('everyPage');
     }
-    expect(tables[2]!.head).toHaveLength(2);
-    expect(tables[2]!.body).toHaveLength(2);
-    expect(tables[3]!.body).toEqual([[{ content: t('emptyCues'), colSpan: 6 }]]);
+    const trackTables = tables.slice(1 + packet.settings.length);
+    expect(trackTables[0]!.head).toHaveLength(2);
+    expect(trackTables[0]!.body).toHaveLength(2);
+    expect(trackTables[1]!.body).toEqual([[{ content: t('emptyCues'), colSpan: 6 }]]);
   });
 
   it('includes locks, publication and all sound settings without presenting recorded BPM as adjustable', () => {
@@ -378,24 +397,29 @@ describe('PDF packet layout data', () => {
     routine.filler.sound = 'lofi';
     routine.beepOnceRemaining = 35;
     const packet = buildPdfPacket(createExportSnapshot(routine, false));
-    expect(packet.settings).toContainEqual([t('exportLocked'), t('exportYes')]);
-    expect(packet.settings).toContainEqual([t('exportPublishedColumn'), t('exportYes')]);
+    const settingsRows = packet.settings.flatMap(section => section.rows);
+    expect(settingsRows).toContainEqual([t('exportLocked'), t('exportYes')]);
+    expect(settingsRows).toContainEqual([t('exportPublishedColumn'), t('exportYes')]);
     expect(packet.metadata).toContain(t('exportSaved'));
-    expect(packet.settings).toContainEqual([t('fillerSound'), t('lofi')]);
-    expect(packet.settings).toContainEqual([t('exportFillerBpm'), '100']);
+    expect(settingsRows).toContainEqual([t('fillerSound'), t('lofi')]);
+    expect(settingsRows).toContainEqual([t('exportFillerBpm'), '100']);
     expect(t('exportFillerBpm')).toContain('synthetic only');
-    expect(packet.settings).toContainEqual([t('beepOnceRemaining'), '35']);
-    expect(packet.settings).toContainEqual([t('exportHoldDuration'), t('exportOpenEnded')]);
+    expect(settingsRows).toContainEqual([t('beepOnceRemaining'), '35']);
+    expect(settingsRows).toContainEqual([t('exportHoldDuration'), t('exportOpenEnded')]);
+    expect(packet.settings.find(section => section.heading === t('exportRoutineFields'))).toBeDefined();
+    expect(packet.settings.find(section => section.heading === t('exportFillerFields'))).toBeDefined();
+    expect(packet.settings.find(section => section.heading === t('exportBeepFields'))).toBeDefined();
   });
 
-  it('keeps invalid cue notes visible with a review flag', () => {
+  it('keeps invalid cue notes visible with a review flag but no longer surfaces the validation column in PDF', () => {
     const routine = fixture();
     routine.tracks[0]!.cues = [{ id: 'bad', anchor: { kind: 'timestamp', seconds: Number.NaN }, note: 'Unfinished cue' }];
     const packet = buildPdfPacket(createExportSnapshot(routine, true));
     expect(packet.tracks[0]!.cues).toHaveLength(1);
-    expect(packet.tracks[0]!.cues[0]![2]).toBe(t('exportNeedsReview'));
-    expect(packet.tracks[0]!.cues[0]![3]).toContain('Unfinished cue');
-    expect(packet.tracks[0]!.cues[0]![5]).toContain(t('outsideTrack'));
+    expect(packet.tracks[0]!.cues[0]![3]).toBe(t('exportNeedsReview'));
+    expect(packet.tracks[0]!.cues[0]![4]).toContain('Unfinished cue');
+    expect(packet.tracks[0]!.columns.map(column => column.id)).not.toContain('row.status');
+    expect(JSON.stringify(packet)).not.toContain(t('outsideTrack'));
   });
 
   it('excludes deselected notes, body areas, names, IDs and settings from headings, tables and actual PDF text', async () => {
@@ -427,7 +451,7 @@ describe('PDF packet layout data', () => {
     const workbook = buildWorkbookSheets(snapshot, columns);
     expect(workbook[0]!.data[1]).toEqual([expect.objectContaining({ type: Number, value: 1.25 }), expect.objectContaining({ type: Number, value: 0.75 })]);
     const packet = buildPdfPacket(snapshot, columns);
-    expect(packet.settings).toEqual([[t('fillerGain'), '0.75']]);
+    expect(packet.settings).toEqual([{ heading: t('exportFillerFields'), rows: [[t('fillerGain'), '0.75']] }]);
     expect(packet.tracks[0]!.details).toContain('1.25');
     const font = readFileSync(new URL('../frontend/src/assets/fonts/NotoSans-Regular.ttf', import.meta.url));
     await expect(createPdfBlob(snapshot, font, columns)).resolves.toBeInstanceOf(Blob);

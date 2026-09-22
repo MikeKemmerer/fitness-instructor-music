@@ -1,7 +1,7 @@
 import { CheckCheck, Download, FileText, RotateCcw, Share2, Sheet, Square, X } from 'lucide';
 import type { Routine } from '../../shared/routine';
 import { createExcelBlob, createExportSnapshot, createPdfBlob, defaultExportColumns, defaultPdfColumns, downloadExport,
-  exportColumns, exportFilename, type ExportSnapshot } from './exports';
+  exportColumns, exportFilename, pdfExportColumns, type ExportSnapshot } from './exports';
 import { errorMessage, t } from './i18n';
 import { element, field, iconButton, setButtonIcon, transientText } from './ui';
 
@@ -37,6 +37,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
   });
   for (const format of ['xlsx', 'pdf'] as const) {
     const label = t(format === 'xlsx' ? 'exportExcel' : 'exportPdf');
+    const availableColumns = format === 'xlsx' ? exportColumns : pdfExportColumns();
     const defaults = () => format === 'xlsx' ? defaultExportColumns() : defaultPdfColumns();
     const selected = new Set(defaults());
     const choices = new Map<string, HTMLInputElement>();
@@ -54,6 +55,12 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     noColumns.setAttribute('role', 'status');
     const count = element('output', 'muted export-column-count');
     const groups = element('div', 'export-column-groups');
+    const walkInBox = element('input'); walkInBox.type = 'checkbox'; walkInBox.checked = true;
+    const walkOutBox = element('input'); walkOutBox.type = 'checkbox'; walkOutBox.checked = true;
+    const walkChoices = element('div', 'action-row export-walk-options');
+    const walkInLabel = element('label', 'export-column'); walkInLabel.append(walkInBox, element('span', '', t('exportIncludeWalkIn')));
+    const walkOutLabel = element('label', 'export-column'); walkOutLabel.append(walkOutBox, element('span', '', t('exportIncludeWalkOut')));
+    walkChoices.append(walkInLabel, walkOutLabel);
     let pending = false;
     let generation = 0;
     const close = (restoreFocus = true) => {
@@ -68,15 +75,15 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
       for (const [id, checkbox] of choices) checkbox.checked = selected.has(id);
       sync();
     };
-    const all = iconButton(t('exportAll'), CheckCheck, () => select(exportColumns.map(column => column.id)), true);
+    const all = iconButton(t('exportAll'), CheckCheck, () => select(availableColumns.map(column => column.id)), true);
     const none = iconButton(t('exportNone'), Square, () => select([]), true);
     const reset = iconButton(t('exportDefaults'), RotateCcw, () => select(defaults()), true);
     const selectionActions = element('div', 'action-row');
     selectionActions.append(all, none, reset);
-    for (const group of new Set(exportColumns.map(column => column.group))) {
+    for (const group of new Set(availableColumns.map(column => column.group))) {
       const fields = element('fieldset', 'export-column-group');
       fields.append(element('legend', '', t(group)));
-      for (const column of exportColumns.filter(item => item.group === group)) {
+      for (const column of availableColumns.filter(item => item.group === group)) {
         const checkbox = element('input');
         checkbox.type = 'checkbox'; checkbox.checked = selected.has(column.id); checkbox.name = column.id;
         checkbox.addEventListener('change', () => {
@@ -97,7 +104,8 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
       pending = true; errors.show(t('exportWorking'), false); feedback.setAttribute('role', 'status'); sync();
       cancel.focus({ preventScroll: true });
       try {
-        const snapshot = createExportSnapshot(state.routine, state.unsaved);
+        const snapshot = createExportSnapshot(state.routine, state.unsaved, new Date(),
+          { walkIn: walkInBox.checked, walkOut: walkOutBox.checked });
         const name = exportFilename(filename.value, format);
         const fields = [...selected];
         const blob = await (format === 'xlsx' ? actions.excel(snapshot, fields) : actions.pdf(snapshot, fields));
@@ -121,21 +129,21 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
       command.disabled = disposed || readState().busy || pending;
       download.disabled = disposed || readState().busy || pending || selected.size === 0;
       download.setAttribute('aria-busy', String(pending));
-      for (const control of [filename, all, none, reset, ...choices.values()]) control.disabled = pending;
+      for (const control of [filename, all, none, reset, walkInBox, walkOutBox, ...choices.values()]) control.disabled = pending;
       columnErrors.refresh(selected.size === 0 ? t('exportNoColumns') : '');
-      count.textContent = t('exportSelection', { selected: selected.size, total: exportColumns.length });
+      count.textContent = t('exportSelection', { selected: selected.size, total: availableColumns.length });
     };
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     dialog.addEventListener('keydown', event => {
       if (event.key === 'Escape') { event.preventDefault(); close(); return; }
       if (event.key !== 'Tab') return;
-      const controls = [filename, all, none, reset, ...choices.values(), cancel, download].filter(control => !control.disabled);
+      const controls = [filename, all, none, reset, walkInBox, walkOutBox, ...choices.values(), cancel, download].filter(control => !control.disabled);
       const index = controls.findIndex(control => control === document.activeElement);
       if (index < 0 || (event.shiftKey ? index === 0 : index === controls.length - 1)) {
         event.preventDefault(); controls[event.shiftKey ? controls.length - 1 : 0]?.focus();
       }
     });
-    dialog.append(heading, field(t('exportFilename'), filename), selectionActions, groups, count, noColumns, feedback, commands);
+    dialog.append(heading, field(t('exportFilename'), filename), walkChoices, selectionActions, groups, count, noColumns, feedback, commands);
     downloads.append(command); root.append(dialog); refreshers.push(sync);
     cancelers.push(() => { close(false); errors.dispose(); columnErrors.dispose(); });
   }

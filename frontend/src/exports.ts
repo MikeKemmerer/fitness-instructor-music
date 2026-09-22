@@ -1,4 +1,4 @@
-import { allRoutineTracks, cueSeconds, transitionAfter, validateRoutine, type Cue, type Routine, type Track } from '../../shared/routine';
+import { cueSeconds, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
 import type { CellObject, Feature, Sheet } from 'write-excel-file/browser';
 import type { UserOptions } from 'jspdf-autotable';
 import { t, validationMessage, type MessageKey } from './i18n';
@@ -14,12 +14,29 @@ export interface ExportRow {
   readonly issues: readonly string[];
 }
 
+export interface ExportWalkTrack {
+  readonly title: string;
+  readonly duration: number;
+}
+
+export interface ExportWalkSection {
+  readonly name: string | undefined;
+  readonly tracks: readonly ExportWalkTrack[];
+}
+
 export interface ExportSnapshot {
   readonly routine: Routine;
   readonly unsaved: boolean;
   readonly exportedAt: string;
   readonly rows: readonly ExportRow[];
   readonly issues: readonly string[];
+  readonly walkIn: ExportWalkSection | null;
+  readonly walkOut: ExportWalkSection | null;
+}
+
+export interface ExportInclude {
+  readonly walkIn?: boolean;
+  readonly walkOut?: boolean;
 }
 
 function freezeTree<Value>(value: Value): Value {
@@ -30,12 +47,12 @@ function freezeTree<Value>(value: Value): Value {
   return value;
 }
 
-export function createExportSnapshot(routine: Routine, unsaved: boolean, now = new Date()): ExportSnapshot {
+export function createExportSnapshot(routine: Routine, unsaved: boolean, now = new Date(), include: ExportInclude = {}): ExportSnapshot {
   const copy = structuredClone(routine);
   const rows: ExportRow[] = [];
   const issues = validateRoutine(copy);
   const trackIds = new Set<string>();
-  allRoutineTracks(copy).forEach((track, trackIndex) => {
+  copy.tracks.forEach((track, trackIndex) => {
     const trackIssues = validateRoutine({ ...copy, sequence: undefined, tracks: [{ ...track, cues: [] }] });
     if (trackIds.has(track.id)) trackIssues.push('Track entry IDs must be unique');
     trackIds.add(track.id);
@@ -62,7 +79,11 @@ export function createExportSnapshot(routine: Routine, unsaved: boolean, now = n
     cues.forEach((item, cueIndex) => rows.push({ routine: copy, track, trackIndex: trackIndex + 1,
       cue: item.cue, cueOrder: cueIndex + 1, effectiveSeconds: item.seconds, issues: item.issues }));
   });
-  return freezeTree({ routine: copy, unsaved, exportedAt: now.toISOString(), rows, issues });
+  const walkSection = (playlist: { name: string; tracks: Track[] } | undefined): ExportWalkSection | null =>
+    playlist && playlist.tracks.length ? { name: playlist.name, tracks: playlist.tracks.map(track => ({ title: track.title, duration: track.duration })) } : null;
+  const walkIn = include.walkIn ? walkSection(copy.sequence?.walkIn) : null;
+  const walkOut = include.walkOut ? walkSection(copy.sequence?.walkOut) : null;
+  return freezeTree({ routine: copy, unsaved, exportedAt: now.toISOString(), rows, issues, walkIn, walkOut });
 }
 
 export type ExportValue = string | number | boolean | null;
@@ -73,6 +94,7 @@ export interface ExportColumn {
   readonly type: 'string' | 'number' | 'boolean';
   readonly width: number;
   readonly default: boolean;
+  readonly pdfHidden?: boolean;
   readonly value: (row: ExportRow) => ExportValue | undefined;
 }
 
@@ -86,55 +108,53 @@ export function exportTime(seconds: number | null): string | null {
 }
 
 export const exportColumns: readonly ExportColumn[] = freezeTree([
-  { id: 'track.phase', label: 'classSequence', group: 'exportTrackFields', type: 'string', width: 20, default: true,
-    value: row => t(row.routine.sequence?.walkIn?.tracks.some(track => track.id === row.track.id) ? 'phaseWalkIn' : row.routine.sequence?.walkOut?.tracks.some(track => track.id === row.track.id) ? 'phaseWalkOut' : 'phaseRoutine') },
   { id: 'routine.sequence', label: 'classSequence', group: 'exportRoutineFields', type: 'string', width: 60, default: false, value: row => sequenceSummary(row.routine) },
-  { id: 'routine.id', label: 'exportRoutineId', group: 'exportRoutineFields', type: 'string', width: 38, default: false, value: row => row.routine.id },
+  { id: 'routine.id', label: 'exportRoutineId', group: 'exportRoutineFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.routine.id },
   { id: 'routine.name', label: 'routineName', group: 'exportRoutineFields', type: 'string', width: 30, default: false, value: row => row.routine.name },
   { id: 'routine.revision', label: 'exportRevision', group: 'exportRoutineFields', type: 'number', width: 14, default: false, value: row => row.routine.revision },
-  { id: 'routine.schemaVersion', label: 'exportSchema', group: 'exportRoutineFields', type: 'number', width: 14, default: false, value: row => row.routine.schemaVersion },
+  { id: 'routine.schemaVersion', label: 'exportSchema', group: 'exportRoutineFields', type: 'number', width: 14, default: false, pdfHidden: true, value: row => row.routine.schemaVersion },
   { id: 'routine.locked', label: 'exportLocked', group: 'exportRoutineFields', type: 'boolean', width: 14, default: false, value: row => row.routine.locked },
   { id: 'routine.published', label: 'exportPublishedColumn', group: 'exportRoutineFields', type: 'boolean', width: 14, default: false, value: row => row.routine.published },
   { id: 'track.index', label: 'exportTrackIndex', group: 'exportTrackFields', type: 'number', width: 12, default: true, value: row => row.trackIndex },
-  { id: 'track.id', label: 'exportTrackId', group: 'exportTrackFields', type: 'string', width: 38, default: false, value: row => row.track.id },
+  { id: 'track.id', label: 'exportTrackId', group: 'exportTrackFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.track.id },
   { id: 'track.title', label: 'title', group: 'exportTrackFields', type: 'string', width: 32, default: true, value: row => row.track.title },
-  { id: 'track.duration', label: 'exportDurationSeconds', group: 'exportTrackFields', type: 'number', width: 18, default: false, value: row => row.track.duration },
+  { id: 'track.duration', label: 'exportDurationSeconds', group: 'exportTrackFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => row.track.duration },
   { id: 'track.durationTime', label: 'exportDurationTime', group: 'exportTrackFields', type: 'string', width: 16, default: true, value: row => exportTime(row.track.duration) },
   { id: 'track.bpm', label: 'bpm', group: 'exportTrackFields', type: 'number', width: 12, default: true, value: row => row.track.bpm },
   { id: 'track.firstBeat', label: 'firstBeat', group: 'exportTrackFields', type: 'number', width: 18, default: false, value: row => row.track.firstBeat },
   { id: 'track.bodyArea', label: 'bodyArea', group: 'exportTrackFields', type: 'string', width: 24, default: true, value: row => row.track.bodyArea },
-  { id: 'track.gain', label: 'trackGain', group: 'exportTrackFields', type: 'number', width: 18, default: false, value: row => row.track.gain ?? 1 },
+  { id: 'track.gain', label: 'trackGain', group: 'exportTrackFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => row.track.gain ?? 1 },
   { id: 'track.after.mode', label: 'exportAfter', group: 'exportTrackFields', type: 'string', width: 20, default: false, value: row => row.track.after?.mode ?? 'inherit' },
   { id: 'track.after.crossfade', label: 'exportAfterFade', group: 'exportTrackFields', type: 'number', width: 20, default: false,
     value: row => row.track.after?.mode === 'custom' ? row.track.after.crossfade : undefined },
   { id: 'track.after.filler', label: 'exportAfterFiller', group: 'exportTrackFields', type: 'string', width: 60, default: false,
     value: row => row.track.after?.mode === 'custom' ? JSON.stringify(row.track.after.filler) : undefined },
-  { id: 'cue.id', label: 'exportCueId', group: 'exportCueFields', type: 'string', width: 38, default: false, value: row => row.cue?.id },
+  { id: 'cue.id', label: 'exportCueId', group: 'exportCueFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.cue?.id },
   { id: 'cue.order', label: 'exportCueOrder', group: 'exportCueFields', type: 'number', width: 14, default: false, value: row => row.cueOrder },
   { id: 'cue.anchor.kind', label: 'exportAnchorKind', group: 'exportCueFields', type: 'string', width: 16, default: true, value: row => row.cue?.anchor.kind },
   { id: 'cue.anchor.value', label: 'exportAnchorValue', group: 'exportCueFields', type: 'number', width: 20, default: true, value: row => row.cue ? row.cue.anchor.kind === 'count' ? row.cue.anchor.count : row.cue.anchor.seconds : null },
-  { id: 'cue.seconds', label: 'exportCueSeconds', group: 'exportCueFields', type: 'number', width: 20, default: false, value: row => row.effectiveSeconds },
+  { id: 'cue.seconds', label: 'exportCueSeconds', group: 'exportCueFields', type: 'number', width: 20, default: false, pdfHidden: true, value: row => row.effectiveSeconds },
   { id: 'cue.time', label: 'exportCueTime', group: 'exportCueFields', type: 'string', width: 18, default: true, value: row => exportTime(row.effectiveSeconds) },
   { id: 'cue.note', label: 'note', group: 'exportCueFields', type: 'string', width: 60, default: true, value: row => row.cue?.note },
   { id: 'cue.beep', label: 'cueBeep', group: 'exportCueFields', type: 'boolean', width: 12, default: true, value: row => row.cue ? row.cue.beep ?? false : null },
-  { id: 'filler.mode', label: 'fillerMode', group: 'exportSoundFields', type: 'string', width: 16, default: false, value: row => row.routine.filler.mode },
-  { id: 'filler.seconds', label: 'exportFillerSeconds', group: 'exportSoundFields', type: 'number', width: 16, default: false, value: row => row.routine.filler.seconds },
-  { id: 'filler.bpm', label: 'exportFillerBpm', group: 'exportSoundFields', type: 'number', width: 20, default: false, value: row => row.routine.filler.bpm },
-  { id: 'filler.sound', label: 'fillerSound', group: 'exportSoundFields', type: 'string', width: 28, default: false, value: row => fillerSoundName(row.routine) },
-  { id: 'filler.gain', label: 'fillerGain', group: 'exportSoundFields', type: 'number', width: 18, default: false, value: row => row.routine.filler.gain ?? 1 },
-  { id: 'filler.recording.id', label: 'exportFillerId', group: 'exportSoundFields', type: 'string', width: 38, default: false, value: row => row.routine.filler.recording?.id },
-  { id: 'filler.recording.name', label: 'exportFillerName', group: 'exportSoundFields', type: 'string', width: 30, default: false, value: row => row.routine.filler.recording?.name },
-  { id: 'filler.recording.duration', label: 'exportFillerDuration', group: 'exportSoundFields', type: 'number', width: 22, default: false, value: row => row.routine.filler.recording?.duration },
-  { id: 'filler.recording.asset.id', label: 'exportFillerAssetId', group: 'exportSoundFields', type: 'string', width: 38, default: false, value: row => row.routine.filler.recording?.asset.id },
-  { id: 'filler.recording.asset.sha256', label: 'exportFillerHash', group: 'exportSoundFields', type: 'string', width: 66, default: false, value: row => row.routine.filler.recording?.asset.sha256 },
-  { id: 'filler.recording.asset.bytes', label: 'exportFillerBytes', group: 'exportSoundFields', type: 'number', width: 20, default: false, value: row => row.routine.filler.recording?.asset.bytes },
-  { id: 'filler.recording.asset.contentType', label: 'exportFillerType', group: 'exportSoundFields', type: 'string', width: 22, default: false, value: row => row.routine.filler.recording?.asset.contentType },
-  { id: 'routine.crossfade', label: 'crossfade', group: 'exportSoundFields', type: 'number', width: 18, default: false, value: row => row.routine.crossfade },
-  { id: 'routine.beepEvery', label: 'beepEvery', group: 'exportSoundFields', type: 'number', width: 22, default: false, value: row => row.routine.beepEvery },
-  { id: 'routine.beepRemaining', label: 'beepRemaining', group: 'exportSoundFields', type: 'number', width: 24, default: false, value: row => row.routine.beepRemaining },
-  { id: 'routine.beepOnceRemaining', label: 'beepOnceRemaining', group: 'exportSoundFields', type: 'number', width: 24, default: false, value: row => row.routine.beepOnceRemaining },
-  { id: 'routine.beepVolume', label: 'beepVolume', group: 'exportSoundFields', type: 'number', width: 20, default: false, value: row => row.routine.beepVolume },
-  { id: 'row.status', label: 'exportRowStatus', group: 'exportValidationFields', type: 'string', width: 40, default: true, value: row => row.issues.length ? row.issues.map(validationMessage).join('\n') : t('exportValid') },
+  { id: 'filler.mode', label: 'fillerMode', group: 'exportFillerFields', type: 'string', width: 16, default: false, value: row => row.routine.filler.mode },
+  { id: 'filler.seconds', label: 'exportFillerSeconds', group: 'exportFillerFields', type: 'number', width: 16, default: false, value: row => row.routine.filler.seconds },
+  { id: 'filler.bpm', label: 'exportFillerBpm', group: 'exportFillerFields', type: 'number', width: 20, default: false, value: row => row.routine.filler.bpm },
+  { id: 'filler.sound', label: 'fillerSound', group: 'exportFillerFields', type: 'string', width: 28, default: false, value: row => fillerSoundName(row.routine) },
+  { id: 'filler.gain', label: 'fillerGain', group: 'exportFillerFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => row.routine.filler.gain ?? 1 },
+  { id: 'filler.recording.id', label: 'exportFillerId', group: 'exportFillerFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.id },
+  { id: 'filler.recording.name', label: 'exportFillerName', group: 'exportFillerFields', type: 'string', width: 30, default: false, value: row => row.routine.filler.recording?.name },
+  { id: 'filler.recording.duration', label: 'exportFillerDuration', group: 'exportFillerFields', type: 'number', width: 22, default: false, value: row => row.routine.filler.recording?.duration },
+  { id: 'filler.recording.asset.id', label: 'exportFillerAssetId', group: 'exportFillerFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.id },
+  { id: 'filler.recording.asset.sha256', label: 'exportFillerHash', group: 'exportFillerFields', type: 'string', width: 66, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.sha256 },
+  { id: 'filler.recording.asset.bytes', label: 'exportFillerBytes', group: 'exportFillerFields', type: 'number', width: 20, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.bytes },
+  { id: 'filler.recording.asset.contentType', label: 'exportFillerType', group: 'exportFillerFields', type: 'string', width: 22, default: false, pdfHidden: true, value: row => row.routine.filler.recording?.asset.contentType },
+  { id: 'routine.crossfade', label: 'crossfade', group: 'exportFillerFields', type: 'number', width: 18, default: false, value: row => row.routine.crossfade },
+  { id: 'routine.beepEvery', label: 'beepEvery', group: 'exportBeepFields', type: 'number', width: 22, default: false, value: row => row.routine.beepEvery },
+  { id: 'routine.beepRemaining', label: 'beepRemaining', group: 'exportBeepFields', type: 'number', width: 24, default: false, value: row => row.routine.beepRemaining },
+  { id: 'routine.beepOnceRemaining', label: 'beepOnceRemaining', group: 'exportBeepFields', type: 'number', width: 24, default: false, value: row => row.routine.beepOnceRemaining },
+  { id: 'routine.beepVolume', label: 'beepVolume', group: 'exportBeepFields', type: 'number', width: 20, default: false, value: row => row.routine.beepVolume },
+  { id: 'row.status', label: 'exportRowStatus', group: 'exportValidationFields', type: 'string', width: 40, default: true, pdfHidden: true, value: row => row.issues.length ? row.issues.map(validationMessage).join('\n') : t('exportValid') },
 ]);
 
 function fillerSoundName(routine: Routine): string {
@@ -142,11 +162,22 @@ function fillerSoundName(routine: Routine): string {
   return sound === 'recording' ? routine.filler.recording?.name ?? t('customFillers') : t(sound);
 }
 
+function sequenceFillerSummary(filler: Filler): string {
+  const sound = filler.sound === 'recording' ? filler.recording?.name ?? t('customFillers') : t(filler.sound);
+  return filler.mode === 'none' ? t('exportOff') : `${filler.mode === 'hold' ? t('exportOpenEnded') : t('exportSeconds', { seconds: filler.seconds })} / ${sound}`;
+}
+
 function sequenceSummary(routine: Routine): string | undefined {
   if (!routine.sequence) return undefined;
   const { crossfade, before, after, walkIn, walkOut } = routine.sequence;
-  return JSON.stringify({ crossfade, before, after, walkIn: walkIn ? { name: walkIn.name, source: walkIn.source } : undefined,
-    walkOut: walkOut ? { name: walkOut.name, source: walkOut.source } : undefined });
+  const parts = [
+    `${t('crossfade')}: ${t('exportSeconds', { seconds: crossfade })}`,
+    walkIn ? `${t('phaseWalkIn')}: ${walkIn.name} (${walkIn.tracks.length})` : undefined,
+    before ? `${t('phaseBefore')}: ${sequenceFillerSummary(before)}` : undefined,
+    after ? `${t('phaseAfter')}: ${sequenceFillerSummary(after)}` : undefined,
+    walkOut ? `${t('phaseWalkOut')}: ${walkOut.name} (${walkOut.tracks.length})` : undefined,
+  ].filter((part): part is string => part !== undefined);
+  return parts.join(' \u2022 ');
 }
 
 function routineColumnValue(routine: Routine, column: ExportColumn): ExportValue | undefined {
@@ -169,9 +200,12 @@ export function defaultExportColumns(): string[] {
   return exportColumns.filter(column => column.default).map(column => column.id);
 }
 
+export function pdfExportColumns(): readonly ExportColumn[] {
+  return exportColumns.filter(column => !column.pdfHidden);
+}
+
 export function defaultPdfColumns(): string[] {
-  return exportColumns.filter(column => !['routine.id', 'track.id', 'cue.id', 'cue.order', 'cue.seconds',
-    'track.duration'].includes(column.id)).map(column => column.id);
+  return pdfExportColumns().map(column => column.id);
 }
 
 export function columnValue(column: ExportColumn, row: ExportRow): ExportValue {
@@ -204,14 +238,14 @@ export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: reado
     }
   }
   if (selected.has('track.duration') || selected.has('track.durationTime')) {
-    const total = allRoutineTracks(snapshot.routine).reduce((seconds, track) => seconds + track.duration, 0);
+    const total = snapshot.routine.tracks.reduce((seconds, track) => seconds + track.duration, 0);
     overview.push([t('exportSourceDuration'), Number.isFinite(total) && total >= 0 ? total : t('exportNeedsReview')]);
   }
   if (selected.has('filler.mode') && (snapshot.routine.tracks.every(track => !track.after) || (selected.has('track.after.mode') && selected.has('track.after.filler')))
     && snapshot.routine.tracks.some((_track, index) => transitionAfter(snapshot.routine, index).filler.mode === 'hold')) {
     overview.push([t('exportHoldDuration'), t('exportOpenEnded')]);
   }
-  return [{
+  const sheets: Sheet<File | Blob | ArrayBuffer>[] = [{
     sheet: t('exportSheet'), showGridLines: false, stickyRowsCount: 1,
     columns: columns.map(column => ({ width: column.width })),
     data: [columns.map(column => ({ ...stringCell(t(column.label)), fontWeight: 'bold',
@@ -230,6 +264,24 @@ export function buildWorkbookSheets(snapshot: ExportSnapshot, selectedIds: reado
       typeof value === 'number' ? { type: Number, value } : stringCell(value),
     ]),
   }];
+  const walkRows = [
+    ...(snapshot.walkIn?.tracks.map(track => [t('phaseWalkIn'), track] as const) ?? []),
+    ...(snapshot.walkOut?.tracks.map(track => [t('phaseWalkOut'), track] as const) ?? []),
+  ];
+  if (walkRows.length) {
+    sheets.push({
+      sheet: t('exportWalkSheet'), showGridLines: false, stickyRowsCount: 1,
+      columns: [{ width: 16 }, { width: 32 }, { width: 18 }],
+      data: [[t('exportWalkPhase'), t('title'), t('exportDurationTime')].map(label => ({ ...stringCell(label),
+        fontWeight: 'bold', backgroundColor: '#176B68', textColor: '#FFFFFF', height: 44 })),
+      ...walkRows.map(([phase, track], rowIndex) => [
+        { ...stringCell(phase), backgroundColor: rowIndex % 2 ? '#F0F6F5' : '#FFFFFF', textColor: '#243B39' },
+        { ...stringCell(track.title), backgroundColor: rowIndex % 2 ? '#F0F6F5' : '#FFFFFF', textColor: '#243B39' },
+        { ...stringCell(exportTime(track.duration) ?? ''), backgroundColor: rowIndex % 2 ? '#F0F6F5' : '#FFFFFF', textColor: '#243B39' },
+      ])],
+    });
+  }
+  return sheets;
 }
 
 export function exportFilename(name: string, extension: 'xlsx' | 'pdf'): string {
@@ -246,10 +298,22 @@ export interface PdfTrackSection {
   readonly columns: readonly ExportColumn[];
 }
 
+export interface PdfSettingsSection {
+  readonly heading: string;
+  readonly rows: readonly (readonly [string, string])[];
+}
+
+export interface PdfWalkSection {
+  readonly heading: string;
+  readonly rows: readonly (readonly [string, string])[];
+}
+
 export interface PdfPacket {
   readonly title: string;
   readonly metadata: readonly string[];
-  readonly settings: readonly (readonly [string, string])[];
+  readonly settings: readonly PdfSettingsSection[];
+  readonly walkIn: PdfWalkSection | null;
+  readonly walkOut: PdfWalkSection | null;
   readonly tracks: readonly PdfTrackSection[];
 }
 
@@ -261,21 +325,34 @@ export function buildPdfPacket(snapshot: ExportSnapshot, selectedIds: readonly s
   const display = (value: ExportValue | undefined): string => value === null || value === undefined ? ''
     : typeof value === 'boolean' ? t(value ? 'exportYes' : 'exportNo')
       : typeof value === 'number' ? Number.isFinite(value) ? String(value) : t('exportNeedsReview') : value;
-  const settings: [string, string][] = [];
-  for (const column of columns) {
-    const [group] = column.id.split('.');
-    if (group !== 'routine' && group !== 'filler') continue;
-    const value = routineColumnValue(routine, column);
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === undefined) settings.push([t(column.label), display(value)]);
-  }
-  if (selected.has('filler.mode') && (routine.tracks.every(track => !track.after) || (selected.has('track.after.mode') && selected.has('track.after.filler')))
-    && routine.tracks.some((_track, index) => transitionAfter(routine, index).filler.mode === 'hold')) settings.push([t('exportHoldDuration'), t('exportOpenEnded')]);
+  const holdRow: [string, string][] = selected.has('filler.mode') && (routine.tracks.every(track => !track.after) || (selected.has('track.after.mode') && selected.has('track.after.filler')))
+    && routine.tracks.some((_track, index) => transitionAfter(routine, index).filler.mode === 'hold') ? [[t('exportHoldDuration'), t('exportOpenEnded')]] : [];
+  const buildSection = (group: MessageKey, heading: MessageKey, extra: readonly [string, string][] = []): PdfSettingsSection | null => {
+    const rows: [string, string][] = [];
+    for (const column of columns) {
+      if (column.group !== group) continue;
+      const value = routineColumnValue(routine, column);
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === undefined) rows.push([t(column.label), display(value)]);
+    }
+    rows.push(...extra);
+    return rows.length ? { heading: t(heading), rows } : null;
+  };
+  const settings = [
+    buildSection('exportRoutineFields', 'exportRoutineFields'),
+    buildSection('exportFillerFields', 'exportFillerFields', holdRow),
+    buildSection('exportBeepFields', 'exportBeepFields'),
+  ].filter((section): section is PdfSettingsSection => section !== null);
+  const walkSection = (section: ExportWalkSection | null, heading: MessageKey): PdfWalkSection | null =>
+    section ? { heading: section.name ? `${t(heading)}: ${section.name}` : t(heading),
+      rows: section.tracks.map(track => [track.title, exportTime(track.duration) ?? '']) } : null;
   const cueColumns = columns.filter(column => column.group === 'exportCueFields' || column.id === 'row.status');
   return {
     title: selected.has('routine.name') ? routine.name : t('exportPacket'),
     metadata: [t(snapshot.unsaved ? 'exportUnsaved' : 'exportSaved'), snapshot.exportedAt, t('exportPrivate')],
     settings,
-    tracks: allRoutineTracks(routine).map((track, index) => ({
+    walkIn: walkSection(snapshot.walkIn, 'exportWalkInHeading'),
+    walkOut: walkSection(snapshot.walkOut, 'exportWalkOutHeading'),
+    tracks: routine.tracks.map((track, index) => ({
       heading: [selected.has('track.index') ? String(index + 1) : '', selected.has('track.title') ? track.title : ''].filter(Boolean).join('. '),
       details: columns.filter(column => column.group === 'exportTrackFields' && !['track.index', 'track.title'].includes(column.id))
         .map(column => `${t(column.label)}: ${display(columnValue(column, snapshot.rows.find(row => row.trackIndex === index + 1)!))}`).join(' / '),
@@ -345,13 +422,22 @@ export function buildPdfTables(packet: PdfPacket): UserOptions[] {
     alternateRowStyles: { fillColor: '#F0F6F5' },
     tableWidth: 540, pageBreak: 'auto', rowPageBreak: 'avoid', showHead: 'everyPage',
   };
+  const settingsTables = packet.settings.map(section => ({
+    ...common, theme: 'striped' as const, head: [[{ content: section.heading, colSpan: 2 }]],
+    body: section.rows.map(row => [...row]), columnStyles: { 0: { cellWidth: 230 }, 1: { cellWidth: 310 } },
+  }));
+  const walkTable = (section: PdfWalkSection | null): UserOptions[] => !section ? [] : [{
+    ...common, theme: 'striped' as const,
+    head: [[{ content: section.heading, colSpan: 2 }], [t('title'), t('exportDurationTime')]],
+    body: section.rows.map(row => [...row]), columnStyles: { 0: { cellWidth: 380 }, 1: { cellWidth: 160 } },
+  }];
   return [
     { ...common, theme: 'plain', body: [
       [{ content: packet.title, styles: { fontSize: 20, textColor: '#176B68' } }],
       [{ content: packet.metadata.join('\n'), styles: { fontSize: 9 } }],
     ] },
-    ...(packet.settings.length ? [{ ...common, theme: 'striped' as const, head: [[{ content: t('exportRoutineFields'), colSpan: 2 }]],
-      body: packet.settings.map(row => [...row]), columnStyles: { 0: { cellWidth: 230 }, 1: { cellWidth: 310 } } }] : []),
+    ...settingsTables,
+    ...walkTable(packet.walkIn),
     ...packet.tracks.filter(track => track.heading || track.details || track.columns.length).flatMap(track => {
       const bands = Array.from({ length: Math.max(1, Math.ceil(track.columns.length / 6)) }, (_, index) => {
         const columns = track.columns.slice(index * 6, (index + 1) * 6);
@@ -374,6 +460,7 @@ export function buildPdfTables(packet: PdfPacket): UserOptions[] {
         cellWidth: widths[index]! / totalWidth * 540,
       }])),
     }; }); }),
+    ...walkTable(packet.walkOut),
   ];
 }
 
@@ -392,7 +479,9 @@ export async function createPdfBlob(snapshot: ExportSnapshot, fontBytes?: Uint8A
   document.setFont('NotoSans', 'normal');
   const metadata = document.getFont().metadata as { characterToGlyph?: (codePoint: number) => number };
   if (typeof metadata.characterToGlyph !== 'function') throw new Error(t('exportFontMissing'));
-  const texts = [packet.title, ...packet.metadata, ...packet.settings.flat(),
+  const texts = [packet.title, ...packet.metadata, ...packet.settings.flatMap(section => [section.heading, ...section.rows.flat()]),
+    ...(packet.walkIn ? [packet.walkIn.heading, ...packet.walkIn.rows.flat()] : []),
+    ...(packet.walkOut ? [packet.walkOut.heading, ...packet.walkOut.rows.flat()] : []),
     ...packet.tracks.flatMap(track => [track.heading, track.details, ...track.cues.flat(), ...track.columns.map(column => t(column.label))]),
     t('exportSettings'), t('emptyCues'), t('exportPdfTime'), t('exportPdfType'), t('exportPdfCount'),
     t('exportPdfNote'), t('exportPdfBeep'), t('exportPacket'), t('exportPage', { page: 1, total: 1 })];
