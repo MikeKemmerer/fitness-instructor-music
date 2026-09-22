@@ -237,7 +237,8 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
           drag.moved ||= Math.abs(event.clientX - drag.startX) > 2;
           if (!drag.moved) return;
           const current = track.cues.find(item => item.id === cue.id);
-          const updated = current && cueAtSeconds(track, current, drag.startSeconds + (event.clientX - drag.startX) / width * track.duration, track.duration);
+          const target = Math.round((drag.startSeconds + (event.clientX - drag.startX) / width * track.duration) * 10) / 10;
+          const updated = current && cueAtSeconds(track, current, target, track.duration);
           if (!updated) return;
           drag.seconds = cueSeconds(updated, track);
           position(drag.seconds);
