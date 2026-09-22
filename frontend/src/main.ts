@@ -2233,14 +2233,23 @@ function updateText(node: HTMLElement, text: string): void {
   if (node.textContent !== text) node.textContent = text;
 }
 
-// Shrinks the move note's font size (bounded) so it fits the CSS max-height instead of pushing
-// the rest of the page down; resets first since the applicable class (long-note/multiline) alone
-// may already fit. max-height is defined in em, so it shrinks together with the font -- re-read
-// clientHeight every iteration instead of caching it, or the loop stops against a stale (larger) target.
+// Sizes the move note's max-height to fit its actual content (a generous multiple of one line)
+// instead of a fixed budget -- shrinking the font can't compensate for explicit line breaks the
+// way it can for wrapped text (a `\n` forces that many lines regardless of font size), so a fixed
+// max-height either wasted space for a short note or shrank a real 3+ line note down to an
+// unreadably tiny size that *still* didn't fit. The shrink loop is now only a fallback for content
+// that's unusually long even at a generous cap (e.g. very long individual lines that wrap further).
 function fitMoveNote(node: HTMLElement): void {
   node.style.fontSize = '';
-  if (!node.clientHeight) return;
-  for (let step = 0; step < 20 && node.scrollHeight > node.clientHeight + 1; step++) {
+  node.style.maxHeight = 'none';
+  const natural = node.scrollHeight;
+  if (!natural) return;
+  const computed = getComputedStyle(node);
+  const lineHeight = Number.parseFloat(computed.lineHeight);
+  const unit = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : Number.parseFloat(computed.fontSize) * 1.2;
+  const max = Math.min(natural, unit * 5);
+  node.style.maxHeight = `${max}px`;
+  for (let step = 0; step < 20 && node.scrollHeight > max + 1; step++) {
     const current = Number.parseFloat(getComputedStyle(node).fontSize);
     if (!Number.isFinite(current) || current <= 10) break;
     node.style.fontSize = `${current * 0.92}px`;
