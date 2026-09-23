@@ -137,7 +137,12 @@ mark.src = '/icon-192.png';
 mark.alt = '';
 mark.width = mark.height = 40;
 identity.append(mark, element('span', 'brand-name', t('appName')));
-header.append(identity, element('span', 'local-status', t(hostedPilot ? 'hosted' : 'local')));
+const headerSignIn = element('a', 'button header-signin', t('cloudSignIn'));
+headerSignIn.href = '/signin.html';
+headerSignIn.hidden = true;
+const headerLeading = element('div', 'header-leading');
+headerLeading.append(identity, headerSignIn);
+header.append(headerLeading, element('span', 'local-status', t(hostedPilot ? 'hosted' : 'local')));
 const navigation = element('nav', 'tabs');
 navigation.setAttribute('aria-label', t('navigation'));
 navigation.setAttribute('role', 'tablist');
@@ -473,6 +478,11 @@ cloudSignIn.addEventListener('click', event => {
   if (getCloudContext().access !== 'signin-required') return;
   confirmCloudNavigation(() => confirm(t('cloudConfirmSignin')), () => disposeApp(), () => window.location.assign(cloudSignIn.href));
 });
+headerSignIn.addEventListener('click', event => {
+  event.preventDefault();
+  if (getCloudContext().access !== 'signin-required') return;
+  confirmCloudNavigation(() => confirm(t('cloudConfirmSignin')), () => disposeApp(), () => window.location.assign(headerSignIn.href));
+});
 const cloudControls = element('div', 'cloud-controls');
 cloudControls.append(field(t('cloudRoutines'), cloudSelect), cloudMode, cloudRefresh, cloudOpen, cloudSignIn);
 const cloudActions = element('div', 'action-row');
@@ -486,6 +496,7 @@ function syncCloudControls(): void {
   const busy = editorBusy || transportOperation.pending;
   cloudStatus.textContent = cloudStatusMessage(context);
   cloudSignIn.hidden = context.access !== 'signin-required';
+  headerSignIn.hidden = context.access !== 'signin-required';
   cloudRefresh.disabled = busy;
   cloudMode.disabled = busy || !mutable;
   cloudSelect.disabled = busy || (!cloudRoutines.length && !cachedCloudRoutines.length);

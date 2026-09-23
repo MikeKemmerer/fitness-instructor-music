@@ -109,6 +109,8 @@ svg { flex: none; }
 .selected-cue-panel > select { inline-size: 90px; }
 .selected-cue-panel button { touch-action: none; }
 .identity { display: flex; align-items: center; gap: 12px; min-inline-size: 0; }
+.header-leading { display: flex; align-items: center; gap: 16px; min-inline-size: 0; flex-wrap: wrap; }
+.header-signin { flex: none; background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .brand-mark { width: 36px; height: 36px; flex: none; border-radius: 6px; }
 .brand-name { font-weight: 600; font-size: .95rem; overflow-wrap: anywhere; }
 .local-status { font-size: .66rem; font-weight: 600; white-space: nowrap; border-inline-start: 3px solid var(--accent); padding-inline-start: 8px; }
