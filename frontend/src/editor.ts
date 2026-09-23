@@ -685,6 +685,14 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       beep.checked = cue.beep === true;
       beep.addEventListener('change', () => mutate(() => { cue.beep = beep.checked; }));
       beepLabel.append(beep, element('span', '', t('cueBeep')));
+      const flashLabel = element('label', 'switch-label cue-flash');
+      const flash = element('input');
+      flash.type = 'checkbox';
+      flash.checked = cue.flash === true;
+      flash.addEventListener('change', () => mutate(() => { cue.flash = flash.checked; }));
+      flashLabel.append(flash, element('span', '', t('cueFlash')));
+      const cueToggles = element('div', 'cue-toggles');
+      cueToggles.append(beepLabel, flashLabel);
       const removeCue = iconButton(t('deleteCue'), Trash2, () => {
         if (!trackEditable() || !confirm(t('confirmDeleteCue', { track: track.title, cue: cue.note }))) return;
         if (!trackEditable() || !track.cues.includes(cue)) return;
@@ -700,7 +708,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       refreshers.push(() => { removeCue.hidden = !(context.canEdit?.() ?? true); });
       const valueField = field(t('value'), value);
       valueField.append(timePreview);
-      row.append(field(t('source'), kind), valueField, field(t('note'), note), removeCue, beepLabel, timingFeedback);
+      row.append(field(t('source'), kind), valueField, field(t('note'), note), removeCue, cueToggles, timingFeedback);
       updatePreview();
       rows.set(cue.id, { row, note, update: updatePreview });
       return row;

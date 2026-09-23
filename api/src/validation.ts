@@ -62,18 +62,23 @@ export function expectedRevision(value: unknown): number {
 
 function parseCue(value: unknown): Cue {
   const hasBeep = Object.prototype.hasOwnProperty.call(value, 'beep');
-  const cue = strictRecord(value, hasBeep ? ['id', 'anchor', 'note', 'beep'] : ['id', 'anchor', 'note']);
+  const hasFlash = Object.prototype.hasOwnProperty.call(value, 'flash');
+  const fields = ['id', 'anchor', 'note'];
+  if (hasBeep) fields.push('beep');
+  if (hasFlash) fields.push('flash');
+  const cue = strictRecord(value, fields);
   const anchor = cue.anchor;
   if (typeof anchor !== 'object' || anchor === null) invalid();
   const descriptor = Object.getOwnPropertyDescriptor(anchor, 'kind');
   if (!descriptor || !('value' in descriptor)) invalid();
   const kind = choice(descriptor.value, ['timestamp', 'count', 'interval'] as const);
-  const fields = strictRecord(anchor, kind === 'count' ? ['kind', 'count'] : ['kind', 'seconds']);
-  const position = number(kind === 'count' ? fields.count : fields.seconds);
+  const anchorFields = strictRecord(anchor, kind === 'count' ? ['kind', 'count'] : ['kind', 'seconds']);
+  const position = number(kind === 'count' ? anchorFields.count : anchorFields.seconds);
   if (kind === 'count' && (!Number.isSafeInteger(position) || position < 1)) invalid();
   return {
     id: text(cue.id), note: text(cue.note, 500),
     ...(hasBeep ? { beep: boolean(cue.beep) } : {}),
+    ...(hasFlash ? { flash: boolean(cue.flash) } : {}),
     anchor: kind === 'count' ? { kind, count: position } : { kind, seconds: position },
   };
 }
@@ -126,7 +131,7 @@ export function parseFiller(value: unknown): Filler {
   const hasRecording = Object.prototype.hasOwnProperty.call(value, 'recording');
   if (hasRecording) fields.push('recording');
   const filler = strictRecord(value, fields);
-  const sound = choice(filler.sound, ['soft', 'bright', 'drums', 'lofi', 'recording'] as const);
+  const sound = choice(filler.sound, ['soft', 'bright', 'drums', 'lofi', 'recording', 'silence'] as const);
   if (hasRecording !== (sound === 'recording')) invalid();
   return {
     mode: choice(filler.mode, ['none', 'timed', 'hold'] as const),

@@ -190,6 +190,18 @@ const footer = element('footer', 'app-footer muted', t('appBuild', {
 }));
 shell.append(header, navigation, classToolbar, notice, main, footer);
 app.replaceChildren(shell);
+const flashOverlay = element('div', 'flash-overlay');
+flashOverlay.setAttribute('aria-hidden', 'true');
+shell.append(flashOverlay);
+let flashTimeout: ReturnType<typeof setTimeout> | null = null;
+let lastFlashSignal: number | null = null;
+function triggerFlash(): void {
+  if (flashTimeout) clearTimeout(flashTimeout);
+  flashOverlay.classList.remove('flash-active');
+  void flashOverlay.offsetWidth;
+  flashOverlay.classList.add('flash-active');
+  flashTimeout = setTimeout(() => { flashOverlay.classList.remove('flash-active'); flashTimeout = null; }, 220);
+}
 
 function notify(message: string, error = false): void {
   notice.hidden = false;
@@ -2407,6 +2419,8 @@ function renderPlayback(): void {
 
 const unsubscribe = player.subscribe(nextState => {
   const priorError = state?.error;
+  if (lastFlashSignal !== null && nextState.flashSignal > lastFlashSignal) triggerFlash();
+  lastFlashSignal = nextState.flashSignal;
   state = nextState;
   renderPlayback();
   if (state.error && state.error !== priorError) notify(errorMessage(state.error), true);

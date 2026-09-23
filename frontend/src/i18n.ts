@@ -34,6 +34,7 @@ const validationMessages: Record<string, MessageKey> = {
   'Track duration must be 0-1200 seconds': 'invalidDuration', 'Invalid track beat grid': 'invalidGrid',
   'Cue IDs must be unique': 'duplicateCues', 'Invalid cue note': 'invalidNote', 'Invalid cue kind': 'invalidKind',
   'Cue outside track': 'outsideTrack', 'Invalid cue position': 'invalidPosition',
+  'Invalid cue beep': 'invalidCueBeep', 'Invalid cue flash': 'invalidCueFlash',
 };
 
 export function validationMessage(message: string): string {

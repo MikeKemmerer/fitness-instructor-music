@@ -2118,7 +2118,7 @@ async function bootCloudApp(options: { role?: CloudSession['user']['role']; loca
   if (options.readinessDeferred) appMocks.getReadiness.mockReturnValueOnce(options.readinessDeferred.promise);
   appMocks.filler.mockResolvedValue({});
   let state: PlayerState = { status: 'idle', trackIndex: 0, elapsed: 0, duration: 30, classElapsed: 0, currentCue: '', nextCue: '',
-    nextCueIn: null, fillerRemaining: null, holding: false, ducked: false, beepsMuted: false, error: null };
+    nextCueIn: null, fillerRemaining: null, holding: false, ducked: false, beepsMuted: false, error: null, flashSignal: 0 };
   let emit: (state: PlayerState) => void = () => {};
   appMocks.player.subscribe.mockImplementation((listener: (value: PlayerState) => void) => { emit = listener; listener(state); return () => {}; });
   appMocks.player.load.mockImplementation(async () => { state = { ...state, status: 'idle' }; emit(state); });

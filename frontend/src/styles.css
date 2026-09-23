@@ -52,6 +52,11 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; scrollbar-gutter: stable; }
+.flash-overlay {
+  position: fixed; inset: 0; z-index: 999; background: var(--text); opacity: 0; pointer-events: none;
+  transition: opacity .18s ease-out;
+}
+.flash-overlay.flash-active { opacity: .85; transition: opacity .04s ease-in; }
 body { margin: 0; min-inline-size: 280px; }
 .bootstrap-error { min-block-size: 100svh; padding: 48px 24px; font-family: 'DM Sans', sans-serif; color: #243B39; background: #F0F6F5; }
 .bootstrap-error h1 { font-family: inherit; font-size: 1.8rem; line-height: 1.2; margin-block-end: 16px; }
@@ -437,7 +442,8 @@ input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
 .cue-row > .field:nth-child(3) { grid-column: 1 / -1; grid-row: 3; }
 .cue-row > .field:nth-child(4) { grid-column: 2; grid-row: 2; }
 .cue-row > button { grid-column: 3; grid-row: 1; align-self: end; }
-.cue-row > .cue-beep { grid-column: 1 / -1; min-block-size: 44px; }
+.cue-row > .cue-toggles { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.cue-toggles .switch-label { min-block-size: 44px; }
 .cue-preview { display: flex; align-items: center; min-inline-size: 0; min-block-size: 44px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; font-size: .9rem; }
 .cue-row > .preview-status { grid-column: 1 / -1; }
 @media (max-width: 639px) {

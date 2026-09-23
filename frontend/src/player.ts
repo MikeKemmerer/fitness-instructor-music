@@ -72,7 +72,7 @@ const initialState = (): PlayerState => ({
   status: 'idle', trackIndex: 0, elapsed: 0, duration: 0, classElapsed: 0,
   currentCue: '', nextCue: '', nextCueIn: null, fillerRemaining: null,
   nextCueTrackTitle: null,
-  holding: false, ducked: false, beepsMuted: false, error: null,
+  holding: false, ducked: false, beepsMuted: false, error: null, flashSignal: 0,
 });
 
 export function createPlayer(): Player & { advance(): Promise<void>; previous(): Promise<void>; unload(): void } {
@@ -581,14 +581,31 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     return beepOffsets(segment.duration, routine.beepEvery, routine.beepRemaining, routine.beepOnceRemaining, cueOffsets);
   }
 
+  function segmentFlashOffsets(segment: Segment): number[] {
+    if (!routine || phaseOf(segment) !== 'routine') return [];
+    const track = routine.tracks[segment.trackIndex];
+    const offsets = new Set<number>();
+    for (const cue of track.cues) {
+      if (cue.flash !== true) continue;
+      const seconds = cueSeconds(cue, track);
+      if (!Number.isFinite(seconds)) continue;
+      const offset = Math.round(seconds * 1e6) / 1e6;
+      if (offset >= 0 && offset < segment.duration) offsets.add(offset);
+    }
+    return [...offsets].sort((first, second) => first - second);
+  }
+
   function scheduleBeeps(seconds: number): void {
     if (!context || !beepBus || !routine) return;
     rememberFiredAlarms();
+    let flashed = false;
     for (const segment of segments) {
       if (segment.kind !== 'song' || segment.start > seconds + 0.2 || end(segment) <= seconds) continue;
       const next = segments[segments.indexOf(segment) + 1];
       const ownershipEnd = next?.start ?? end(segment);
-      for (const offset of segmentBeepOffsets(segment)) {
+      const beepOffsetSet = new Set(segmentBeepOffsets(segment));
+      const flashOffsetSet = new Set(segmentFlashOffsets(segment));
+      for (const offset of new Set([...beepOffsetSet, ...flashOffsetSet])) {
         const at = segment.start + offset;
         const key = `${segment.trackIndex}:${segment.start}:${offset}`;
         const now = Math.max(seconds, checkpoint + context.currentTime - anchor);
@@ -598,25 +615,29 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
         const when = Math.max(context.currentTime, anchor + at - checkpoint);
         if (when >= anchor + ownershipEnd - checkpoint || when >= anchor + end(segment) - checkpoint ||
           when - (anchor + at - checkpoint) > lookback) continue;
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
         scheduledAlarms.set(key, when);
-        oscillator.frequency.value = 880;
-        oscillator.connect(gain);
-        gain.connect(beepBus);
-        gain.gain.setValueAtTime(0, when);
-        gain.gain.linearRampToValueAtTime(0.3, when + 0.005);
-        gain.gain.linearRampToValueAtTime(0, when + 0.08);
-        oscillator.start(when);
-        oscillator.stop(when + 0.085);
-        alarms.set(oscillator, { gain, when });
-        oscillator.onended = () => {
-          alarms.delete(oscillator);
-          oscillator.disconnect();
-          gain.disconnect();
-        };
+        if (beepOffsetSet.has(offset)) {
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          oscillator.frequency.value = 880;
+          oscillator.connect(gain);
+          gain.connect(beepBus);
+          gain.gain.setValueAtTime(0, when);
+          gain.gain.linearRampToValueAtTime(0.3, when + 0.005);
+          gain.gain.linearRampToValueAtTime(0, when + 0.08);
+          oscillator.start(when);
+          oscillator.stop(when + 0.085);
+          alarms.set(oscillator, { gain, when });
+          oscillator.onended = () => {
+            alarms.delete(oscillator);
+            oscillator.disconnect();
+            gain.disconnect();
+          };
+        }
+        if (flashOffsetSet.has(offset)) flashed = true;
       }
     }
+    if (flashed) { state = { ...state, flashSignal: state.flashSignal + 1 }; emit(); }
   }
 
   function tick(prepare = true): void {
@@ -946,7 +967,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     const seconds = position();
     for (const segment of segments) {
       if (segment.kind !== 'song' || segment.trackIndex !== trackIndex) continue;
-      for (const offset of segmentBeepOffsets(segment)) {
+      for (const offset of new Set([...segmentBeepOffsets(segment), ...segmentFlashOffsets(segment)])) {
         if (segment.start + offset <= seconds) firedAlarms.add(`${trackIndex}:${segment.start}:${offset}`);
       }
     }

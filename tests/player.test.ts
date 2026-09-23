@@ -1212,6 +1212,24 @@ describe('local Web Audio player', () => {
     expect(MockContext.latest.oscillators).toHaveLength(1);
   });
 
+  it('signals flash-marked cues once without sounding a beep or repeating for non-flash cues', async () => {
+    const value = routine();
+    value.beepEvery = value.beepRemaining = 0;
+    value.tracks[0].cues = [
+      { id: 'flash', anchor: { kind: 'timestamp', seconds: 3 }, note: 'Flash', flash: true },
+      { id: 'both', anchor: { kind: 'timestamp', seconds: 6 }, note: 'Both', beep: true, flash: true },
+      { id: 'silent', anchor: { kind: 'timestamp', seconds: 4 }, note: 'Silent' },
+    ];
+    await player.load(value);
+    await player.play();
+    await advance(2.9);
+    expect(state.flashSignal).toBe(1);
+    expect(MockContext.latest.oscillators).toHaveLength(0);
+    await advance(5.9);
+    expect(state.flashSignal).toBe(2);
+    expect(MockContext.latest.oscillators).toHaveLength(1);
+  });
+
   it('seeks in source seconds without rebuilding queued holds or restarting at zero', async () => {
     await player.load(routine());
     await player.play();

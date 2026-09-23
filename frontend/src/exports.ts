@@ -144,6 +144,7 @@ export const exportColumns: readonly ExportColumn[] = freezeTree([
   { id: 'cue.time', label: 'exportCueTime', group: 'exportCueFields', type: 'string', width: 18, default: true, value: row => exportTime(row.effectiveSeconds) },
   { id: 'cue.note', label: 'note', group: 'exportCueFields', type: 'string', width: 60, default: true, value: row => row.cue?.note },
   { id: 'cue.beep', label: 'cueBeep', group: 'exportCueFields', type: 'boolean', width: 12, default: true, value: row => row.cue ? row.cue.beep ?? false : null },
+  { id: 'cue.flash', label: 'cueFlash', group: 'exportCueFields', type: 'boolean', width: 12, default: true, pdfHidden: true, value: row => row.cue ? row.cue.flash ?? false : null },
   { id: 'filler.mode', label: 'fillerMode', group: 'exportFillerFields', type: 'string', width: 16, default: false, value: row => row.routine.filler.mode },
   { id: 'filler.seconds', label: 'exportFillerSeconds', group: 'exportFillerFields', type: 'number', width: 16, default: false, value: row => round2(row.routine.filler.seconds) },
   { id: 'filler.bpm', label: 'exportFillerBpm', group: 'exportFillerFields', type: 'number', width: 20, default: false, value: row => row.routine.filler.bpm },

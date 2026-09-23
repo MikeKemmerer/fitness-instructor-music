@@ -16,6 +16,7 @@ export interface PlayerState {
   ducked: boolean;
   beepsMuted: boolean;
   error: string | null;
+  flashSignal: number;
   phase?: ClassPhase;
   phaseTrackTitle?: string;
   phaseTrackIndex?: number;

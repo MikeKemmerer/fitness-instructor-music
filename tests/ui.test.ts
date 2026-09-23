@@ -3083,7 +3083,7 @@ describe('UI persistence and transport wiring', () => {
     });
     playback = { status: 'idle', trackIndex: 0, elapsed: 0, duration: 30, classElapsed: 0,
       currentCue: '', nextCue: '', nextCueIn: null, fillerRemaining: null, holding: false,
-      ducked: false, beepsMuted: false, error: null };
+      ducked: false, beepsMuted: false, error: null, flashSignal: 0 };
     mocks.player.subscribe.mockImplementation(listener => { emit = listener; listener(playback); return vi.fn(); });
     mocks.getReadiness.mockResolvedValue({ ready: true, missing: [] });
     mocks.player.load.mockResolvedValue(undefined);
