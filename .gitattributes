@@ -1,0 +1,9 @@
+# Pinned build artifacts must stay byte-identical to their recorded SBOM hashes;
+# without this, autocrlf can normalize line endings on checkout.
+frontend/src/assets/codecs/* binary
+frontend/public/licenses/* binary
+frontend/public/sources/* binary
+scripts/build-audio-codec.sh text eol=lf
+scripts/prepare-audio-codec.mjs text eol=lf
+scripts/package-audio-codec.mjs text eol=lf
+scripts/audio-codec-inputs.json text eol=lf

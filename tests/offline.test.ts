@@ -1399,6 +1399,15 @@ describe('unified durable working copies', () => {
     expect(stores.routineWorkingCopies.size).toBe(0);
   });
 
+  it('preserves a flash-marked cue through a working-copy save', async () => {
+    const value = envelope();
+    const asset = { id: 'asset', sha256: 'a'.repeat(64), bytes: 44, contentType: 'audio/wav' };
+    value.routine.tracks = [{ id: 'entry', title: 'Entry', duration: 2, firstBeat: 0, bodyArea: '',
+      cues: [{ id: 'cue', anchor: { kind: 'timestamp', seconds: 0 }, note: 'Move', flash: true }] }];
+    const saved = await saveRoutineWorkingCopy({ ...value, media: { entry: asset } }, options);
+    expect(saved.envelope.routine.tracks[0]!.cues[0]!.flash).toBe(true);
+  });
+
   it('atomically retains pending work if acknowledgment mirror storage fails', async () => {
     const saved = await saveRoutineWorkingCopy(envelope(), options);
     const response = structuredClone(saved.envelope);

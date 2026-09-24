@@ -11,6 +11,13 @@ import { AAC_IMPORT } from '../shared/audio-import';
 
 type ConversionApi = typeof import('../frontend/src/audio-conversion');
 
+let pythonExecutable: string | undefined;
+function python(): string {
+  return pythonExecutable ??= ['python3', 'python'].find(name => {
+    try { execFileSync(name, ['--version']); return true; } catch { return false; }
+  }) ?? 'python3';
+}
+
 function fixture(codec = 'libopus', channels = 2, duration = 10.000271, tags = 0, metadata = ''): Buffer {
   return execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i',
     `anoisesrc=color=white:amplitude=0.22:seed=431:sample_rate=48000:duration=${duration}`,
@@ -371,7 +378,7 @@ describe('local AAC conversion under unchanged production CSP', () => {
 
   it('rejects malformed, video, multiple audio, excessive channels, duration and decoded memory', async () => {
     const video = execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=size=16x16:duration=1',
-      '-c:v', 'libvpx', '-f', 'webm', 'pipe:1']);
+      '-c:v', 'librav1e', '-f', 'webm', 'pipe:1']);
     const multiple = execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=duration=1',
       '-map', '0:a', '-map', '0:a', '-c:a', 'libopus', '-f', 'ogg', 'pipe:1']);
     expect(await rejection(Buffer.from('not audio SYNTHETIC_PRIVATE_TAG'))).toBe('conversion_invalid_audio');
@@ -437,12 +444,12 @@ it('provides complete pinned source archives, build recipe and notices with exac
     expect(createHash('sha256').update(bytes).digest('hex')).toBe(expected.sha256);
   }
   const archive = `frontend/public${inventory.source}`;
-  const member = (name: string, maxBuffer = 40 * 1024 * 1024) => execFileSync('python3',
+  const member = (name: string, maxBuffer = 40 * 1024 * 1024) => execFileSync(python(),
     ['-c', 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))', archive, name],
     { maxBuffer });
-  const entries = execFileSync('python3',
+  const entries = execFileSync(python(),
     ['-c', 'import sys, zipfile; print("\\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))', archive])
-    .toString().trim().split('\n');
+    .toString().replaceAll('\r', '').trim().split('\n');
   expect(entries).toContain('BUILD.txt');
   expect(entries).toContain('source-bundle.json');
   for (const name of ['ffmpeg', 'wrapper', 'emscripten', 'emsdk']) {
