@@ -208,7 +208,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     fileInput.type = 'file';
     fileInput.accept = '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
     fileInput.tabIndex = -1;
-    fileInput.setAttribute('aria-label', t('cueImportOpen'));
+    fileInput.setAttribute('aria-hidden', 'true');
     const importAvailable = () => { const state = readState(); return !disposed && !state.busy && state.cueImport?.editable === true; };
     const importCommand = iconButton(t('cueImportOpen'), FileUp, () => {
       if (!importAvailable()) return;
@@ -249,7 +249,7 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     const open = async (file: File) => {
       if (!importAvailable()) return;
       const operation = ++generation;
-      review = null; body.replaceChildren(); apply.disabled = true; root.open = false;
+      review = null; body.replaceChildren(); apply.disabled = true;
       feedback.setAttribute('role', 'status'); status.show(t('cueImportReading'), false);
       if (!dialog.open) dialog.showModal();
       try {
