@@ -2137,6 +2137,81 @@ describe('export panel controls', () => {
     expect(button(t('exportPdf')).disabled).toBe(true);
     expect(button(t('exportAll')).disabled).toBe(false);
   });
+
+  const cueSetup = () => {
+    const context = setup();
+    const apply = vi.fn();
+    context.state.routine.locked = false;
+    context.state.routine.tracks = [{ id: 'entry-a', title: 'Song', duration: 60, bpm: 120, firstBeat: 0, bodyArea: '',
+      cues: [{ id: 'old', anchor: { kind: 'count', count: 1 }, note: 'Old' }] }];
+    Object.assign(context.state, { cueImport: { editable: true, apply } });
+    const song = { trackId: 'entry-a', trackIndex: 0, duration: 60, sheet: '01 Song', heading: '1. Song',
+      cues: [{ seconds: 5, note: 'New', beep: true, flash: false }] };
+    const readCues = vi.fn((_bytes: Uint8Array, _routine: unknown) => ({ songs: [song], issues: [] as { sheet: string; row?: number; message: string }[], ignored: ['Extra'] }));
+    const cueTemplate = vi.fn(async () => new Blob(['template']));
+    Object.assign(context.actions, { readCues, cueTemplate });
+    context.panel.syncAvailability();
+    const fileInput = context.root.querySelectorAll('input').find(input => input.type === 'file')!;
+    const choose = () => {
+      Object.assign(fileInput, { files: [new File(['xlsx'], 'cues.xlsx')] });
+      fileInput.dispatchEvent(new Event('change'));
+    };
+    const review = () => context.root.querySelectorAll('dialog').find(dialog => dialog.open)!;
+    return { ...context, apply, readCues, cueTemplate, choose, review };
+  };
+
+  it('downloads a cue import template from a frozen copy of the routine', async () => {
+    const { button, actions, cueTemplate, state } = cueSetup();
+    button(t('cueTemplateDownload')).click();
+    await vi.waitFor(() => expect(actions.download).toHaveBeenCalledOnce());
+    const [routine] = cueTemplate.mock.calls[0]! as unknown as [typeof state.routine];
+    expect(routine).not.toBe(state.routine);
+    expect(routine.tracks[0]!.id).toBe('entry-a');
+    expect(actions.download.mock.calls[0]![1]).toBe('Private-routine-cue-template.xlsx');
+  });
+
+  it('reviews imported cues per song, warns what Replace removes, and applies only through the callback', async () => {
+    const { button, choose, review, apply, readCues, state } = cueSetup();
+    expect(button(t('cueImportOpen')).disabled).toBe(false);
+    choose();
+    await vi.waitFor(() => expect(readCues).toHaveBeenCalledOnce());
+    const dialog = review();
+    expect(dialog.querySelectorAll('p').map(node => node.textContent)).toContain(t('cueImportIgnoredTabs', { tabs: 'Extra' }));
+    expect(dialog.querySelectorAll('.cue-import-warning')[0]!.textContent).toBe(t('cueImportReplaceWarning', { count: 1 }));
+    const choice = dialog.querySelectorAll('select')[0]!;
+    choice.value = 'add'; choice.dispatchEvent(new Event('change'));
+    expect(dialog.querySelectorAll('.cue-import-warning')[0]!.hidden).toBe(true);
+    expect(state.routine.tracks[0]!.cues).toHaveLength(1);
+    button(t('cueImportApply')).click();
+    expect(apply).toHaveBeenCalledOnce();
+    const [changes] = apply.mock.calls[0]!;
+    expect(changes).toEqual([{ trackId: 'entry-a', cues: [
+      { id: 'old', anchor: { kind: 'count', count: 1 }, note: 'Old' },
+      { id: expect.any(String), anchor: { kind: 'timestamp', seconds: 5 }, note: 'New', beep: true, flash: false },
+    ] }]);
+    expect(dialog.open).toBe(false);
+  });
+
+  it('blocks the whole import and lists every bad row, and disables import for locked routines', async () => {
+    const { button, choose, review, apply, readCues, state, panel } = cueSetup();
+    readCues.mockReturnValueOnce({ songs: [], ignored: [], issues: [
+      { sheet: '01 Song', row: 4, message: t('cueImportMissingNote') }, { sheet: '02 Other', message: t('cueImportTooManyRows') },
+    ] });
+    choose();
+    await vi.waitFor(() => expect(readCues).toHaveBeenCalledOnce());
+    const items = review().querySelectorAll('li').map(item => item.textContent);
+    expect(items).toEqual([
+      t('cueImportRowError', { sheet: '01 Song', row: 4, message: t('cueImportMissingNote') }),
+      t('cueImportSheetError', { sheet: '02 Other', message: t('cueImportTooManyRows') }),
+    ]);
+    expect(button(t('cueImportApply')).disabled).toBe(true);
+    button(t('cancel')).click();
+    expect(apply).not.toHaveBeenCalled();
+    state.routine.locked = true;
+    Object.assign(state, { cueImport: { editable: false, apply } });
+    panel.syncAvailability();
+    expect(button(t('cueImportOpen')).disabled).toBe(true);
+  });
 });
 
 describe('class mode lifecycle', () => {

@@ -992,7 +992,18 @@ const editor = element('div');
 const draftIdentity = element('p', 'draft-identity');
 draftIdentity.setAttribute('role', 'status');
 const exportPanel = createExportPanel(() => ({ routine: draft, unsaved: dirty || persistedRevision === null,
-  busy: editorBusy || appDisposed || hasInvalidCueTimes(draft) }));
+  busy: editorBusy || appDisposed || hasInvalidCueTimes(draft),
+  cueImport: {
+    editable: canEdit() && !draft.locked && !draft.published && !transportOperation.pending && !shell.classList.contains('class-mode'),
+    apply: changes => {
+      for (const change of changes) {
+        const track = draft.tracks.find(item => item.id === change.trackId);
+        if (track) track.cues = change.cues;
+      }
+      dirty = true; draftGeneration++; refreshDraft(true);
+      notify(t('cueImportApplied', { count: changes.length }));
+    },
+  } }));
 const localSelection = field(t('savedRoutines'), routineSelect);
 localSelection.hidden = true;
 cloudControls.replaceChildren(cloudRefresh, cloudSignIn);

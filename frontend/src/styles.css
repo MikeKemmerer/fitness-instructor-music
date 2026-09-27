@@ -351,6 +351,12 @@ td:nth-child(3), th:nth-child(3) { width: 43%; }
 .export-feedback, .export-error { font-size: .85rem; }
 .export-error, .export-feedback[role='alert'] { color: var(--error); }
 .export-feedback:empty { display: none; }
+.cue-import-body { display: grid; gap: 16px; padding-block: 8px; }
+.cue-import-song { display: grid; gap: 6px; padding-block-end: 12px; border-block-end: 1px solid var(--border); }
+.cue-import-song p { margin: 0; font-size: .85rem; }
+.cue-import-song select { max-inline-size: 240px; }
+.cue-import-warning { color: var(--error); }
+.cue-import-issues { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; font-size: .9rem; overflow-wrap: anywhere; }
 .editor-fields { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
 .editor-fields:disabled .field { opacity: .72; }
 .editor-section { padding-block: 26px; border-block-end: 1px solid var(--border); }

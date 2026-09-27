@@ -7,3 +7,4 @@ scripts/build-audio-codec.sh text eol=lf
 scripts/prepare-audio-codec.mjs text eol=lf
 scripts/package-audio-codec.mjs text eol=lf
 scripts/audio-codec-inputs.json text eol=lf
+*.xlsx binary

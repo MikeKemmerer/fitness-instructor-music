@@ -1,17 +1,28 @@
-import { CheckCheck, Download, FileText, RotateCcw, Share2, Sheet, Square, X } from 'lucide';
+import { Check, CheckCheck, Download, FileDown, FileText, FileUp, RotateCcw, Share2, Sheet, Square, X } from 'lucide';
 import type { Routine } from '../../shared/routine';
+import { createCueTemplateBlob, planSongImport, readCueWorkbook, type CueImportChange, type CueImportMode,
+  type CueImportResult } from './cue-import';
 import { createExcelBlob, createExportSnapshot, createPdfBlob, defaultExportColumns, defaultPdfColumns, downloadExport,
   exportColumns, exportFilename, pdfExportColumns, type ExportSnapshot } from './exports';
-import { errorMessage, t } from './i18n';
+import { errorMessage, t, type MessageKey } from './i18n';
 import { exportPalette, readPreferences, type ExportPalette } from './theme';
 import { element, field, iconButton, setButtonIcon, transientText } from './ui';
+import { XLSX_MAX_BYTES } from './xlsx-read';
 
-interface ExportPanelState { routine: Routine; unsaved: boolean; busy: boolean }
+interface CueImportTarget { editable: boolean; apply: (changes: readonly CueImportChange[]) => void }
+interface ExportPanelState { routine: Routine; unsaved: boolean; busy: boolean; cueImport?: CueImportTarget }
 interface ExportActions {
   excel: (snapshot: ExportSnapshot, selected: readonly string[], palette: ExportPalette) => Promise<Blob>;
   pdf: (snapshot: ExportSnapshot, selected: readonly string[], palette: ExportPalette) => Promise<Blob>;
   download: (blob: Blob, filename: string) => void;
+  cueTemplate?: (routine: Routine) => Promise<Blob>;
+  readCues?: (bytes: Uint8Array, routine: Routine) => CueImportResult;
 }
+
+const cueImportErrors: Record<string, MessageKey> = {
+  cue_import_not_xlsx: 'cueImportNotXlsx', cue_import_too_large: 'cueImportTooLarge',
+  cue_import_not_template: 'cueImportNotTemplate', cue_import_no_songs: 'cueImportNoSongs',
+};
 
 export function createExportPanel(readState: () => ExportPanelState, actions: ExportActions = {
   excel: createExcelBlob, pdf: (snapshot, selected, palette) => createPdfBlob(snapshot, undefined, selected, palette), download: downloadExport,
@@ -150,6 +161,11 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     cancelers.push(() => { close(false); errors.dispose(); columnErrors.dispose(); });
   }
   root.append(downloads);
+  const cueImport = createCueImport();
+  downloads.append(cueImport.templateCommand, cueImport.importCommand, cueImport.menuStatus);
+  root.append(cueImport.fileInput, cueImport.dialog);
+  refreshers.push(cueImport.sync);
+  cancelers.push(cueImport.dispose);
   const syncAvailability = () => {
     const state = readState();
     trigger.setAttribute('aria-disabled', String(disposed || state.busy));
@@ -166,4 +182,187 @@ export function createExportPanel(readState: () => ExportPanelState, actions: Ex
     for (const cancel of cancelers) cancel();
   };
   return { element: root, syncAvailability, dispose };
+
+  function createCueImport() {
+    const menuStatus = element('p', 'export-feedback');
+    menuStatus.setAttribute('role', 'alert');
+    menuStatus.hidden = true;
+    const menuErrors = transientText(menuStatus);
+    let templatePending = false;
+    const templateCommand = iconButton(t('cueTemplateDownload'), FileDown, () => { void downloadTemplate(); }, true);
+    const downloadTemplate = async () => {
+      const state = readState();
+      if (disposed || state.busy || templatePending || !state.routine.tracks.length) return;
+      templatePending = true; menuErrors.dismiss(); sync();
+      try {
+        const routine = structuredClone(state.routine);
+        const blob = await (actions.cueTemplate ?? createCueTemplateBlob)(routine);
+        if (disposed) return;
+        actions.download(blob, exportFilename(t('cueTemplateFilename', { name: routine.name }), 'xlsx'));
+        root.open = false;
+      } catch (error) { if (!disposed) menuErrors.show(errorMessage(error)); }
+      finally { templatePending = false; sync(); }
+    };
+
+    const fileInput = element('input', 'visually-hidden');
+    fileInput.type = 'file';
+    fileInput.accept = '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    fileInput.tabIndex = -1;
+    fileInput.setAttribute('aria-label', t('cueImportOpen'));
+    const importAvailable = () => { const state = readState(); return !disposed && !state.busy && state.cueImport?.editable === true; };
+    const importCommand = iconButton(t('cueImportOpen'), FileUp, () => {
+      if (!importAvailable()) return;
+      fileInput.value = ''; fileInput.click();
+    }, true);
+    importCommand.setAttribute('aria-haspopup', 'dialog');
+
+    const dialog = element('dialog', 'export-dialog cue-import-dialog');
+    dialog.setAttribute('aria-labelledby', 'cue-import-title');
+    const heading = element('h2', '', t('cueImportTitle'));
+    heading.id = 'cue-import-title';
+    const feedback = element('p', 'export-feedback');
+    feedback.setAttribute('role', 'status');
+    feedback.hidden = true;
+    const status = transientText(feedback);
+    const body = element('div', 'cue-import-body');
+    let generation = 0;
+    let review: { routine: Routine; result: CueImportResult; modes: Map<string, CueImportMode> } | null = null;
+    const close = () => {
+      generation += 1; review = null; status.dismiss(); body.replaceChildren();
+      if (dialog.open) dialog.close();
+      sync();
+      if (!disposed && importCommand.isConnected) importCommand.focus({ preventScroll: true });
+    };
+    const cancel = iconButton(t('cancel'), X, () => close(), true);
+    const apply = iconButton(t('cueImportApply'), Check, () => applyReview(), true);
+    const commands = element('div', 'action-row export-dialog-actions');
+    commands.append(cancel, apply);
+    dialog.append(heading, feedback, body, commands);
+    dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
+    dialog.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); close(); } });
+
+    const fail = (error: unknown) => {
+      const code = error instanceof Error ? error.message : '';
+      feedback.setAttribute('role', 'alert');
+      status.show(cueImportErrors[code] ? t(cueImportErrors[code]) : errorMessage(error));
+    };
+    const open = async (file: File) => {
+      if (!importAvailable()) return;
+      const operation = ++generation;
+      review = null; body.replaceChildren(); apply.disabled = true; root.open = false;
+      feedback.setAttribute('role', 'status'); status.show(t('cueImportReading'), false);
+      if (!dialog.open) dialog.showModal();
+      try {
+        if (file.size > XLSX_MAX_BYTES) throw new Error('cue_import_too_large');
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        if (operation !== generation || !dialog.open) return;
+        const routine = readState().routine;
+        const result = (actions.readCues ?? readCueWorkbook)(bytes, routine);
+        status.dismiss();
+        render(routine, result);
+      } catch (error) { if (operation === generation) fail(error); }
+    };
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      fileInput.value = '';
+      if (file) void open(file);
+    });
+
+    const render = (routine: Routine, result: CueImportResult) => {
+      body.replaceChildren();
+      if (result.issues.length) {
+        const list = element('ul', 'cue-import-issues');
+        for (const issue of result.issues) {
+          list.append(element('li', '', issue.row === undefined
+            ? t('cueImportSheetError', { sheet: issue.sheet, message: issue.message })
+            : t('cueImportRowError', { sheet: issue.sheet, row: issue.row, message: issue.message })));
+        }
+        body.append(element('p', 'export-error', t('cueImportRowsTitle')), list);
+      } else {
+        const modes = new Map<string, CueImportMode>();
+        for (const song of result.songs) {
+          const track = routine.tracks.find(item => item.id === song.trackId);
+          if (!track) continue;
+          modes.set(song.trackId, 'replace');
+          const group = element('fieldset', 'export-column-group cue-import-song');
+          group.append(element('legend', '', song.heading),
+            element('p', 'muted', t('cueImportSongSummary', { rows: song.cues.length, existing: track.cues.length })));
+          const choice = element('select');
+          choice.setAttribute('aria-label', t('cueImportMode', { song: song.heading }));
+          for (const [mode, label] of [['replace', 'cueImportReplace'], ['add', 'cueImportAdd'], ['skip', 'cueImportSkip']] as const) {
+            const option = element('option', '', t(label));
+            option.value = mode;
+            choice.append(option);
+          }
+          choice.value = 'replace';
+          const warning = element('p', 'cue-import-warning');
+          const update = () => {
+            const mode = choice.value as CueImportMode;
+            modes.set(song.trackId, mode);
+            const plan = planSongImport(track, song, mode, () => '');
+            warning.textContent = plan.overLimit ? t('cueImportOverLimit')
+              : plan.removedAll ? t('cueImportReplaceClears', { count: plan.removedAll })
+                : plan.removedOther ? t('cueImportReplaceWarning', { count: plan.removedOther })
+                  : plan.duplicates ? t('cueImportAddDuplicates', { count: plan.duplicates }) : '';
+            warning.hidden = !warning.textContent;
+            syncApply();
+          };
+          choice.addEventListener('change', update);
+          group.append(choice, warning);
+          body.append(group);
+          review = { routine, result, modes };
+          update();
+        }
+      }
+      if (result.ignored.length) body.append(element('p', 'muted', t('cueImportIgnoredTabs', { tabs: result.ignored.join(', ') })));
+      syncApply();
+      (body.querySelector('select') ?? cancel).focus({ preventScroll: true });
+    };
+
+    const plans = () => {
+      const state = readState();
+      if (!review || state.routine !== review.routine) return null;
+      const changes: CueImportChange[] = [];
+      for (const song of review.result.songs) {
+        const mode = review.modes.get(song.trackId) ?? 'skip';
+        const track = state.routine.tracks.find(item => item.id === song.trackId);
+        if (!track || track.duration !== song.duration) return null;
+        const plan = planSongImport(track, song, mode);
+        if (plan.overLimit) return [];
+        if (plan.cues) changes.push({ trackId: song.trackId, cues: plan.cues });
+      }
+      return changes;
+    };
+    const syncApply = () => {
+      const current = review;
+      apply.disabled = !current || !importAvailable() || current.result.songs.some(song => {
+        const mode = current.modes.get(song.trackId) ?? 'skip';
+        const track = current.routine.tracks.find(item => item.id === song.trackId);
+        return mode !== 'skip' && (!track || planSongImport(track, song, mode, () => '').overLimit);
+      });
+    };
+    const applyReview = () => {
+      const state = readState();
+      if (!review || !importAvailable() || !state.cueImport) return;
+      const changes = plans();
+      if (changes === null) { review = null; body.replaceChildren(); apply.disabled = true; fail(new Error(t('cueImportStale'))); return; }
+      if (!changes.length) { feedback.setAttribute('role', 'status'); status.show(t('cueImportNothing')); return; }
+      state.cueImport.apply(changes);
+      close();
+    };
+
+    const sync = () => {
+      const state = readState();
+      templateCommand.disabled = disposed || state.busy || templatePending || !state.routine.tracks.length;
+      templateCommand.setAttribute('aria-busy', String(templatePending));
+      importCommand.disabled = !importAvailable();
+      if (dialog.open && review) syncApply();
+    };
+    const dispose = () => {
+      generation += 1; review = null;
+      if (dialog.open) dialog.close();
+      status.dispose(); menuErrors.dispose();
+    };
+    return { templateCommand, importCommand, menuStatus, fileInput, dialog, sync, dispose };
+  }
 }
