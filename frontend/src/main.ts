@@ -40,6 +40,7 @@ import { errorMessage, formatNumber, formatTime, locale, t, trackCount, validati
 import { accents, applyTheme, palette, readPreferences, savePreferences } from './theme';
 import { actionMenu, createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, makeRange, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
 import { hostedCloudSelectionKey, hostedInvalidationEvent } from './hosted-session';
+import { createScreenWakeLock } from './wake-lock';
 
 const hostedPilot = import.meta.env.VITE_HOSTED_PILOT === 'true';
 const cloudLibrary = createCloudLibrary();
@@ -799,8 +800,10 @@ const cueTable = element('div', 'cue-table-wrap');
 cueSheet.append(cueTable);
 rehearsal.append(stage, sidebar, cueSheet);
 panels.teach.append(routineHeading, snapshotStatus, empty, rehearsal);
+const screenWakeLock = createScreenWakeLock(globalThis.navigator, document);
 const classMode = createClassMode(shell, exitClass,
   () => (startClass.disabled ? tabButtons.get('teach')! : startClass).focus({ preventScroll: true }), active => {
+  screenWakeLock.set(active);
   cancelCueDrag();
   for (const node of [header, navigation, routineHeading, snapshotStatus, sidebar, cueSheet, footer, readyPanel]) node.hidden = active;
   cloudPanel.hidden = active || !hostedPilot;
@@ -2558,6 +2561,7 @@ function disposeApp(): void {
   cloudController?.abort();
   unsubscribeCloud();
   classMode.dispose();
+  screenWakeLock.dispose();
   stopEditorAudio();
   transportOperation.cancel(() => player.stop());
   editorSession?.dispose();
