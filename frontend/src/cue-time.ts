@@ -1,11 +1,11 @@
 export function parseCueTime(text: string): number | null {
   const value = text.trim();
-  if (!/^(?:\d+(?:\.\d+)?|\d+:\d{2}(?:\.\d+)?)$/.test(value)) return null;
+  if (!/^(?:\d+(?:\.\d+)?|\d*:\d{2}(?:\.\d+)?)$/.test(value)) return null;
   const parts = value.split(':');
   const seconds = Number(parts.at(-1));
   // An overflowed seconds part (e.g. "0:60") is a normal typo, not an invalid time -- fold it into
   // the total instead of rejecting it; formatCueTime then redisplays it correctly (as "1:00.0").
-  const result = parts.length === 2 ? Number(parts[0]) * 60 + seconds : seconds;
+  const result = parts.length === 2 ? Number(parts[0] || 0) * 60 + seconds : seconds;
   return Number.isFinite(result) && result >= 0 ? result : null;
 }
 

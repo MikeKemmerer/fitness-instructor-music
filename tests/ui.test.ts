@@ -100,8 +100,11 @@ describe('unified review source guards', () => {
 });
 
 describe('cue time text', () => {
-  it.each(['', ' ', '-1', 'NaN', 'Infinity', '1:2', '1:02:03', '1e2', '.5'])('rejects %j without coercion', value => {
+  it.each(['', ' ', '-1', 'NaN', 'Infinity', '1:2', '1:02:03', '1e2', '.5', ':', ':5', '::32'])('rejects %j without coercion', value => {
     expect(parseCueTime(value)).toBeNull();
+  });
+  it.each([[':32', 32], [' :32.5 ', 32.5], [':75', 75]])('reads a blank minute %j as zero minutes (%s)', (value, expected) => {
+    expect(parseCueTime(value)).toBe(expected);
   });
   it.each([0, 59.999, 60, 60.125, 120, 3.14159, 1199.999])('round trips %s seconds', seconds => {
     expect(parseCueTime(formatCueTime(seconds))).toBe(seconds);
