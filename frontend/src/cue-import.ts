@@ -171,7 +171,7 @@ function parseTime(cell: XlsxCell | undefined): number | null | undefined {
   if (!cell) return undefined;
   if (cell.kind === 'string') {
     const text = cell.value.trim();
-    return text ? parseCueTime(text) : undefined;
+    return text ? parseCueTime(text.startsWith(':') ? `0${text}` : text) : undefined;
   }
   if (cell.kind !== 'number') return null;
   const format = cell.format.toLowerCase().replace(/"[^"]*"|\\.|\[(?![hms]\])[^\]]*\]/g, '');

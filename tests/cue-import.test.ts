@@ -170,6 +170,8 @@ describe('cue import template', () => {
       [undefined, undefined, cell(true), undefined],
       [cell('0:12'), undefined, undefined, cell('x'.repeat(501))],
       [undefined, cell(false), cell(false), undefined],
+      [cell(':32'), undefined, undefined, cell('Blank minute')],
+      [cell(':'), undefined, undefined, cell('Only colon')],
     ];
     const result = parseCueSheets([marker, sheet('01 Song', 'entry-a', rows), sheet('Extra', 'unknown', []),
       sheet('01 Copy', 'entry-a', [])], value);
@@ -181,10 +183,14 @@ describe('cue import template', () => {
       { sheet: '01 Song', row: 8, message: t('cueImportBadCheckbox', { column: t('cueTemplateBeep') }) },
       { sheet: '01 Song', row: 9, message: t('cueImportOrphanCheckbox') },
       { sheet: '01 Song', row: 10, message: t('cueImportLongNote') },
+      { sheet: '01 Song', row: 13, message: t('cueImportBadTime') },
       { sheet: '01 Copy', message: t('cueImportDuplicateTab', { other: '01 Song' }) },
     ]);
     expect(result.ignored).toEqual(['Extra']);
-    expect(result.songs[0]!.cues).toEqual([{ seconds: 30, note: 'Good', beep: true, flash: false }]);
+    expect(result.songs[0]!.cues).toEqual([
+      { seconds: 30, note: 'Good', beep: true, flash: false },
+      { seconds: 32, note: 'Blank minute', beep: false, flash: false },
+    ]);
     expect(() => parseCueSheets([marker, sheet('Other', 'nope', [])], value)).toThrow('cue_import_no_songs');
   });
 });
