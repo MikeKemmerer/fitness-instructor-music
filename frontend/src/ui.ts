@@ -119,6 +119,35 @@ export async function watchOfflineShell(
   } catch { status('failed'); }
 }
 
+type UpdateWorkers = Pick<ServiceWorkerContainer, 'getRegistration'>;
+
+function settled(worker: ServiceWorker, states: readonly ServiceWorkerState[], timeout: number): Promise<ServiceWorkerState> {
+  return new Promise(resolve => {
+    const finish = () => { clearTimeout(timer); worker.removeEventListener('statechange', changed); resolve(worker.state); };
+    const changed = () => { if (states.includes(worker.state)) finish(); };
+    const timer = setTimeout(finish, timeout);
+    worker.addEventListener('statechange', changed);
+    changed();
+  });
+}
+
+export async function checkForAppUpdate(serviceWorker: UpdateWorkers, timeout = 120_000): Promise<boolean> {
+  const registration = await serviceWorker.getRegistration();
+  if (!registration) throw new Error('update_unavailable');
+  await registration.update();
+  const installing = registration.installing;
+  if (installing) await settled(installing, ['installed', 'activated', 'redundant'], timeout);
+  return Boolean(registration.waiting);
+}
+
+export async function activateAppUpdate(serviceWorker: UpdateWorkers, timeout = 30_000): Promise<void> {
+  const waiting = (await serviceWorker.getRegistration())?.waiting;
+  if (!waiting) throw new Error('update_unavailable');
+  const activated = settled(waiting, ['activated', 'redundant'], timeout);
+  waiting.postMessage({ type: 'ACTIVATE_UPDATE' });
+  if (await activated !== 'activated') throw new Error('update_failed');
+}
+
 export function createTransportOperation(changed: () => void, failed: (error: unknown) => void) {
   let generation = 0;
   let pending = false;

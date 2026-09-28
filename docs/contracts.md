@@ -404,7 +404,7 @@ Export from frontend/src/offline.ts:
 - `createDemoRoutine(): Promise<Routine>`: two deterministic synthetic WAV songs with sample cues, no external media.
 - `getReadiness(routine: Routine): Promise<{ ready: boolean; missing: string[] }>`
 
-Use IndexedDB directly or installed idb. Any schema/version or export-name changes go to Horton before UI integration. Service worker may cache production application shell, never blindly cache all fetched URLs/auth responses. No cache removal during active rehearsal or auto-skip-waiting updates. The initial local demo must not promise permanent browser storage or remote revocation.
+Use IndexedDB directly or installed idb. Any schema/version or export-name changes go to Horton before UI integration. Service worker may cache production application shell, never blindly cache all fetched URLs/auth responses. No cache removal during active rehearsal or auto-skip-waiting updates. The only activation path is Settings > Check for updates > Update now: the page posts `ACTIVATE_UPDATE` to the waiting worker (accepted only from a same-origin window), which calls `skipWaiting()` without `clients.claim()`; the page then reloads. Update now is refused during playback, filler or Class mode and confirms before discarding unsaved edits or a paused position. The initial local demo must not promise permanent browser storage or remote revocation.
 
 Store by routine ID with a separate active pointer; migrate the previous `active` record without losing it. Local CAS failures surface routine_conflict rather than retrying stale content automatically. Referenced media deletion must fail. These guards are local accidental-edit protection, never a substitute for authenticated server mutations.
 

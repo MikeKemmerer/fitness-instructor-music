@@ -5181,6 +5181,20 @@ describe('production-only service worker shell', () => {
     },
   );
 
+  it('activates a waiting update only when a same-origin window explicitly asks', async () => {
+    const shell = worker();
+    await shell.install();
+    for (const client of [null, { type: 'worker', url: origin }, { type: 'window', url: 'https://evil.example/' }, { type: 'window', url: '' }]) {
+      expect(shell.retire(client, { type: 'ACTIVATE_UPDATE' }).pending).toBeUndefined();
+    }
+    expect(shell.skipWaiting).not.toHaveBeenCalled();
+    const request = shell.retire({ type: 'window', id: 'app', url: `${origin}` }, { type: 'ACTIVATE_UPDATE' });
+    await request.pending;
+    expect(shell.skipWaiting).toHaveBeenCalledOnce();
+    expect(shell.claim).not.toHaveBeenCalled();
+    expect(shell.deleteCache).not.toHaveBeenCalled();
+  });
+
   it.each(['.vite/manifest.json', 'index.html', 'assets/app-123.js'])(
     'waits for a paused %s fetch to settle before acknowledging retirement', async path => {
       const shell = worker(manifest, { REHEARSAL_HOSTED: true });

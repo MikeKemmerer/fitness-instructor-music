@@ -180,6 +180,13 @@ function cachedShellResponse(target) {
 }
 
 self.addEventListener('message', event => {
+  if (event.data?.type === 'ACTIVATE_UPDATE') {
+    const source = event.source;
+    if (retired || !source || source.type !== 'window') return;
+    try { if (new URL(source.url).origin !== SCOPE.origin) return; } catch { return; }
+    event.waitUntil(installWork.then(() => self.skipWaiting()));
+    return;
+  }
   if (event.data?.type !== 'RETIRE_REHEARSAL') return;
   const source = event.source;
   if (!source || source.type !== 'window' || typeof source.id !== 'string' || !source.id.trim()) return;

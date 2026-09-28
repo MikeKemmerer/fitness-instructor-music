@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createClassMode, createTransportOperation, cueAtSeconds, gainSlider, gainToPosition, nextMoveCountdown, positionToGain, transientText, watchOfflineShell } from '../frontend/src/ui';
+import { activateAppUpdate, checkForAppUpdate, createClassMode, createTransportOperation, cueAtSeconds, gainSlider, gainToPosition, nextMoveCountdown, positionToGain, transientText, watchOfflineShell } from '../frontend/src/ui';
 
 // The gain slider's own position is on a log/exponential taper with integer (1-step) positions,
 // so round-tripping a target gain through it doesn't reproduce the target exactly.
@@ -2411,6 +2411,44 @@ describe('offline shell status', () => {
     installing.state = 'redundant';
     installing.dispatchEvent(new Event('statechange'));
     expect(status).toHaveBeenLastCalledWith('failed');
+  });
+
+  const updateWorker = (state: string) => Object.assign(new EventTarget(), { state, postMessage: vi.fn() });
+  const setState = (worker: ReturnType<typeof updateWorker>, state: string) => {
+    worker.state = state; worker.dispatchEvent(new Event('statechange'));
+  };
+
+  it('checks for an update, waits for it to finish downloading and reports whether one is ready', async () => {
+    const installing = updateWorker('installing');
+    const registration = { installing: null as unknown, waiting: null as unknown,
+      update: vi.fn(async () => { registration.installing = installing; }) };
+    const workers = { getRegistration: vi.fn(async () => registration as unknown as ServiceWorkerRegistration) };
+    const checking = checkForAppUpdate(workers);
+    await vi.waitFor(() => expect(registration.update).toHaveBeenCalledOnce());
+    registration.waiting = installing;
+    setState(installing, 'installed');
+    expect(await checking).toBe(true);
+    registration.installing = null; registration.waiting = null;
+    expect(await checkForAppUpdate(workers)).toBe(false);
+    registration.update.mockRejectedValueOnce(new Error('offline'));
+    await expect(checkForAppUpdate(workers)).rejects.toThrow('offline');
+    await expect(checkForAppUpdate({ getRegistration: async () => undefined })).rejects.toThrow('update_unavailable');
+  });
+
+  it('asks only the waiting worker to activate and fails if it becomes redundant', async () => {
+    const waiting = updateWorker('installed');
+    const workers = { getRegistration: vi.fn(async () => ({ waiting }) as unknown as ServiceWorkerRegistration) };
+    const activating = activateAppUpdate(workers);
+    await vi.waitFor(() => expect(waiting.postMessage).toHaveBeenCalledWith({ type: 'ACTIVATE_UPDATE' }));
+    setState(waiting, 'activating'); setState(waiting, 'activated');
+    await expect(activating).resolves.toBeUndefined();
+    const broken = updateWorker('installed');
+    const failing = activateAppUpdate({ getRegistration: async () => ({ waiting: broken }) as unknown as ServiceWorkerRegistration });
+    await vi.waitFor(() => expect(broken.postMessage).toHaveBeenCalled());
+    setState(broken, 'redundant');
+    await expect(failing).rejects.toThrow('update_failed');
+    await expect(activateAppUpdate({ getRegistration: async () => ({ waiting: null }) as unknown as ServiceWorkerRegistration }))
+      .rejects.toThrow('update_unavailable');
   });
 });
 

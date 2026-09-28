@@ -38,7 +38,7 @@ import { createFillerLibrary } from './filler-library';
 import { createMediaLibrary } from './media-library';
 import { errorMessage, formatNumber, formatTime, locale, t, trackCount, validationMessage, type MessageKey } from './i18n';
 import { accents, applyTheme, palette, readPreferences, savePreferences } from './theme';
-import { actionMenu, createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, makeRange, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
+import { actionMenu, activateAppUpdate, checkForAppUpdate, createClassMode, createTransportOperation, cueAtSeconds, element, field, iconButton, makeRange, nextMoveCountdown, setButtonIcon, transientText, watchOfflineShell } from './ui';
 import { hostedCloudSelectionKey, hostedInvalidationEvent } from './hosted-session';
 import { createScreenWakeLock } from './wake-lock';
 
@@ -1560,11 +1560,56 @@ offlineStatus.setAttribute('role', 'status');
 const updateStatus = element('p', 'muted storage-notice', t('offlineUpdateWaiting'));
 updateStatus.setAttribute('role', 'status');
 updateStatus.hidden = true;
+const updateFeedback = element('p', 'muted storage-notice');
+updateFeedback.setAttribute('role', 'status');
+updateFeedback.hidden = true;
+const updateFeedbackDisplay = transientText(updateFeedback);
+let updateBusy = false;
+const updateCheck = iconButton(t('appUpdateCheck'), RefreshCw, () => { void checkUpdate(); }, true);
+const updateApply = iconButton(t('appUpdateApply'), Download, () => { void applyUpdate(); }, true);
+updateApply.hidden = true;
+const updateActions = element('div', 'action-row');
+updateActions.append(updateCheck, updateApply);
+updateActions.hidden = !import.meta.env.PROD || !('serviceWorker' in navigator);
+const setUpdateWaiting = (waiting: boolean) => { updateStatus.hidden = !waiting; updateApply.hidden = !waiting; };
+const setUpdateBusy = (busy: boolean) => { updateBusy = busy; updateCheck.disabled = updateApply.disabled = busy; };
+async function checkUpdate(): Promise<void> {
+  if (updateBusy || appDisposed) return;
+  setUpdateBusy(true);
+  updateFeedbackDisplay.show(t('appUpdateChecking'), false);
+  try {
+    const waiting = await checkForAppUpdate(navigator.serviceWorker);
+    setUpdateWaiting(waiting);
+    updateFeedbackDisplay.show(waiting ? '' : t('appUpdateCurrent'), false);
+  } catch { updateFeedbackDisplay.show(t('appUpdateCheckFailed')); }
+  finally { setUpdateBusy(false); }
+}
+async function applyUpdate(): Promise<void> {
+  if (updateBusy || appDisposed) return;
+  if (shell.classList.contains('class-mode') || transportOperation.pending || (loaded && ['playing', 'filler'].includes(state?.status))) {
+    updateFeedbackDisplay.show(t('appUpdateBusy'));
+    return;
+  }
+  const unsaved = dirty || playlistEditor?.hasUnsaved() || classPanel?.hasUnsaved() || composition?.hasUnsaved()
+    || (loaded && state?.status === 'paused');
+  if (unsaved && !confirm(t('appUpdateConfirm'))) return;
+  setUpdateBusy(true);
+  updateFeedbackDisplay.show(t('appUpdateApplying'), false);
+  try {
+    await activateAppUpdate(navigator.serviceWorker);
+    disposeApp();
+    window.location.reload();
+  } catch {
+    updateFeedbackDisplay.show(t('appUpdateFailed'));
+    setUpdateBusy(false);
+  }
+}
 const buildId = import.meta.env.VITE_APP_BUILD_ID;
 const buildStatus = element('p', 'muted storage-notice', t('buildIdentity', {
   id: typeof buildId === 'string' && buildId.trim() ? buildId : t('buildUnknown'),
 }));
 storage.append(element('h2', '', t(hostedPilot ? 'hostedStorage' : 'localStorage')), offlineStatus, updateStatus, buildStatus,
+  updateActions, updateFeedback,
   element('p', 'muted storage-notice', t(hostedPilot ? 'hostedStorageNotice' : 'storageNotice')));
 if (hostedPilot) {
   const signOutNotice = element('p', 'muted storage-notice', t('hostedSignOutNotice'));
@@ -2534,7 +2579,7 @@ if (import.meta.env.PROD) {
   if ('serviceWorker' in navigator) {
     const register = () => { void watchOfflineShell(navigator.serviceWorker, status => {
       offlineStatusDisplay.show(t(({ pending: 'offlinePending', ready: 'offlineReady', failed: 'offlineFailed' } as const)[status]), status === 'failed');
-    }, waiting => { updateStatus.hidden = !waiting; }); };
+    }, setUpdateWaiting); };
     if (document.readyState === 'complete') register();
     else window.addEventListener('load', register, { once: true });
   } else { offlineStatusDisplay.show(t('offlineUnavailable'), false); }
@@ -2543,7 +2588,7 @@ function disposeApp(): void {
   if (appDisposed) return;
   cancelCueDrag();
   appDisposed = true;
-  noticeDisplay.dispose(); validationDisplay.dispose(); cloudFeedbackErrors.dispose(); playbackErrors.dispose(); offlineStatusDisplay.dispose();
+  noticeDisplay.dispose(); validationDisplay.dispose(); cloudFeedbackErrors.dispose(); playbackErrors.dispose(); offlineStatusDisplay.dispose(); updateFeedbackDisplay.dispose();
   window.removeEventListener('online', onOnline);
   protection.dispose();
   recoveries.dispose();
