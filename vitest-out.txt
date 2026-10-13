@@ -1,0 +1,13 @@
+
+> fitness-instructor-music-api@0.1.0 test
+> vitest run --config vitest.config.ts
+
+
+ RUN  v4.1.11 C:/Users/micha/Workspace/fitness-instructor-music/fitness-instructor-music/api
+
+
+ Test Files  3 passed (3)
+      Tests  265 passed (265)
+   Start at  20:06:05
+   Duration  71.30s (transform 1.09s, setup 0ms, import 3.13s, tests 73.66s, environment 0ms)
+
