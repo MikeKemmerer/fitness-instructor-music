@@ -146,6 +146,7 @@ export const exportColumns: readonly ExportColumn[] = freezeTree([
   { id: 'cue.note', label: 'note', group: 'exportCueFields', type: 'string', width: 60, default: true, value: row => row.cue?.note },
   { id: 'cue.beep', label: 'cueBeep', group: 'exportCueFields', type: 'boolean', width: 12, default: true, value: row => row.cue ? row.cue.beep ?? false : null },
   { id: 'cue.flash', label: 'cueFlash', group: 'exportCueFields', type: 'boolean', width: 12, default: true, pdfHidden: true, value: row => row.cue ? row.cue.flash ?? false : null },
+  { id: 'cue.crucial', label: 'cueCrucial', group: 'exportCueFields', type: 'boolean', width: 12, default: true, pdfHidden: true, value: row => row.cue ? row.cue.crucial ?? false : null },
   { id: 'filler.mode', label: 'fillerMode', group: 'exportFillerFields', type: 'string', width: 16, default: false, value: row => row.routine.filler.mode },
   { id: 'filler.seconds', label: 'exportFillerSeconds', group: 'exportFillerFields', type: 'number', width: 16, default: false, value: row => round2(row.routine.filler.seconds) },
   { id: 'filler.bpm', label: 'exportFillerBpm', group: 'exportFillerFields', type: 'number', width: 20, default: false, value: row => row.routine.filler.bpm },
@@ -455,14 +456,23 @@ export function buildPdfTables(packet: PdfPacket, palette: ExportPalette = defau
     ...settingsTables,
     ...walkTable(packet.walkIn),
     ...packet.tracks.filter(track => track.heading || track.details || track.columns.length).flatMap(track => {
-      const bands = Array.from({ length: Math.max(1, Math.ceil(track.columns.length / 6)) }, (_, index) => {
-        const columns = track.columns.slice(index * 6, (index + 1) * 6);
-        const time = track.columns.find(column => column.id === 'cue.time');
-        if (index > 0 && time && !columns.includes(time)) columns.unshift(time);
-        return columns;
-      });
+      const time = track.columns.find(column => column.id === 'cue.time');
+      const weight = (column: ExportColumn) => column.id === 'cue.note' ? 300 : column.id === 'row.status' ? 90 : 65;
+      const bands: ExportColumn[][] = [];
+      const rest = [...track.columns];
+      // Bands hold at most six fields; later bands repeat the time and stay narrow enough that no column drops below 60pt.
+      while (rest.length || !bands.length) {
+        const columns: ExportColumn[] = bands.length && time ? [time] : [];
+        while (rest.length && columns.length < 6) {
+          if (columns.includes(rest[0]!)) { rest.shift(); continue; }
+          if (bands.length && columns.reduce((total, column) => total + weight(column), weight(rest[0]!)) > 585) break;
+          columns.push(rest.shift()!);
+        }
+        if (bands.length && columns.length === 1 && columns[0] === time) break;
+        bands.push(columns);
+      }
       return bands.map(columns => {
-      const widths = columns.map(column => column.id === 'cue.note' ? 300 : column.id === 'row.status' ? 90 : 65);
+      const widths = columns.map(weight);
       const totalWidth = widths.reduce((total, width) => total + width, 0);
       return {
       ...common, theme: 'striped' as const,

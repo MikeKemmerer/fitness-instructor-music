@@ -694,8 +694,14 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       flash.checked = cue.flash === true;
       flash.addEventListener('change', () => mutate(() => { cue.flash = flash.checked; }));
       flashLabel.append(flash, element('span', '', t('cueFlash')));
+      const crucialLabel = element('label', 'switch-label cue-crucial');
+      const crucial = element('input');
+      crucial.type = 'checkbox';
+      crucial.checked = cue.crucial === true;
+      crucial.addEventListener('change', () => mutate(() => { cue.crucial = crucial.checked; }));
+      crucialLabel.append(crucial, element('span', '', t('cueCrucial')));
       const cueToggles = element('div', 'cue-toggles');
-      cueToggles.append(beepLabel, flashLabel);
+      cueToggles.append(beepLabel, flashLabel, crucialLabel);
       const removeCue = iconButton(t('deleteCue'), Trash2, () => {
         if (!trackEditable() || !confirm(t('confirmDeleteCue', { track: track.title, cue: cue.note }))) return;
         if (!trackEditable() || !track.cues.includes(cue)) return;

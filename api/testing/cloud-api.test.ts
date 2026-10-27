@@ -3312,7 +3312,14 @@ describe('duplicate audio storage', () => {
     const { api, headers } = await managementFixture();
     const input = routine(await uploadAudio(api.media, headers, wav(4096)));
     input.routine.tracks[0]!.artist = 'Embedded Artist';
-    expect((await api.routines.create(headers, input)).routine.tracks[0]!.artist).toBe('Embedded Artist');
+    input.routine.tracks[0]!.cues[0]!.crucial = true;
+    const created = await api.routines.create(headers, input);
+    expect(created.routine.tracks[0]!.artist).toBe('Embedded Artist');
+    expect(created.routine.tracks[0]!.cues[0]!.crucial).toBe(true);
+    const badCue = structuredClone(input);
+    badCue.routine.id = randomUUID();
+    (badCue.routine.tracks[0]!.cues[0] as unknown as { crucial: unknown }).crucial = 'yes';
+    await expect(api.routines.create(headers, badCue)).rejects.toMatchObject({ status: 400 });
     for (const artist of ['x'.repeat(301), 7]) {
       const bad = structuredClone(input);
       bad.routine.id = randomUUID();

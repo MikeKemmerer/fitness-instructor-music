@@ -14,6 +14,7 @@ export interface Cue {
   note: string;
   beep?: boolean;
   flash?: boolean;
+  crucial?: boolean;
 }
 
 export interface Track {
@@ -164,6 +165,7 @@ export function validateRoutine(routine: Routine): string[] {
       if (typeof cue.note !== 'string' || !cue.note.trim() || cue.note.length > 500) errors.push('Invalid cue note');
       if (cue.beep !== undefined && typeof cue.beep !== 'boolean') errors.push('Invalid cue beep');
       if (cue.flash !== undefined && typeof cue.flash !== 'boolean') errors.push('Invalid cue flash');
+      if (cue.crucial !== undefined && typeof cue.crucial !== 'boolean') errors.push('Invalid cue crucial flag');
       if (!cue.anchor || typeof cue.anchor !== 'object' || !['timestamp', 'count', 'interval'].includes(cue.anchor.kind)) {
         errors.push('Invalid cue kind');
         continue;

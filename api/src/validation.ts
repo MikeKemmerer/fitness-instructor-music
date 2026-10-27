@@ -63,9 +63,11 @@ export function expectedRevision(value: unknown): number {
 function parseCue(value: unknown): Cue {
   const hasBeep = Object.prototype.hasOwnProperty.call(value, 'beep');
   const hasFlash = Object.prototype.hasOwnProperty.call(value, 'flash');
+  const hasCrucial = Object.prototype.hasOwnProperty.call(value, 'crucial');
   const fields = ['id', 'anchor', 'note'];
   if (hasBeep) fields.push('beep');
   if (hasFlash) fields.push('flash');
+  if (hasCrucial) fields.push('crucial');
   const cue = strictRecord(value, fields);
   const anchor = cue.anchor;
   if (typeof anchor !== 'object' || anchor === null) invalid();
@@ -79,6 +81,7 @@ function parseCue(value: unknown): Cue {
     id: text(cue.id), note: text(cue.note, 500),
     ...(hasBeep ? { beep: boolean(cue.beep) } : {}),
     ...(hasFlash ? { flash: boolean(cue.flash) } : {}),
+    ...(hasCrucial ? { crucial: boolean(cue.crucial) } : {}),
     anchor: kind === 'count' ? { kind, count: position } : { kind, seconds: position },
   };
 }

@@ -27,6 +27,7 @@ export interface ImportedCue {
   readonly note: string;
   readonly beep: boolean;
   readonly flash: boolean;
+  readonly crucial: boolean;
 }
 
 export interface CueImportSong {
@@ -104,7 +105,7 @@ export function buildCueTemplateSheets(routine: Routine, now = new Date()): Temp
       [{ type: String, value: songHeading(track, index), fontWeight: 'bold' }, null, null,
         labelCell(t('cueTemplateLength', { time: exportTime(track.duration) ?? '' })),
         labelCell(t('cueTemplateSongId')), labelCell(track.id)],
-      [header(t('cueTemplateTimestamp')), header(t('cueTemplateBeep')), header(t('cueTemplateFlash')), header(t('cueTemplateNote'))],
+      [header(t('cueTemplateTimestamp')), header(t('cueTemplateBeep')), header(t('cueTemplateFlash')), header(t('cueTemplateNote')), header(t('cueTemplateCrucial'))],
     ];
     for (let row = 0; row < rows; row++) {
       const item = cues[row];
@@ -113,6 +114,7 @@ export function buildCueTemplateSheets(routine: Routine, now = new Date()): Temp
         checkboxCell(item?.cue.beep === true),
         checkboxCell(item?.cue.flash === true),
         textCell(item?.cue.note),
+        checkboxCell(item?.cue.crucial === true),
       ]);
     }
     return { sheet: cueTemplateSheetName(index, track.title), stickyRowsCount: 2,
@@ -219,11 +221,13 @@ export function parseCueSheets(sheets: readonly XlsxSheet[], routine: Routine): 
       const time = parseTime(at(sheet, row, 0));
       const beep = parseFlag(at(sheet, row, 1));
       const flash = parseFlag(at(sheet, row, 2));
+      const crucial = parseFlag(at(sheet, row, 4));
       const before = issues.length;
       if (beep === null) report(t('cueImportBadCheckbox', { column: t('cueTemplateBeep') }));
       if (flash === null) report(t('cueImportBadCheckbox', { column: t('cueTemplateFlash') }));
+      if (crucial === null) report(t('cueImportBadCheckbox', { column: t('cueTemplateCrucial') }));
       if (time === undefined && !note) {
-        if (beep || flash) report(t('cueImportOrphanCheckbox'));
+        if (beep || flash || crucial) report(t('cueImportOrphanCheckbox'));
         continue;
       }
       const seconds = typeof time === 'number' ? Math.round(time * 100) / 100 : time;
@@ -232,7 +236,7 @@ export function parseCueSheets(sheets: readonly XlsxSheet[], routine: Routine): 
       else if (seconds >= track.duration) report(t('cueImportPastEnd', { time: exportTime(track.duration) ?? '' }));
       if (!note) report(t('cueImportMissingNote'));
       else if (note.length > MAX_NOTE) report(t('cueImportLongNote'));
-      if (issues.length === before && typeof seconds === 'number') cues.push({ seconds, note, beep: beep === true, flash: flash === true });
+      if (issues.length === before && typeof seconds === 'number') cues.push({ seconds, note, beep: beep === true, flash: flash === true, crucial: crucial === true });
     }
     if (cues.length > MAX_TRACK_CUES) issues.push({ sheet: sheet.name, message: t('cueImportTooManyRows') });
     songs.push({ trackId: id, trackIndex, duration: track.duration, sheet: sheet.name, heading: songHeading(track, trackIndex), cues });
@@ -256,7 +260,7 @@ export function planSongImport(track: Track, song: CueImportSong, mode: CueImpor
   newId: () => string = () => crypto.randomUUID()): CueImportPlan {
   if (mode === 'skip') return { cues: null, removedOther: 0, removedAll: 0, duplicates: 0, overLimit: false };
   const create = (cue: ImportedCue): Cue => ({ id: newId(), anchor: { kind: 'timestamp', seconds: cue.seconds },
-    note: cue.note, beep: cue.beep, flash: cue.flash });
+    note: cue.note, beep: cue.beep, flash: cue.flash, ...(cue.crucial ? { crucial: true } : {}) });
   const sort = (cues: Cue[]) => cues.map((cue, order) => ({ cue, order, seconds: effectiveSeconds(cue, track) }))
     .sort((first, second) => first.seconds - second.seconds || first.order - second.order).map(item => item.cue);
   if (mode === 'replace') {

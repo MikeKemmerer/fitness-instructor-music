@@ -77,8 +77,8 @@ describe('cue import template', () => {
     const styles = strFromU8(files['xl/styles.xml']!);
     const xfs = [...styles.slice(styles.indexOf('<cellXfs'), styles.indexOf('</cellXfs>')).matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(match => match[0]);
     const song = strFromU8(files['xl/worksheets/sheet2.xml']!);
-    const booleans = [...song.matchAll(/<c r="([BC]\d+)" s="(\d+)" t="b">/g)];
-    expect(booleans.length).toBeGreaterThan(100);
+    const booleans = [...song.matchAll(/<c r="([BCE]\d+)" s="(\d+)" t="b">/g)];
+    expect(booleans.length).toBeGreaterThan(150);
     for (const [, , style] of booleans) expect(xfs[Number(style)]).toContain('xfComplement');
     const strings = [...song.matchAll(/<c r="[AD]\d+" s="(\d+)"/g)].map(match => Number(match[1]));
     for (const style of strings) expect(xfs[style]).not.toContain('xfComplement');
@@ -96,6 +96,7 @@ describe('cue import template', () => {
 
   it('round-trips the template back to the same timestamp cues without count cues', async () => {
     const value = routine();
+    value.tracks[0]!.cues.find(cue => cue.note === 'Plié pulses')!.crucial = true;
     const { bytes } = await templateFiles(value);
     const sheets = readXlsx(bytes);
     expect(sheets.map(item => item.name)).toEqual(['How to import', '01 Warm up "intro"', '02 Thighs']);
@@ -104,8 +105,8 @@ describe('cue import template', () => {
     expect(result.ignored).toEqual([]);
     expect(result.songs.map(song => [song.trackId, song.cues])).toEqual([
       ['entry-a', [
-        { seconds: 2.25, note: 'Set up <first>', beep: false, flash: true },
-        { seconds: 65.5, note: 'Plié pulses', beep: true, flash: false },
+        { seconds: 2.25, note: 'Set up <first>', beep: false, flash: true, crucial: false },
+        { seconds: 65.5, note: 'Plié pulses', beep: true, flash: false, crucial: true },
       ]],
       ['entry-b', []],
     ]);
@@ -152,9 +153,9 @@ describe('cue import template', () => {
     expect(sheets[1]!.rows.get(3)?.get(3)).toEqual({ kind: 'string', value: 'Plié & hold' });
     const parsed = parseCueSheets([sheets[0]!, { ...sheets[1]!, rows: new Map([...sheets[1]!.rows].filter(([row]) => row !== 5)) }], routine());
     expect(parsed.songs[0]!.cues).toEqual([
-      { seconds: 83, note: 'Plié & hold', beep: true, flash: false },
-      { seconds: 83.5, note: 'Lift \u2014 hold', beep: false, flash: true },
-      { seconds: 12.35, note: 'Seconds', beep: false, flash: false },
+      { seconds: 83, note: 'Plié & hold', beep: true, flash: false, crucial: false },
+      { seconds: 83.5, note: 'Lift \u2014 hold', beep: false, flash: true, crucial: false },
+      { seconds: 12.35, note: 'Seconds', beep: false, flash: false, crucial: false },
     ]);
   });
 
@@ -188,8 +189,8 @@ describe('cue import template', () => {
     ]);
     expect(result.ignored).toEqual(['Extra']);
     expect(result.songs[0]!.cues).toEqual([
-      { seconds: 30, note: 'Good', beep: true, flash: false },
-      { seconds: 32, note: 'Blank minute', beep: false, flash: false },
+      { seconds: 30, note: 'Good', beep: true, flash: false, crucial: false },
+      { seconds: 32, note: 'Blank minute', beep: false, flash: false, crucial: false },
     ]);
     expect(() => parseCueSheets([marker, sheet('Other', 'nope', [])], value)).toThrow('cue_import_no_songs');
   });
@@ -204,11 +205,11 @@ describe('cue import planning', () => {
   it('replaces every cue including counted ones, sorted, and reports what is removed', () => {
     const value = routine(); counter = 0;
     const plan = planSongImport(value.tracks[0]!, song([
-      { seconds: 50, note: 'B', beep: false, flash: true }, { seconds: 10, note: 'A', beep: true, flash: false },
+      { seconds: 50, note: 'B', beep: false, flash: true, crucial: true }, { seconds: 10, note: 'A', beep: true, flash: false, crucial: false },
     ]), 'replace', id);
     expect(plan.cues).toEqual([
       { id: 'new-2', anchor: { kind: 'timestamp', seconds: 10 }, note: 'A', beep: true, flash: false },
-      { id: 'new-1', anchor: { kind: 'timestamp', seconds: 50 }, note: 'B', beep: false, flash: true },
+      { id: 'new-1', anchor: { kind: 'timestamp', seconds: 50 }, note: 'B', beep: false, flash: true, crucial: true },
     ]);
     expect(plan).toMatchObject({ removedOther: 1, removedAll: 0, duplicates: 0, overLimit: false });
     expect(planSongImport(value.tracks[0]!, song([]), 'replace', id)).toMatchObject({ cues: [], removedAll: 3 });
@@ -220,10 +221,10 @@ describe('cue import planning', () => {
     const value = routine(); counter = 0;
     const before = structuredClone(value.tracks[0]!.cues);
     const plan = planSongImport(value.tracks[0]!, song([
-      { seconds: 2.25, note: 'Set up <first>', beep: true, flash: false },
-      { seconds: 2, note: 'Counted', beep: false, flash: false },
-      { seconds: 30, note: 'New', beep: false, flash: false },
-      { seconds: 30, note: 'New', beep: true, flash: false },
+      { seconds: 2.25, note: 'Set up <first>', beep: true, flash: false, crucial: false },
+      { seconds: 2, note: 'Counted', beep: false, flash: false, crucial: false },
+      { seconds: 30, note: 'New', beep: false, flash: false, crucial: false },
+      { seconds: 30, note: 'New', beep: true, flash: false, crucial: false },
     ]), 'add', id);
     expect(plan.duplicates).toBe(3);
     expect(plan.cues!.map(cue => cue.id)).toEqual(['count', 'early', 'new-1', 'late']);
@@ -233,7 +234,7 @@ describe('cue import planning', () => {
   it('skips untouched songs and flags results over the per-song cue limit', () => {
     const value = routine();
     expect(planSongImport(value.tracks[0]!, song([]), 'skip')).toEqual({ cues: null, removedOther: 0, removedAll: 0, duplicates: 0, overLimit: false });
-    const many = Array.from({ length: 1001 }, (_, index) => ({ seconds: index / 10, note: `Cue ${index}`, beep: false, flash: false }));
+    const many = Array.from({ length: 1001 }, (_, index) => ({ seconds: index / 10, note: `Cue ${index}`, beep: false, flash: false, crucial: false }));
     expect(planSongImport(value.tracks[0]!, song(many), 'replace').overLimit).toBe(true);
   });
 

@@ -10,8 +10,8 @@ export function transitionOverlap(requested: number, outgoing: number, incoming:
   return Math.max(0, Math.min(requested, outgoing / 2, incoming / 2));
 }
 
-export function projectCues(track: Track, elapsed: number) {
-  const cues = track.cues.map(cue => ({ note: cue.note, seconds: cueSeconds(cue, track) }))
+export function projectCues(track: Track, elapsed: number, crucialOnly = false) {
+  const cues = track.cues.filter(cue => !crucialOnly || cue.crucial === true).map(cue => ({ note: cue.note, seconds: cueSeconds(cue, track) }))
     .sort((first, second) => first.seconds - second.seconds);
   const current = cues.filter(cue => cue.seconds <= elapsed).at(-1);
   const next = cues.find(cue => cue.seconds > elapsed);
@@ -82,6 +82,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
   let routineStart: number | null = null;
   let routineEnd: number | null = null;
   let state = initialState();
+  let crucialOnly = false;
   let segments: Segment[] = [];
   let context: AudioContext | null = null;
   let musicBus: GainNode | null = null;
@@ -233,14 +234,14 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     const elapsed = Math.min(current.duration, Math.max(0, seconds - current.start));
     const track = routine.tracks[current.trackIndex];
     const followingSong = segments.find(segment => segment.kind === 'song' && segment.trackIndex === current.trackIndex + 1);
-    const cues = current.kind === 'song' ? projectCues(track, elapsed) : {
+    const cues = current.kind === 'song' ? projectCues(track, elapsed, crucialOnly) : {
       currentCue: '', nextCue: '', nextCueIn: null as number | null,
     };
     let nextCueTrackTitle: string | null = null;
     if (!cues.nextCue) {
       for (let index = current.trackIndex + 1; index < routine.tracks.length; index++) {
         const followingTrack = routine.tracks[index];
-        const preview = projectCues(followingTrack, 0);
+        const preview = projectCues(followingTrack, 0, crucialOnly);
         const note = preview.currentCue || preview.nextCue;
         if (!note) continue;
         const song = segments.find(segment => segment.kind === 'song' && segment.trackIndex === index);
@@ -577,7 +578,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
   function segmentBeepOffsets(segment: Segment): number[] {
     if (!routine || phaseOf(segment) !== 'routine') return [];
     const track = routine.tracks[segment.trackIndex];
-    const cueOffsets = track.cues.filter(cue => cue.beep === true).map(cue => cueSeconds(cue, track));
+    const cueOffsets = track.cues.filter(cue => cue.beep === true && (!crucialOnly || cue.crucial === true)).map(cue => cueSeconds(cue, track));
     return beepOffsets(segment.duration, routine.beepEvery, routine.beepRemaining, routine.beepOnceRemaining, cueOffsets);
   }
 
@@ -586,7 +587,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     const track = routine.tracks[segment.trackIndex];
     const offsets = new Set<number>();
     for (const cue of track.cues) {
-      if (cue.flash !== true) continue;
+      if (cue.flash !== true || (crucialOnly && cue.crucial !== true)) continue;
       const seconds = cueSeconds(cue, track);
       if (!Number.isFinite(seconds)) continue;
       const offset = Math.round(seconds * 1e6) / 1e6;
@@ -1157,6 +1158,11 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     setVolume(value) { if (Number.isFinite(value)) volume = Math.max(0, Math.min(1, value)); updateBuses(); },
     setDucked(value) { state = { ...state, ducked: value }; updateBuses(); emit(); },
     setBeepsMuted(value) { state = { ...state, beepsMuted: value }; updateBuses(); emit(); },
+    setCrucialCuesOnly(value) {
+      if (crucialOnly === value) return;
+      crucialOnly = value;
+      project(); emit();
+    },
     subscribe(listener) {
       if (disposed) throw new Error('player_disposed');
       listeners.add(listener);

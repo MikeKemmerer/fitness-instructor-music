@@ -193,17 +193,19 @@ svg { flex: none; }
 .button.cue-handle { position: absolute; inset-block-start: 0; transform: translateX(-50%); inline-size: 44px; block-size: 44px; padding: 10px; touch-action: none; user-select: none; cursor: ew-resize; }
 .cue-handle:focus-visible, .cue-handle.dragging { z-index: 2; }
 .cue-handle.dragging { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-.clocks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-block: 12px 22px; }
+.clocks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-block: 12px 22px; }
 .clocks > div { display: flex; flex-direction: column; min-inline-size: 0; }
 .clocks > div:last-child { align-items: flex-end; }
 .clock-label { font-size: .7rem; color: var(--muted); margin-block-end: 4px; }
 .clock { font-family: 'Barlow Condensed', sans-serif; font-size: 2.3rem; font-weight: 500; line-height: 1; }
 .class-clock { font-family: 'Barlow Condensed', sans-serif; font-size: 1.6rem; line-height: 1.4; }
+.class-clock-box { display: flex; flex-direction: column; flex: none; order: -1; padding-inline-end: 14px; border-inline-end: 1px solid var(--border); }
+.session-sound .crucial-toggle { flex: none; }
 .transport { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; }
 .button.play-button { width: 64px; height: 64px; border-radius: 50%; }
 .button.play-button svg { width: 28px; height: 28px; }
-.session-sound { display: flex; align-items: center; gap: 14px; margin-block-start: 24px; padding-block-start: 20px; border-block-start: 1px solid var(--border); }
-.session-sound .range-field { flex: 1; }
+.session-sound { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-block-start: 24px; padding-block-start: 20px; border-block-start: 1px solid var(--border); }
+.session-sound .range-field { flex: 1 1 200px; }
 .filler-state { text-align: center; background: var(--hover); border-inline-start: 3px solid var(--accent); padding: 10px; margin-block-end: 16px; font-size: .9rem; }
 .playlist { padding-block: 24px; min-inline-size: 0; }
 .playlist-items { list-style: none; padding: 0; margin: 16px 0 0; }

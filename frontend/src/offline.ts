@@ -245,7 +245,7 @@ export async function inspectLocalAudioReferences(asset: AudioAsset, recordingId
         fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
         if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
         for (const cue of track.cues) {
-          fields(cue, ['id', 'anchor', 'note', 'beep', 'flash']);
+          fields(cue, ['id', 'anchor', 'note', 'beep', 'flash', 'crucial']);
           fields(cue.anchor, cue.anchor.kind === 'count' ? ['kind', 'count'] : ['kind', 'seconds']);
         }
       }
@@ -622,7 +622,7 @@ function checkedWorkingEnvelope(value: CloudRoutine): CloudRoutine {
     fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
     if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
     for (const cue of track.cues) {
-      fields(cue, ['id', 'anchor', 'note', 'beep', 'flash']);
+      fields(cue, ['id', 'anchor', 'note', 'beep', 'flash', 'crucial']);
       fields(cue.anchor, cue.anchor.kind === 'count' ? ['kind', 'count'] : ['kind', 'seconds']);
     }
     const asset = Object.hasOwn(media, track.id) ? media[track.id] : undefined;

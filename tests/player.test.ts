@@ -57,6 +57,13 @@ describe('audio-time projections', () => {
     expect(projectCues(track, 1).currentCue).toBe('Set up');
   });
 
+  it('projects only crucial cues when asked, skipping the others for current and next', () => {
+    const marked = { ...track, cues: track.cues.map(cue => cue.id === 'count' ? { ...cue, crucial: true } : cue) };
+    expect(projectCues(marked, 0, true)).toEqual({ currentCue: '', nextCue: 'Pulse', nextCueIn: 3 });
+    expect(projectCues(marked, 9, true)).toEqual({ currentCue: 'Pulse', nextCue: '', nextCueIn: null });
+    expect(projectCues(marked, 9)).toEqual({ currentCue: 'Release', nextCue: '', nextCueIn: null });
+  });
+
   it('gives incoming cues ownership at incoming start, including zero-time cues', () => {
     const start = track.duration - transitionOverlap(2, track.duration, 10);
     expect(start).toBe(10);
@@ -1228,6 +1235,28 @@ describe('local Web Audio player', () => {
     await advance(5.9);
     expect(state.flashSignal).toBe(2);
     expect(MockContext.latest.oscillators).toHaveLength(1);
+  });
+
+  it('shows, flashes and beeps only crucial cues while crucial-only is on', async () => {
+    const value = routine();
+    value.beepEvery = value.beepRemaining = 0;
+    value.tracks[0].cues = [
+      { id: 'minor', anchor: { kind: 'timestamp', seconds: 3 }, note: 'Minor', beep: true, flash: true },
+      { id: 'key', anchor: { kind: 'timestamp', seconds: 6 }, note: 'Key', beep: true, flash: true, crucial: true },
+    ];
+    player.setCrucialCuesOnly!(true);
+    await player.load(value);
+    await player.play();
+    await advance(3.5);
+    expect(state).toMatchObject({ currentCue: '', nextCue: 'Key', flashSignal: 0 });
+    expect(MockContext.latest.oscillators).toHaveLength(0);
+    await advance(5.9);
+    expect(state.flashSignal).toBe(1);
+    expect(MockContext.latest.oscillators).toHaveLength(1);
+    await advance(6.5);
+    expect(state.currentCue).toBe('Key');
+    player.setCrucialCuesOnly!(false);
+    expect(state.currentCue).toBe('Key');
   });
 
   it('seeks in source seconds without rebuilding queued holds or restarting at zero', async () => {

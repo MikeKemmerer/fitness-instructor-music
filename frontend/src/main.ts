@@ -99,6 +99,10 @@ let editorBusy = true;
 let appDisposed = false;
 let state: PlayerState;
 let displayedTrack = '';
+const CRUCIAL_CUES_KEY = 'fitness-crucial-cues-only';
+let crucialOnly = false;
+try { crucialOnly = localStorage.getItem(CRUCIAL_CUES_KEY) === 'true'; } catch {}
+player.setCrucialCuesOnly?.(crucialOnly);
 let activeTab: 'teach' | 'edit' | 'playlists' | 'settings' = 'teach';
 let validationErrors: string[] = [];
 let editorSession: EditorSession | undefined;
@@ -697,7 +701,8 @@ const trackTitle = element('h2', 'playing-title');
 const bodyArea = element('p', 'muted');
 trackInfo.append(trackPosition, trackTitle, bodyArea);
 const playbackStatus = element('span', 'playback-status');
-trackHeader.append(trackInfo, playbackStatus);
+const classClockBox = element('div', 'class-clock-box');
+trackHeader.append(classClockBox, trackInfo, playbackStatus);
 const moves = element('div', 'moves');
 const currentMove = element('div', 'current-move');
 const currentNote = element('p', 'move-note');
@@ -754,7 +759,8 @@ const clocks = element('div', 'clocks');
 const elapsed = element('span', 'clock');
 const remaining = element('span', 'clock');
 const classElapsed = element('span', 'class-clock');
-for (const [label, value] of [['elapsed', elapsed], ['remaining', remaining], ['classElapsed', classElapsed]] as const) {
+classClockBox.append(element('span', 'clock-label', t('classElapsed')), classElapsed);
+for (const [label, value] of [['elapsed', elapsed], ['remaining', remaining]] as const) {
   const item = element('div');
   item.append(element('span', 'clock-label', t(label)), value);
   clocks.append(item);
@@ -813,12 +819,22 @@ const sessionSound = element('div', 'session-sound');
 const duck = iconButton(t('duck'), Mic, () => player.setDucked(!state.ducked));
 const muteBeeps = iconButton(t('muteBeeps'), Bell, () => player.setBeepsMuted(!state.beepsMuted));
 sessionSound.append(duck, makeRange(t('musicVolume'), 0, 100, 80, value => player.setVolume(value / 100)), muteBeeps);
+const crucialToggle = element('input'); crucialToggle.type = 'checkbox'; crucialToggle.checked = crucialOnly;
+crucialToggle.addEventListener('change', () => {
+  crucialOnly = crucialToggle.checked;
+  try { localStorage.setItem(CRUCIAL_CUES_KEY, String(crucialOnly)); } catch {}
+  player.setCrucialCuesOnly?.(crucialOnly);
+  displayedTrack = ''; renderPlayback();
+});
+const crucialLabel = element('label', 'switch-label crucial-toggle');
+crucialLabel.append(crucialToggle, element('span', '', t('crucialCuesOnly')));
+sessionSound.append(crucialLabel);
 const playbackError = element('p', 'playback-error');
 const playbackErrors = transientText(playbackError);
 let lastPlaybackError = '';
 playbackError.hidden = true;
 playbackError.setAttribute('role', 'alert');
-stage.append(trackHeader, moves, timeline, practiceTools, clocks, fillerState, transport, sessionSound, playbackError);
+stage.append(trackHeader, moves, timeline, clocks, practiceTools, fillerState, transport, sessionSound, playbackError);
 const sidebar = element('aside', 'playlist');
 sidebar.append(element('h2', '', t('playlist')));
 const playlist = element('ol', 'playlist-items');
@@ -2389,7 +2405,7 @@ function renderPlayback(): void {
   const index = routinePhase ? loaded ? Math.max(0, state.trackIndex) : 0 : -1;
   const track = routine.tracks[index];
   const duration = loaded ? state.duration : track?.duration ?? 0;
-  const key = `${routine.id}:${track?.id ?? ''}:${index}:${duration}:${state.phase ?? 'routine'}`;
+  const key = `${routine.id}:${track?.id ?? ''}:${index}:${duration}:${state.phase ?? 'routine'}:${crucialOnly}`;
   if (displayedTrack !== key) {
     cancelCueDrag();
     displayedTrack = key;
@@ -2437,7 +2453,7 @@ function renderPlayback(): void {
       head.append(headRow);
       const body = element('tbody');
       for (const { cue, seconds } of sortedCues(track)) {
-        if (seconds < duration) addCueMarker(cue, seconds, duration);
+        if (seconds < duration && (!crucialOnly || cue.crucial === true)) addCueMarker(cue, seconds, duration);
         const row = element('tr');
         row.dataset.seconds = String(seconds);
         row.append(element('td', '', t(cue.anchor.kind)),

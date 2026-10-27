@@ -40,6 +40,8 @@ export interface Player {
   setVolume(value: number): void;
   setDucked(value: boolean): void;
   setBeepsMuted(value: boolean): void;
+  /** When true, only cues marked crucial are shown, flashed or beeped during playback. */
+  setCrucialCuesOnly?(value: boolean): void;
   subscribe(listener: (state: PlayerState) => void): () => void;
   dispose(): void;
 }

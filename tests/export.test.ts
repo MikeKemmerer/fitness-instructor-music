@@ -92,7 +92,7 @@ describe('export registry and snapshots', () => {
       'routine.id', 'routine.name', 'routine.revision', 'routine.schemaVersion', 'routine.locked', 'routine.published',
       'track.index', 'track.id', 'track.title', 'track.artist', 'track.duration', 'track.durationTime', 'track.bpm', 'track.firstBeat', 'track.bodyArea', 'track.gain',
       'track.after.mode', 'track.after.crossfade', 'track.after.filler',
-      'cue.id', 'cue.order', 'cue.anchor.kind', 'cue.anchor.value', 'cue.seconds', 'cue.time', 'cue.note', 'cue.beep', 'cue.flash',
+      'cue.id', 'cue.order', 'cue.anchor.kind', 'cue.anchor.value', 'cue.seconds', 'cue.time', 'cue.note', 'cue.beep', 'cue.flash', 'cue.crucial',
       'filler.mode', 'filler.seconds', 'filler.bpm', 'filler.sound', 'filler.gain',
       'filler.recording.id', 'filler.recording.name', 'filler.recording.duration', 'filler.recording.asset.id',
       'filler.recording.asset.sha256', 'filler.recording.asset.bytes', 'filler.recording.asset.contentType', 'routine.crossfade',
@@ -337,7 +337,8 @@ describe('PDF packet layout data', () => {
         anchor: { kind: 'timestamp' as const, seconds: 65.5 }, beep: true }] }));
     const packet = buildPdfPacket(createExportSnapshot(routine, false), allIds());
     const tables = buildPdfTables(packet).slice(1 + packet.settings.length);
-    expect(tables).toHaveLength(8);
+    const bands = tables.length / 4;
+    expect(bands).toBe(3);
     for (const table of tables) {
       expect(table.horizontalPageBreak).toBe(false);
       expect(table.showHead).toBe('everyPage');
@@ -345,7 +346,7 @@ describe('PDF packet layout data', () => {
       expect(widths.length).toBeLessThanOrEqual(6);
       expect(widths.reduce((sum, width) => sum + width, 0)).toBeCloseTo(540);
       expect(Math.min(...widths)).toBeGreaterThanOrEqual(60);
-      expect(table.columnStyles).toEqual(tables[tables.indexOf(table) % 2]!.columnStyles);
+      expect(table.columnStyles).toEqual(tables[tables.indexOf(table) % bands]!.columnStyles);
     }
     const font = readFileSync(new URL('../frontend/src/assets/fonts/NotoSans-Regular.ttf', import.meta.url));
     const text = pdfText(Buffer.from(await (await createPdfBlob(createExportSnapshot(routine, false), font, allIds())).arrayBuffer())).replace(/\s+/g, ' ');
