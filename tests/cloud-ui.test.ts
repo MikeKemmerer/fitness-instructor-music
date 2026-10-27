@@ -2925,6 +2925,22 @@ describe('main hosted orchestration with synthetic DOM and player', () => {
     expect(appNodes.find(node => node.tag === 'a' && node.textContent === t('cloudSignIn'))!.hidden).toBe(access !== 'signin-required');
   });
 
+  it.each(['online', 'offline', 'signin-required'] as const)('shows the %s account and cloud status in the header menu', async access => {
+    await bootCloudApp({ role: 'player', cached: true, ...(access === 'online' ? {} : { access }) });
+    const { getCloudContext } = await import('../frontend/src/cloud-client');
+    const node = (className: string) => appNodes.find(item => item.classList.contains(className))!;
+    const user = getCloudContext().user;
+    const name = user?.username || user?.id || '';
+    expect(node('account-name').textContent).toBe(name || t('accountSignedOut'));
+    expect(node('account-dot').className).toBe(`account-dot ${access === 'signin-required' ? 'signed-out' : access}`);
+    expect(node('account-status').textContent).toBe(access === 'online' ? t('accountStatusOnline', { name, role: t('role_player') })
+      : access === 'offline' ? t('accountStatusOffline', { name }) : t('accountStatusSignin'));
+    const command = (label: string) => node('account-menu').querySelectorAll('button').find(item => item.title === label)!;
+    expect(command(t('cloudSignIn')).hidden).toBe(access !== 'signin-required');
+    expect(command(t('hostedSignOut')).hidden).toBe(!user);
+    expect(appNodes.some(item => item.classList.contains('local-status'))).toBe(false);
+  });
+
   it.each(['owner', 'editor'] as const)('manages uploaded fillers as %s only in Settings, with explicit upload and retained class audio', async role => {
     const app = await bootCloudApp({ role, local: true });
     expect(appMocks.player.load).toHaveBeenCalledExactlyOnceWith(app.data.envelope.routine);

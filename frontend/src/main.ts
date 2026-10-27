@@ -7,7 +7,7 @@ import '@fontsource/barlow-condensed/600.css';
 import './styles.css';
 import { ArrowRight, Bell, BellOff, Check, Copy, Hand, Headphones, ListMusic, LockKeyhole,
   Maximize2, Mic, Minimize2, Moon, MoveHorizontal, Pause, Pencil, Play, Plus, Save, Settings2, SkipBack, SkipForward, Square, Sun, UnlockKeyhole, X,
-  CloudUpload, Download, RefreshCw, Send, Trash2, Star, Minus, Ellipsis, ChevronDown } from 'lucide';
+  CloudUpload, Download, RefreshCw, Send, Trash2, Star, Minus, Ellipsis, ChevronDown, LogIn, LogOut } from 'lucide';
 import { allRoutineTracks, cueSeconds, newRoutine, validateRoutine, type Cue, type Routine, type Track } from '../../shared/routine';
 import type { PlayerState } from '../../shared/player-contract';
 import { createPlayer } from './player';
@@ -138,12 +138,46 @@ mark.src = '/icon-192.png';
 mark.alt = '';
 mark.width = mark.height = 40;
 identity.append(mark, element('span', 'brand-name', t('appName')));
-const headerSignIn = element('a', 'button header-signin', t('cloudSignIn'));
-headerSignIn.href = '/signin.html';
-headerSignIn.hidden = true;
 const headerLeading = element('div', 'header-leading');
-headerLeading.append(identity, headerSignIn);
-header.append(headerLeading, element('span', 'local-status', t(hostedPilot ? 'hosted' : 'local')));
+headerLeading.append(identity);
+const accountMenu = actionMenu(t('accountMenu'), ChevronDown, true);
+accountMenu.element.classList.add('account-menu');
+const accountDot = element('span', 'account-dot'); accountDot.setAttribute('aria-hidden', 'true');
+const accountName = element('span', 'account-name');
+const accountChevron = element('span', 'menu-chevron'); setButtonIcon(accountChevron, ChevronDown);
+accountMenu.trigger.replaceChildren(accountDot, accountName, accountChevron);
+const accountStatus = element('p', 'account-status'); accountStatus.setAttribute('role', 'status');
+const accountSignIn = iconButton(t('cloudSignIn'), LogIn, () => signInToCloud(), true);
+const accountSignOut = iconButton(t('hostedSignOut'), LogOut, () => signOutOfCloud(), true);
+accountMenu.commands.append(accountStatus, accountSignIn, accountSignOut);
+function signInToCloud(): void {
+  if (!['signin-required', 'forbidden'].includes(getCloudContext().access)) return;
+  confirmCloudNavigation(() => confirm(t('cloudConfirmSignin')), () => disposeApp(), () => window.location.assign('/signin.html'));
+}
+function signOutOfCloud(): void {
+  confirmCloudNavigation(() => confirm(t('cloudConfirmSignout')), () => {
+    localStorage.removeItem(hostedCloudSelectionKey);
+    disposeApp();
+  }, () => window.location.assign('/signout.html'));
+}
+function syncAccountMenu(): void {
+  if (!hostedPilot) return;
+  const context = getCloudContext();
+  const name = context.user?.username || context.user?.id || '';
+  const state = context.access === 'online' ? 'online' : context.access === 'offline' ? 'offline' : 'signed-out';
+  accountDot.className = `account-dot ${state}`;
+  accountName.textContent = name || t('accountSignedOut');
+  const status = context.access === 'online' ? t('accountStatusOnline', { name, role: t(`role_${context.user?.role ?? 'player'}` as 'role_player') })
+    : context.access === 'offline' ? t('accountStatusOffline', { name })
+      : context.access === 'forbidden' ? t('accountStatusForbidden', { name: name || t('accountSignedOut') })
+        : t('accountStatusSignin');
+  accountStatus.textContent = status;
+  accountMenu.trigger.title = `${accountName.textContent}: ${status}`;
+  accountMenu.trigger.setAttribute('aria-label', accountMenu.trigger.title);
+  accountSignIn.hidden = !['signin-required', 'forbidden'].includes(context.access);
+  accountSignOut.hidden = !context.user;
+}
+header.append(headerLeading, hostedPilot ? accountMenu.element : element('span', 'local-status', t('local')));
 const navigation = element('nav', 'tabs');
 navigation.setAttribute('aria-label', t('navigation'));
 navigation.setAttribute('role', 'tablist');
@@ -491,11 +525,6 @@ cloudSignIn.addEventListener('click', event => {
   if (getCloudContext().access !== 'signin-required') return;
   confirmCloudNavigation(() => confirm(t('cloudConfirmSignin')), () => disposeApp(), () => window.location.assign(cloudSignIn.href));
 });
-headerSignIn.addEventListener('click', event => {
-  event.preventDefault();
-  if (getCloudContext().access !== 'signin-required') return;
-  confirmCloudNavigation(() => confirm(t('cloudConfirmSignin')), () => disposeApp(), () => window.location.assign(headerSignIn.href));
-});
 const cloudControls = element('div', 'cloud-controls');
 cloudControls.append(field(t('cloudRoutines'), cloudSelect), cloudMode, cloudRefresh, cloudOpen, cloudSignIn);
 const cloudActions = element('div', 'action-row');
@@ -509,7 +538,7 @@ function syncCloudControls(): void {
   const busy = editorBusy || transportOperation.pending;
   cloudStatus.textContent = cloudStatusMessage(context);
   cloudSignIn.hidden = context.access !== 'signin-required';
-  headerSignIn.hidden = context.access !== 'signin-required';
+  syncAccountMenu();
   cloudRefresh.disabled = busy;
   cloudMode.disabled = busy || !mutable;
   cloudSelect.disabled = busy || (!cloudRoutines.length && !cachedCloudRoutines.length);
@@ -1627,10 +1656,7 @@ if (hostedPilot) {
   signOut.setAttribute('aria-describedby', signOutNotice.id);
   signOut.addEventListener('click', event => {
     event.preventDefault();
-    confirmCloudNavigation(() => confirm(t('cloudConfirmSignout')), () => {
-      localStorage.removeItem(hostedCloudSelectionKey);
-      disposeApp();
-    }, () => window.location.assign(signOut.href));
+    signOutOfCloud();
   });
   storage.append(signOutNotice, signOut);
 }

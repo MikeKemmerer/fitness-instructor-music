@@ -240,7 +240,8 @@ async function login(page: Page, username = 'owner') {
   await page.getByLabel('Username', { exact: true }).fill(username);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await browserExpect(page.locator('.local-status')).toHaveText('Cloud');
+  await browserExpect(page.locator('.account-menu .account-dot.online')).toBeVisible();
+  await browserExpect(page.locator('.account-menu .account-name')).toHaveText(username);
 }
 async function demo(page: Page) {
   await page.getByRole('tab', { name: 'Routines', exact: true }).click();
@@ -305,7 +306,7 @@ async function ready(page: Page) {
   await page.waitForFunction(async () => (await navigator.serviceWorker.getRegistration())?.active?.state === 'activated');
   await page.reload();
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
-  await browserExpect(page.locator('.local-status')).toHaveText('Cloud');
+  await browserExpect(page.locator('.account-menu')).toBeVisible();
 }
 const progress = async (page: Page) => Number(await page.getByRole('progressbar', { name: 'Track progress', exact: true }).getAttribute('aria-valuenow'));
 async function play(page: Page) {
