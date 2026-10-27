@@ -56,7 +56,7 @@ describe('unified review source guards', () => {
       expect(css).toContain(`::-${engine}`);
     }
     expect(css).toContain('var(--accent) 80%, #c93240 100%');
-    expect(css).toMatch(/html \{[^}]*scrollbar-gutter: stable;/);
+    expect(css).toMatch(/html \{[^}]*scrollbar-gutter: stable both-edges;/);
     expect(css).toContain('.routine-chooser-open { overflow: hidden; }');
     expect(css).toContain('.editor-heading-actions .export-section { position: static; }');
     expect(css).toMatch(/\.playlist-workspace \{[^}]*max-inline-size: 100%;[^}]*overflow-x: clip;/);

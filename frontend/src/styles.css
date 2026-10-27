@@ -51,7 +51,7 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; scrollbar-gutter: stable; }
+html { font-family: 'DM Sans', sans-serif; background: var(--background); color: var(--text); letter-spacing: 0; scrollbar-gutter: stable both-edges; }
 .flash-overlay {
   position: fixed; inset: 0; z-index: 999; background: var(--text); opacity: 0; pointer-events: none;
   transition: opacity .18s ease-out;
@@ -75,7 +75,7 @@ h1 { font-family: 'Barlow Condensed', sans-serif; font-size: 2.3rem; font-weight
 h2 { font-size: 1.1rem; font-weight: 600; }
 h3 { font-size: 1rem; font-weight: 600; }
 svg { flex: none; }
-.app-shell { max-inline-size: 1440px; margin-inline: auto; padding: env(safe-area-inset-top) max(20px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
+.app-shell { max-inline-size: 1440px; margin-inline: auto; padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
 .app-header { min-block-size: 84px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-block-end: 1px solid var(--border); }
 .app-footer { margin-block-start: 28px; padding-block: 14px; border-block-start: 1px solid var(--border); overflow-wrap: anywhere; font-size: .72rem; }
 .routine-library, .playlist-library { padding-block: 0 20px; border-block-end: 1px solid var(--border); margin-block-end: 20px; }
@@ -199,7 +199,8 @@ svg { flex: none; }
 .clock-label { font-size: .7rem; color: var(--muted); margin-block-end: 4px; }
 .clock { font-family: 'Barlow Condensed', sans-serif; font-size: 2.3rem; font-weight: 500; line-height: 1; }
 .class-clock { font-family: 'Barlow Condensed', sans-serif; font-size: 1.6rem; line-height: 1.4; }
-.class-clock-box { display: flex; flex-direction: column; flex: none; order: -1; padding-inline-end: 14px; border-inline-end: 1px solid var(--border); }
+.class-clock-box { display: flex; flex-direction: column; align-items: flex-end; }
+.track-status { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; text-align: end; }
 .session-sound .crucial-toggle { flex: none; }
 .transport { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; }
 .button.play-button { width: 64px; height: 64px; border-radius: 50%; }
@@ -528,7 +529,7 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
 .validation ul { padding-inline-start: 20px; font-size: .85rem; line-height: 1.7; margin-block-end: 0; }
 .visually-hidden { position: absolute; inline-size: 1px; block-size: 1px; min-inline-size: 0; min-block-size: 0; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 @media (min-width: 640px) {
-  .app-shell { padding-inline: 32px; }
+  .app-shell { padding-inline: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right)); }
   .moves { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; gap: 32px; }
   .move-note { font-size: 3rem; }
   .move-note.multiline::first-line { font-size: 1.7647em; }
@@ -538,7 +539,7 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
   .cue-row > button { margin-block-start: 26px; align-self: start; }
 }
 @media (min-width: 1000px) {
-  .app-shell { padding-inline: 48px; }
+  .app-shell { padding-inline: max(24px, env(safe-area-inset-left)) max(24px, env(safe-area-inset-right)); }
   .app-header { min-block-size: 92px; }
   .rehearsal-layout { grid-template-columns: minmax(0, 1fr) 300px; column-gap: 40px; }
   .stage { padding-block: 24px; }
@@ -553,7 +554,7 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
   .field-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 380px) {
-  .app-shell { padding-inline: 14px; }
+  .app-shell { padding-inline: max(10px, env(safe-area-inset-left)) max(10px, env(safe-area-inset-right)); }
   .app-header { gap: 8px; }
   .brand-name { font-size: .8rem; }
   .brand-mark { width: 28px; height: 28px; }
@@ -595,11 +596,11 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
 }
 
 .class-mode-open { overflow: hidden; }
-.app-shell.class-mode { position: fixed; inset: 0; z-index: 10; inline-size: 100%; max-inline-size: none; block-size: 100vh; block-size: 100dvh; display: flex; flex-direction: column; gap: 10px; background: var(--background); padding: max(8px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+.app-shell.class-mode { position: fixed; inset: 0; z-index: 10; inline-size: 100%; max-inline-size: none; block-size: 100vh; block-size: 100dvh; display: flex; flex-direction: column; gap: 10px; background: var(--background); padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
 .class-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none; border-block-end: 1px solid var(--border); padding-block-end: 8px; }
 .class-toolbar .button { max-inline-size: 75%; }
 .class-toolbar .button span { min-inline-size: 0; overflow-wrap: anywhere; }
-.class-mode > main { flex: 1; min-block-size: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 4px; }
+.class-mode > main { flex: 1; min-block-size: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; padding: 4px; }
 .class-mode > .notice { flex: none; max-block-size: 30vh; max-block-size: 30dvh; overflow: auto; margin: 0; }
 .class-mode .teach-panel, .class-mode .rehearsal-layout { min-block-size: 100%; }
 .class-mode .teach-panel { animation: none; }
