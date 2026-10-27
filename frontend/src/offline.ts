@@ -17,6 +17,12 @@ interface StoredTrack {
   bytes: number;
   duration: number;
   sha256?: string;
+  filename?: string;
+}
+
+function sourceFilename(name: string): string | undefined {
+  const value = name.replace(/[\\/:\x00-\x1f\x7f]+/g, '_').trim().slice(0, 300);
+  return value && value !== '.' && value !== '..' ? value : undefined;
 }
 
 interface RehearsalDatabase extends DBSchema {
@@ -1758,6 +1764,17 @@ export async function getTrackBlob(id: string): Promise<Blob | undefined> {
   return (await verifiedTrack(id))?.blob;
 }
 
+export async function getTrackFilename(id: string): Promise<string | undefined> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  let record: StoredTrack | undefined;
+  try { record = await connection.get('tracks', id); }
+  finally { connection.close(); }
+  session?.assert();
+  const filename = record?.filename;
+  return typeof filename === 'string' ? sourceFilename(filename) : undefined;
+}
+
 function fillerSnapshot(recording: FillerRecording): FillerRecording {
   if (!validFillerRecording(recording)) throw new Error('invalid_filler_recording');
   return structuredClone(recording);
@@ -2481,6 +2498,8 @@ async function importTrack(file: File, session: MutationSession | undefined, sig
   const record = await prepareTrack(file, session, signal);
   const tags = await readAudioTags(file);
   session?.assert();
+  const filename = sourceFilename(file.name);
+  if (filename) record.filename = filename;
   const track: Track = {
     id: crypto.randomUUID(), title: tags.title ?? file.name.slice(0, 300), ...(tags.artist ? { artist: tags.artist } : {}),
     duration: record.duration, firstBeat: 0, cues: [], bodyArea: '',
@@ -2557,6 +2576,8 @@ export async function addFillerRecording(file: File, name?: string, signal?: Abo
       asset: { id, sha256: record.sha256 ?? '', bytes: record.bytes, contentType },
     });
     if (record.blob.type !== contentType) record.blob = record.blob.slice(0, record.bytes, contentType);
+    const filename = sourceFilename(file.name);
+    if (filename) record.filename = filename;
     await mutate(session, ['tracks', 'fillerRecordings'], async transaction => {
       const key = `filler-${id}`;
       if (await transaction.objectStore('tracks').get(key) || await transaction.objectStore('fillerRecordings').get(id)) {

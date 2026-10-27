@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CLOUD_CHUNK_BYTES, CLOUD_TIMEOUT_MS, CloudRequestError, CloudTrackError, createCloudClient } from '../frontend/src/cloud-client';
-import { audioUploadType, canonicalAudioType, cloudHash, createCloudLibrary, MAX_CLOUD_MEDIA_BYTES, parseCloudRoutine } from '../frontend/src/cloud-library';
+import { audioUploadType, canonicalAudioType, cloudHash, createCloudLibrary, derivedFilename, MAX_CLOUD_MEDIA_BYTES, parseCloudRoutine } from '../frontend/src/cloud-library';
 import { canEditCloudDraft, cloudErrorMessage, confirmCloudNavigation, recalledCloudSelection, rememberCloudSelection,
   classSelectionStorageKey, recalledClassSelection, rememberClassSelection } from '../frontend/src/cloud-ui';
 import { hostedCloudSelectionKey, hostedIdentityMarker, hostedUserKey } from '../frontend/src/hosted-session';
@@ -1047,6 +1047,25 @@ describe('cloud transfers and revision commands', () => {
     const ftyp = new Uint8Array(32); ftyp.set([...'ftypM4A '].map(c => c.charCodeAt(0)), 4);
     expect(await audioUploadType(new Blob([ftyp], { type: '' }))).toBe('audio/mp4');
     expect(cloudErrorMessage(new CloudTrackError('cloud_unsupported_media', '<Song>'))).toBe(t('cloudUnsupportedTrack', { title: '<Song>' }));
+  });
+
+  it('records the original filename and duration for a newly uploaded song, deriving one when it was not kept', async () => {
+    for (const [stored, expected] of [['Original Mix.opus', 'Original Mix.opus'], [undefined, '<Song>.wav']] as const) {
+      const harness = await uploadHarness();
+      const library = createCloudLibrary({ client: harness.client, getTrackBlob: harness.getTrackBlob, cacheTrack: harness.cacheTrack,
+        trackFilename: async () => stored });
+      const server = harness.fetcher.getMockImplementation()!;
+      const intake = vi.fn(async (_path: string, options: RequestInit) => {
+        const body = JSON.parse(String(options.body));
+        return json({ metadata: { revision: 1, title: '', artist: '', ...body } });
+      });
+      harness.fetcher.mockImplementation(async (input, options) => String(input).endsWith('/intake') ? intake(String(input), options!) : server(input, options));
+      await library.stage(harness.envelope.routine, {});
+      expect(intake).toHaveBeenCalledExactlyOnceWith(`/api/library/songs/${harness.asset.id}/intake`, expect.anything());
+      expect(JSON.parse(String(intake.mock.calls[0]![1].body))).toEqual({ filename: expected, duration: 30 });
+    }
+    expect(derivedFilename('a/b: c', 'audio/mp4')).toBe('a b c.m4a');
+    expect(derivedFilename('Song.mp3', 'audio/mpeg')).toBe('Song.mp3');
   });
 
   it('reuses a completed asset after a failed routine write without any upload requests', async () => {

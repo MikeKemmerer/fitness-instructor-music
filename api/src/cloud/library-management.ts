@@ -166,16 +166,16 @@ export class LibraryManagement {
     const expected = metadataRevision(headers.get('if-match'));
     if (encode(input).length > METADATA_BYTES) throw new ApiError(413, 'body_too_large');
     const change = initial ? intake(input, kind) : editable(input);
-    if (initial && expected !== 0) throw new ApiError(412, 'revision_conflict');
     const candidate = await this.item(kind, id);
     return admitted(this.store, async claims => {
       await claims.add(candidate.asset.id);
       const item = await this.item(kind, id);
       const old = await storedMetadata(this.store, kind, id);
-      if ((old?.value.revision ?? 0) !== expected || (initial && old)) throw new ApiError(412, 'revision_conflict');
+      // Intake (filename + duration) is recorded once, at whatever revision the editable metadata has reached.
+      if ((old?.value.revision ?? 0) !== expected || (initial && old?.value.filename !== undefined)) throw new ApiError(412, 'revision_conflict');
       if (expected === Number.MAX_SAFE_INTEGER) throw new ApiError(412, 'revision_exhausted');
       if (!initial) await this.describe(headers, [item]);
-      const metadata: LibraryMetadata = initial ? { ...item.metadata, ...change, revision: 1 }
+      const metadata: LibraryMetadata = initial ? { ...item.metadata, ...change, revision: expected + 1 }
         : { title: '', artist: '', ...change, revision: expected + 1,
           ...(item.metadata.filename === undefined ? {} : { filename: item.metadata.filename }),
           ...(item.metadata.duration === undefined ? {} : { duration: item.metadata.duration }) };

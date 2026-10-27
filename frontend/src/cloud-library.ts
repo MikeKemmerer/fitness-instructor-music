@@ -1,7 +1,7 @@
 import type { CloudAsset, CloudRoutine, CloudRoutineSummary, FillerAnalysis, LibraryMetadata, ManagedAudioItem, ManagedAudioPage, LibraryUsagePage, LibraryDeleteResult } from '../../shared/cloud-contract';
 import { allRoutineFillers, allRoutineTracks, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import { cloudClient, CLOUD_CHUNK_BYTES, CloudRequestError, CloudTrackError, type CloudClient } from './cloud-client';
-import { cacheCloudRoutine, cacheCloudTrack, cacheFillerRecording, getFillerRecordingBlob, getTrackBlob } from './offline';
+import { cacheCloudRoutine, cacheCloudTrack, cacheFillerRecording, getFillerRecordingBlob, getTrackBlob, getTrackFilename } from './offline';
 
 export const MAX_CLOUD_MEDIA_BYTES = 128 * 1024 * 1024;
 const CLOUD_DOWNLOAD_CONCURRENCY = 2;
@@ -91,6 +91,18 @@ export interface CloudLibraryDependencies {
   cacheRoutine?: typeof cacheCloudRoutine;
   getFillerBlob?: typeof getFillerRecordingBlob;
   cacheFiller?: typeof cacheFillerRecording;
+  trackFilename?: typeof getTrackFilename;
+}
+
+const AUDIO_EXTENSIONS: Record<string, string> = {
+  'audio/mp4': 'm4a', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/flac': 'flac', 'audio/aac': 'aac', 'audio/webm': 'webm',
+};
+
+/** A library filename for audio whose original filename was not kept: the title plus the stored format's extension. */
+export function derivedFilename(name: string, contentType: string): string {
+  const base = name.replace(/[\\/:\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/^\.+$/, '') || 'Untitled';
+  const extension = AUDIO_EXTENSIONS[contentType] ?? 'audio';
+  return base.toLowerCase().endsWith(`.${extension}`) ? base.slice(0, 300) : `${base.slice(0, 299 - extension.length)}.${extension}`;
 }
 
 interface UploadStart {
@@ -209,6 +221,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
   const cacheRoutine = dependencies.cacheRoutine ?? ((routine: Routine) => cacheCloudRoutine(routine));
   const readFiller = dependencies.getFillerBlob ?? ((recording: FillerRecording) => getFillerRecordingBlob(recording));
   const cacheFiller = dependencies.cacheFiller ?? ((recording: FillerRecording, blob: Blob) => cacheFillerRecording(recording, blob));
+  const trackFilename = dependencies.trackFilename ?? ((id: string) => getTrackFilename(id));
   const uploaded = new Map<string, CloudAsset>();
   const knownRemoteAssets = new Set<string>();
   // Assets already stored in the household library, keyed by content, so identical audio is linked instead of re-uploaded.
@@ -665,6 +678,8 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
         assert();
         if (!blob) throw new Error('missing_audio');
         snapshot.recording = await addFiller(recording, blob, transfer);
+        await recordIntake('filler', snapshot.recording.id, `filler-${recording.asset.id}`, recording.name,
+          snapshot.recording.asset.contentType, snapshot.recording.duration, transfer, assert);
       }
       assert();
     }
@@ -751,6 +766,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
           if (error instanceof CloudRequestError && error.status === 415) throw new CloudTrackError('cloud_unsupported_media', track.title);
           throw error;
         }
+        await recordIntake('song', asset.id, track.id, track.title, asset.contentType, track.duration, transfer, assert);
       }
       rememberContent(asset);
       if (replacedBytes) {
@@ -895,16 +911,26 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     if (metadata.revision !== revision + 1) throw new Error('cloud_invalid_response');
     return metadata;
   };
-  const recordLibraryIntake = async (kind: ManagedAudioItem['kind'], id: string, filename: string, duration: number, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {
+  const recordLibraryIntake = async (kind: ManagedAudioItem['kind'], id: string, filename: string, duration: number, transfer: CloudTransfer = {},
+    revision = 0): Promise<LibraryMetadata> => {
     const assert = operation(transfer, true);
     validateLibraryIntake(kind, filename, duration);
     const result = await client.request<{ metadata: LibraryMetadata }>(`${libraryPath(kind, id)}/intake`, { method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'If-Match': '"0"' }, body: JSON.stringify({ filename, duration }), signal: transfer.signal });
+      headers: { 'Content-Type': 'application/json', 'If-Match': `"${revision}"` }, body: JSON.stringify({ filename, duration }), signal: transfer.signal });
     assert();
     const metadata = metadataValue(result.metadata);
-    if (metadata.revision !== 1 || metadata.filename !== filename || metadata.duration !== duration) throw new Error('cloud_invalid_response');
+    if (metadata.revision !== revision + 1 || metadata.filename !== filename || metadata.duration !== duration) throw new Error('cloud_invalid_response');
     return metadata;
   };
+  // Best effort: a freshly uploaded asset gets its filename and duration so the library never shows them as unknown.
+  async function recordIntake(kind: ManagedAudioItem['kind'], id: string, localKey: string, name: string, contentType: string,
+    duration: number, transfer: CloudTransfer, assert: () => void): Promise<void> {
+    try {
+      const filename = await trackFilename(localKey).catch(() => undefined) ?? derivedFilename(name, contentType);
+      assert();
+      await recordLibraryIntake(kind, id, filename, duration, transfer);
+    } catch { assert(); }
+  }
   const libraryUsage = async (kind: ManagedAudioItem['kind'], id: string, cursor?: string, transfer: CloudTransfer = {}): Promise<LibraryUsagePage> => {
     const assert = operation(transfer, true);
     const result = await client.request<LibraryUsagePage>(`${libraryPath(kind, id)}/usage${pageCursor(cursor)}`, { signal: transfer.signal });

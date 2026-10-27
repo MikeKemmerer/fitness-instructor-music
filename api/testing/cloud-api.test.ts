@@ -3298,6 +3298,16 @@ describe('Azure SDK adapter contract (fake ContainerClient)', () => {
 });
 
 describe('duplicate audio storage', () => {
+  it('records intake once even after the title/artist were edited first', async () => {
+    const { api, headers, asset } = await managementFixture();
+    await api.managed.put(atRevision(headers, 0), 'song', asset.id, { title: 'Edited', artist: 'Someone' });
+    await expect(api.managed.put(atRevision(headers, 0), 'song', asset.id, { filename: 'song.m4a', duration: 30 }, true))
+      .rejects.toMatchObject({ status: 412 });
+    expect((await api.managed.put(atRevision(headers, 1), 'song', asset.id, { filename: 'song.m4a', duration: 30 }, true)).metadata)
+      .toEqual({ revision: 2, title: 'Edited', artist: 'Someone', filename: 'song.m4a', duration: 30 });
+    await expect(api.managed.put(atRevision(headers, 2), 'song', asset.id, { filename: 'other.m4a', duration: 30 }, true))
+      .rejects.toMatchObject({ status: 412 });
+  });
   it('round-trips an optional track artist and rejects oversized or non-text artists', async () => {
     const { api, headers } = await managementFixture();
     const input = routine(await uploadAudio(api.media, headers, wav(4096)));
