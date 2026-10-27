@@ -3296,3 +3296,55 @@ describe('Azure SDK adapter contract (fake ContainerClient)', () => {
     await expect(new AzureBlobStore(container).verifyPrivate()).rejects.toMatchObject({ status: 503 });
   });
 });
+
+describe('duplicate audio storage', () => {
+  const quotaBytes = async (store: BlobStore) => (await readJson<{ bytes: number }>(store, 'control/quota'))!.value.bytes;
+  const chunkKeys = (store: FakeBlobStore, id: string) => [...store.blobs.keys()].filter(key => key.startsWith(`assets/${id}/chunks/`));
+
+  it('stores a re-uploaded identical song as an alias with no second copy of its bytes', async () => {
+    const { api, headers, asset, store } = await managementFixture();
+    const bytes = wav(LIMITS.chunkBytes + 100);
+    const first = await uploadAudio(api.media, headers, bytes);
+    const before = await quotaBytes(store);
+    const second = await uploadAudio(api.media, headers, bytes);
+    expect(second.id).not.toBe(first.id);
+    expect(second).toEqual({ ...first, id: second.id });
+    expect(chunkKeys(store, second.id)).toEqual([]);
+    expect((await api.media.catalog(second.id)).alias).toBe(first.id);
+    expect(await quotaBytes(store)).toBeLessThan(before + bytes.length * 2);
+    expect(Buffer.concat([(await api.media.chunk(second.id, 0)).bytes, (await api.media.chunk(second.id, 1)).bytes])).toEqual(bytes);
+    await api.routines.create(headers, routine(second));
+    expect((await api.managed.list(headers, 'song')).items.map(item => item.id).sort()).toEqual([asset.id, first.id].sort());
+  });
+
+  it('lets the owner turn legacy duplicates into aliases, freeing their bytes without breaking saved revisions', async () => {
+    const { api, headers, store, login } = await managementFixture();
+    const bytes = wav(LIMITS.chunkBytes + 100);
+    const keep = await uploadAudio(api.media, headers, bytes);
+    const legacy = { ...keep, id: randomUUID() };
+    const record = await api.media.catalog(keep.id);
+    await store.put(`assets/${legacy.id}/catalog`, encode({ ...record, asset: legacy }), null);
+    for (const index of [0, 1]) await store.put(`assets/${legacy.id}/chunks/${index}`, store.blobs.get(`assets/${keep.id}/chunks/${index}`)!.bytes, null);
+    const saved = await api.routines.create(headers, routine(legacy));
+    const editor = await login('editor');
+    const path = `library/songs/${legacy.id}/deduplicate`;
+    expect((await api.handle(request(path, 'POST', editor.headers, { target: keep.id }))).status).toBe(403);
+    expect((await api.handle(request(`library/songs/${keep.id}/deduplicate`, 'POST', headers, { target: keep.id }))).status).toBe(200);
+    const before = await quotaBytes(store);
+    const response = await api.handle(request(path, 'POST', headers, { target: keep.id }));
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(response.body))).toEqual({ id: legacy.id, target: keep.id, freedBytes: bytes.length });
+    expect(chunkKeys(store, legacy.id)).toEqual([]);
+    expect(chunkKeys(store, keep.id)).toHaveLength(2);
+    expect(await quotaBytes(store)).toBe(before - bytes.length);
+    expect(await api.routines.get(headers, saved.routine.id, false)).toEqual(saved);
+    const download = await api.handle(request(`media/${legacy.id}/chunks/1`, 'GET', headers));
+    expect(download).toMatchObject({ status: 200, body: bytes.subarray(LIMITS.chunkBytes) });
+    expect(JSON.parse(String((await api.handle(request(path, 'POST', headers, { target: keep.id }))).body)).freedBytes).toBe(0);
+    expect((await api.handle(request(`library/songs/${keep.id}/deduplicate`, 'POST', headers, { target: legacy.id }))).status).toBe(409);
+    const other = await uploadAudio(api.media, headers, wav(4096));
+    expect((await api.handle(request(`library/songs/${other.id}/deduplicate`, 'POST', headers, { target: keep.id }))).status).toBe(409);
+    const third = await uploadAudio(api.media, headers, bytes);
+    expect((await api.media.catalog(third.id)).alias).toBe(keep.id);
+  });
+});

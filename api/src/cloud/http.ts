@@ -206,6 +206,9 @@ export class CloudApi {
         if (parts.length === 4 && parts[3] === 'intake' && method === 'PUT') {
           return json(await this.managed.put(request.headers, kind, parts[2]!, await jsonBody(request, 4096), true));
         }
+        if (kind === 'song' && parts.length === 4 && parts[3] === 'deduplicate' && method === 'POST') {
+          return json(await this.media.deduplicate(request.headers, parts[2]!, await jsonBody(request, 4096)));
+        }
         if (parts.length === 4 && parts[3] === 'usage' && method === 'GET') {
           await emptyBody(request);
           return json(await this.managed.usage(request.headers, kind, parts[2]!, cursor));

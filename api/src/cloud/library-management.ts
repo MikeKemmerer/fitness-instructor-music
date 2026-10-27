@@ -144,7 +144,10 @@ export class LibraryManagement {
           if (!key.endsWith('/catalog')) continue;
         } else if (!key.startsWith(prefix) || !safeId(key.slice(prefix.length))) throw new ApiError(503, 'storage_unavailable');
         const id = kind === 'song' ? key.split('/')[1]! : key.slice(prefix.length);
-        try { items.push(await this.item(kind, id)); }
+        try {
+          if (kind === 'song' && (await this.media.catalog(id)).alias) continue;
+          items.push(await this.item(kind, id));
+        }
         catch (error) {
           if (error instanceof ApiError && error.code === 'media_deleted') continue;
           throw new ApiError(503, 'storage_unavailable');

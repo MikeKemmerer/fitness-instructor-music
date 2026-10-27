@@ -32,6 +32,12 @@ export class QuotaBudget {
     });
   }
 
+  async refund(bytes: number): Promise<void> {
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) return;
+    await updateJson<Quota>(this.store, 'control/quota', () => { throw new ApiError(503, 'storage_unavailable'); },
+      previous => ({ ...previous, bytes: Math.max(0, previous.bytes - bytes) }));
+  }
+
   async finishUpload(id: string): Promise<void> {
     await updateJson<Quota>(this.store, 'control/quota', () => { throw new ApiError(503, 'storage_unavailable'); }, previous => {
       const active = { ...previous.active };

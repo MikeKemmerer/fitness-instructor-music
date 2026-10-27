@@ -15,7 +15,7 @@ interface Upload {
   expiresAt: number;
   state: 'open' | 'sealed' | 'complete' | 'aborted';
   chunks: Record<string, string>;
-  finalization?: { sha256: string; copiedChunks: number };
+  finalization?: { sha256: string; copiedChunks: number; alias?: string };
 }
 export interface CompletionPending {
   pending: true;
@@ -24,7 +24,8 @@ export interface CompletionPending {
   copiedChunks: number;
   chunkCount: number;
 }
-export interface AssetRecord { asset: CloudAsset; chunks: string[] }
+/** `alias` names an asset whose identical chunk blobs serve this asset, so duplicate uploads store no bytes. */
+export interface AssetRecord { asset: CloudAsset; chunks: string[]; alias?: string }
 const HASH_PREFETCH = 4;
 const COPY_BATCH = 8;
 const FINALIZE_WORK_MS = 20000;
@@ -195,7 +196,8 @@ export class CloudMedia {
       this.checkedCursor(upload);
       await this.auth.authenticate(headers, true, true);
       const record: AssetRecord = { asset: upload.asset,
-        chunks: Array.from({ length: this.count(upload.asset) }, (_, index) => upload.chunks[index]!) };
+        chunks: Array.from({ length: this.count(upload.asset) }, (_, index) => upload.chunks[index]!),
+        ...(upload.finalization.alias ? { alias: upload.finalization.alias } : {}) };
       try { await this.store.put(`assets/${id}/catalog`, encode(record), null); }
       catch (error) {
         if (!(error instanceof BlobConflict)) throw error;
@@ -206,8 +208,100 @@ export class CloudMedia {
       const existing = await this.catalog(id);
       if (JSON.stringify(existing.asset) !== JSON.stringify(upload.asset)) throw new ApiError(503, 'storage_unavailable');
     }
+    if (!upload.finalization?.alias) await this.index(upload.asset);
     await this.budget.finishUpload(id);
     return upload.asset;
+  }
+
+  contentKey(asset: CloudAsset): string {
+    return `content/${asset.sha256}/${asset.bytes}/${asset.contentType.replace('/', '-')}`;
+  }
+
+  /** Records `asset` as the stored copy for its content unless another live copy is already recorded. */
+  async index(asset: CloudAsset): Promise<void> {
+    if (await this.canonical(asset)) return;
+    const key = this.contentKey(asset);
+    const previous = await readJson<{ id: string }>(this.store, key, 1024);
+    try { await this.store.put(key, encode({ id: asset.id }), previous?.etag ?? null); }
+    catch (error) { if (!(error instanceof BlobConflict)) throw error; }
+  }
+
+  /** The live, byte-owning asset already stored with identical content, if any. */
+  async canonical(asset: CloudAsset): Promise<string | undefined> {
+    const entry = await readJson<{ id: string }>(this.store, this.contentKey(asset), 1024);
+    const id = entry?.value.id;
+    if (typeof id !== 'string' || !safeId(id) || id === asset.id) return undefined;
+    try {
+      const record = await this.catalog(id);
+      if (record.alias || record.asset.sha256 !== asset.sha256 || record.asset.bytes !== asset.bytes
+        || record.asset.contentType !== asset.contentType) return undefined;
+      if ((await new AssetAdmission(this.store).read(id)).value.deleted) return undefined;
+      return id;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  /** Durable marker written before any alias points at `target`; marked assets never give up their bytes. */
+  async markTarget(target: string): Promise<void> {
+    try { await this.store.put(`aliases/${target}`, encode({ target }), null); }
+    catch (error) { if (!(error instanceof BlobConflict)) throw error; }
+  }
+
+  /**
+   * Owner maintenance: makes asset `id` an alias of `target` (identical content) and deletes its own chunk
+   * blobs. Asset ids, descriptors and every routine revision stay valid; only duplicate bytes are removed.
+   * Calling with `target === id` just records `id` as the stored copy for its content.
+   */
+  async deduplicate(headers: Headers, id: string, input: unknown): Promise<{ id: string; target: string; freedBytes: number }> {
+    const actor = await this.auth.authenticate(headers, true, true);
+    if (actor.account.role !== 'owner') throw new ApiError(403, 'forbidden');
+    const value = strictRecord(input, ['target']);
+    const target = value.target;
+    if (typeof target !== 'string' || !safeId(target) || !safeId(id)) throw new ApiError(400, 'invalid_id');
+    const goal = await this.catalog(target);
+    if (goal.alias) throw new ApiError(409, 'alias_target');
+    if ((await new AssetAdmission(this.store).read(target)).value.deleted) throw new ApiError(409, 'media_deleted');
+    for (let index = 0; index < goal.chunks.length; index++) {
+      const chunk = await this.store.get(`assets/${target}/chunks/${index}`, LIMITS.chunkBytes);
+      if (!chunk || chunk.bytes.length !== this.chunkLength(goal.asset, index) || sha256(chunk.bytes) !== goal.chunks[index]) {
+        throw new ApiError(503, 'storage_unavailable');
+      }
+    }
+    if (target === id) {
+      await this.index(goal.asset);
+      return { id, target, freedBytes: 0 };
+    }
+    const stored = await readJson<AssetRecord>(this.store, `assets/${id}/catalog`);
+    if (!stored) throw new ApiError(404, 'asset_not_found');
+    const record = await this.catalog(id);
+    if (record.asset.sha256 !== goal.asset.sha256 || record.asset.bytes !== goal.asset.bytes
+      || record.asset.contentType !== goal.asset.contentType || JSON.stringify(record.chunks) !== JSON.stringify(goal.chunks)) {
+      throw new ApiError(409, 'content_mismatch');
+    }
+    if (record.alias && record.alias !== target) throw new ApiError(409, 'alias_conflict');
+    if (await this.store.get(`aliases/${id}`, 1024)
+      || (await readJson<{ id: string }>(this.store, this.contentKey(record.asset), 1024))?.value.id === id) {
+      throw new ApiError(409, 'alias_target');
+    }
+    await this.auth.authenticate(headers, true, true);
+    await this.markTarget(target);
+    if (!record.alias) {
+      try { await this.store.put(`assets/${id}/catalog`, encode({ ...record, alias: target } satisfies AssetRecord), stored.etag); }
+      catch (error) { if (error instanceof BlobConflict) throw new ApiError(409, 'upload_conflict'); throw error; }
+    }
+    let freedBytes = 0;
+    for (let index = 0; index < record.chunks.length; index++) {
+      const key = `assets/${id}/chunks/${index}`;
+      const chunk = await this.store.get(key, LIMITS.chunkBytes);
+      if (!chunk) continue;
+      try { await this.store.delete(key, chunk.etag); freedBytes += chunk.bytes.length; }
+      catch (error) { if (!(error instanceof BlobConflict)) throw error; }
+    }
+    if (freedBytes) await this.budget.refund(freedBytes);
+    await this.index(goal.asset);
+    return { id, target, freedBytes };
   }
 
   async complete(headers: Headers, id: string): Promise<CloudAsset | CompletionPending> {
@@ -246,6 +340,14 @@ export class CloudMedia {
       }
       if (hash.digest('hex') !== upload.asset.sha256) throw new ApiError(422, 'media_hash_mismatch');
       if (this.clock() >= deadline) throw new ApiError(503, 'finalization_timeout');
+      const alias = await this.canonical(upload.asset);
+      if (alias) {
+        await this.markTarget(alias);
+        upload = { ...upload, state: 'complete', finalization: { sha256: upload.asset.sha256, copiedChunks: count, alias } };
+        await this.checkpoint(id, upload, stored.etag);
+        await this.budget.refund(upload.asset.bytes);
+        return this.publishCompleted(headers, id, upload);
+      }
       upload = { ...upload, finalization: { sha256: upload.asset.sha256, copiedChunks: 0 } };
       await this.checkpoint(id, upload, stored.etag);
       return this.pending(upload);
@@ -303,14 +405,17 @@ export class CloudMedia {
     if (!record) throw new ApiError(404, 'asset_not_found');
     const asset = parseAsset(record.value.asset);
     if (asset.id !== id || !Array.isArray(record.value.chunks) || record.value.chunks.length !== this.count(asset) ||
-        record.value.chunks.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new ApiError(503, 'storage_unavailable');
+        record.value.chunks.some(hash => !/^[a-f0-9]{64}$/.test(hash))
+        || (record.value.alias !== undefined && (typeof record.value.alias !== 'string' || !safeId(record.value.alias) || record.value.alias === id))) {
+      throw new ApiError(503, 'storage_unavailable');
+    }
     return record.value;
   }
 
   async chunk(id: string, index: number): Promise<{ bytes: Buffer; hash: string; asset: CloudAsset }> {
     const record = await this.catalog(id);
     if (!Number.isSafeInteger(index) || index < 0 || index >= record.chunks.length) throw new ApiError(400, 'invalid_chunk');
-    const result = await this.store.get(`assets/${id}/chunks/${index}`, LIMITS.chunkBytes);
+    const result = await this.store.get(`assets/${record.alias ?? id}/chunks/${index}`, LIMITS.chunkBytes);
     if (!result || result.bytes.length !== this.chunkLength(record.asset, index) || sha256(result.bytes) !== record.chunks[index]) {
       throw new ApiError(503, 'storage_unavailable');
     }
