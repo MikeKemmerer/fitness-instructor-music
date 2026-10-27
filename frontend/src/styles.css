@@ -595,12 +595,12 @@ input[type='range'] { inline-size: 100%; min-inline-size: 0; height: 44px; margi
   .snapshot-status { margin-block-end: 20px; }
 }
 
-.class-mode-open { overflow: hidden; }
+.class-mode-open { overflow: hidden; scrollbar-gutter: auto; }
 .app-shell.class-mode { position: fixed; inset: 0; z-index: 10; inline-size: 100%; max-inline-size: none; block-size: 100vh; block-size: 100dvh; display: flex; flex-direction: column; gap: 10px; background: var(--background); padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
 .class-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none; border-block-end: 1px solid var(--border); padding-block-end: 8px; }
 .class-toolbar .button { max-inline-size: 75%; }
 .class-toolbar .button span { min-inline-size: 0; overflow-wrap: anywhere; }
-.class-mode > main { flex: 1; min-block-size: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; padding: 4px; }
+.class-mode > main { flex: 1; min-block-size: 0; overflow: auto; overscroll-behavior: contain; padding: 4px; }
 .class-mode > .notice { flex: none; max-block-size: 30vh; max-block-size: 30dvh; overflow: auto; margin: 0; }
 .class-mode .teach-panel, .class-mode .rehearsal-layout { min-block-size: 100%; }
 .class-mode .teach-panel { animation: none; }
