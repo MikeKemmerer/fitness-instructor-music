@@ -4387,6 +4387,18 @@ describe('bounded file import', () => {
     expect(revoke.mock.calls.map(([url]) => url)).toEqual(urls.mock.results.map(result => result.value));
   });
 
+  it('converts natively decodable audio the cloud cannot store (AIFF) to M4A', async () => {
+    browserAudio(2);
+    const output = mockM4aContainer(2, 2);
+    conversion.mockResolvedValueOnce({ blob: output, duration: 2 });
+    const file = new File(['synthetic audio'], 'synthetic.aiff', { type: 'audio/aiff' });
+    const track = await storeTrack(file);
+    expect(conversion).toHaveBeenCalledExactlyOnceWith(file, { signal: expect.any(AbortSignal) });
+    const stored = (await getTrackBlob(track.id))!;
+    expect(stored.type).toBe('audio/mp4');
+    expect(await stored.arrayBuffer()).toEqual(await output.arrayBuffer());
+  });
+
   it('accepts an intact application/ogg Vorbis source for bounded fallback', async () => {
     const source = new Uint8Array(execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i',
       'anullsrc=sample_rate=48000:channel_layout=stereo', '-t', '2', '-c:a', 'libvorbis', '-f', 'ogg', 'pipe:1'],

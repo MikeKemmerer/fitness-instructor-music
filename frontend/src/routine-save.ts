@@ -1,8 +1,8 @@
 import type { CloudRoutine } from '../../shared/cloud-contract';
 import { allRoutineTracks, type Routine } from '../../shared/routine';
 import * as offline from './offline';
-import { canonicalAudioType, cloudHash, createCloudLibrary, type CloudTransfer } from './cloud-library';
-import { CloudRequestError } from './cloud-client';
+import { audioUploadType, cloudHash, createCloudLibrary, type CloudTransfer } from './cloud-library';
+import { CloudRequestError, CloudTrackError } from './cloud-client';
 
 export function sameSavedContent(first: CloudRoutine, second: CloudRoutine): boolean {
   const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
@@ -24,7 +24,13 @@ export function createRoutineSave(library = createCloudLibrary()) {
         if (known[track.id]) { media[track.id] = structuredClone(known[track.id]); continue; }
         const blob = await offline.getTrackBlob(track.id);
         if (!blob) throw new Error('missing_audio');
-        media[track.id] = { id: track.id, bytes: blob.size, contentType: canonicalAudioType(blob.type), sha256: await cloudHash(blob) };
+        let contentType: string;
+        try { contentType = await audioUploadType(blob); }
+        catch (error) {
+          if (error instanceof Error && error.message === 'cloud_unsupported_media') throw new CloudTrackError('cloud_unsupported_media', track.title);
+          throw error;
+        }
+        media[track.id] = { id: track.id, bytes: blob.size, contentType, sha256: await cloudHash(blob) };
       }
       return { routine: value, media };
     },

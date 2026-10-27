@@ -13,6 +13,8 @@ import { BlobConflict, encode, readJson, type BlobStore } from './store';
 export type LibraryKind = 'song' | 'filler';
 const METADATA_BYTES = 4096;
 export const MANAGED_PAGE_KEYS = 32;
+export const MANAGED_PAGE_SCANS = 8;
+const MANAGED_PAGE_TARGET = 24;
 const metadataKey = (kind: LibraryKind, id: string): string => `library/metadata/${kind}/${id}`;
 
 export function metadataRevision(header: string | null): number {
@@ -124,27 +126,36 @@ export class LibraryManagement {
     const actor = await this.auth.authenticate(headers, false, true);
     const marker = listMarker(kind, cursor);
     const prefix = kind === 'song' ? 'assets/' : 'fillers/index/';
-    const page = await this.store.list(prefix, MANAGED_PAGE_KEYS, marker);
-    if (page.keys.length > MANAGED_PAGE_KEYS || new Set(page.keys).size !== page.keys.length
-      || (page.cursor && (page.cursor === marker || page.cursor.length > 2048 || /[\x00-\x1f\x7f]/.test(page.cursor)))) {
-      throw new ApiError(503, 'storage_unavailable');
-    }
     const items: ManagedAudioItem[] = [];
-    for (const key of page.keys) {
-      if (kind === 'song') {
-        if (!/^assets\/[A-Za-z0-9][A-Za-z0-9_-]{0,79}\/(catalog|chunks\/[0-9]+)$/.test(key)) throw new ApiError(503, 'storage_unavailable');
-        if (!key.endsWith('/catalog')) continue;
-      } else if (!key.startsWith(prefix) || !safeId(key.slice(prefix.length))) throw new ApiError(503, 'storage_unavailable');
-      const id = kind === 'song' ? key.split('/')[1]! : key.slice(prefix.length);
-      try { items.push(await this.item(kind, id)); }
-      catch (error) {
-        if (error instanceof ApiError && error.code === 'media_deleted') continue;
+    const seen = new Set<string>();
+    let next = marker;
+    // Song listings interleave catalog keys with chunk keys, so keep scanning bounded key pages until a
+    // useful number of items is found instead of returning near-empty pages that force repeated "load more".
+    for (let scan = 0; scan < MANAGED_PAGE_SCANS; scan++) {
+      const page = await this.store.list(prefix, MANAGED_PAGE_KEYS, next);
+      if (page.keys.length > MANAGED_PAGE_KEYS || page.keys.some(key => seen.has(key)) || new Set(page.keys).size !== page.keys.length
+        || (page.cursor && (page.cursor === next || page.cursor.length > 2048 || /[\x00-\x1f\x7f]/.test(page.cursor)))) {
         throw new ApiError(503, 'storage_unavailable');
       }
+      for (const key of page.keys) {
+        seen.add(key);
+        if (kind === 'song') {
+          if (!/^assets\/[A-Za-z0-9][A-Za-z0-9_-]{0,79}\/(catalog|chunks\/[0-9]+)$/.test(key)) throw new ApiError(503, 'storage_unavailable');
+          if (!key.endsWith('/catalog')) continue;
+        } else if (!key.startsWith(prefix) || !safeId(key.slice(prefix.length))) throw new ApiError(503, 'storage_unavailable');
+        const id = kind === 'song' ? key.split('/')[1]! : key.slice(prefix.length);
+        try { items.push(await this.item(kind, id)); }
+        catch (error) {
+          if (error instanceof ApiError && error.code === 'media_deleted') continue;
+          throw new ApiError(503, 'storage_unavailable');
+        }
+      }
+      next = page.cursor;
+      if (!next || items.length >= MANAGED_PAGE_TARGET) break;
     }
     await this.describe(headers, items);
     await this.recheck(headers, actor, false);
-    return { items, ...(page.cursor ? { cursor: Buffer.from(JSON.stringify({ version: 1, kind, marker: page.cursor })).toString('base64url') } : {}) };
+    return { items, ...(next ? { cursor: Buffer.from(JSON.stringify({ version: 1, kind, marker: next })).toString('base64url') } : {}) };
   }
 
   async put(headers: Headers, kind: LibraryKind, id: string, input: unknown, initial = false): Promise<{ metadata: LibraryMetadata }> {

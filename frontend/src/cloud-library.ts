@@ -1,6 +1,6 @@
 import type { CloudAsset, CloudRoutine, CloudRoutineSummary, FillerAnalysis, LibraryMetadata, ManagedAudioItem, ManagedAudioPage, LibraryUsagePage, LibraryDeleteResult } from '../../shared/cloud-contract';
 import { allRoutineFillers, allRoutineTracks, validFillerRecording, validateRoutine, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
-import { cloudClient, CLOUD_CHUNK_BYTES, CloudRequestError, type CloudClient } from './cloud-client';
+import { cloudClient, CLOUD_CHUNK_BYTES, CloudRequestError, CloudTrackError, type CloudClient } from './cloud-client';
 import { cacheCloudRoutine, cacheCloudTrack, cacheFillerRecording, getFillerRecordingBlob, getTrackBlob } from './offline';
 
 export const MAX_CLOUD_MEDIA_BYTES = 128 * 1024 * 1024;
@@ -132,6 +132,24 @@ export function canonicalAudioType(type: string): string {
   return canonical;
 }
 
+// Some browsers hand back stored blobs with an empty or vendor-specific type; fall back to the file signature
+// so already-imported audio (including converted M4A) is not rejected before the server validates it.
+export async function audioUploadType(blob: Blob): Promise<string> {
+  try { return canonicalAudioType(blob.type); }
+  catch (error) {
+    const header = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+    const ascii = (start: number, end: number) => String.fromCharCode(...header.subarray(start, end));
+    if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE') return 'audio/wav';
+    if (ascii(0, 4) === 'OggS') return 'audio/ogg';
+    if (ascii(0, 4) === 'fLaC') return 'audio/flac';
+    if (['ftyp', 'free', 'skip', 'wide'].includes(ascii(4, 8))) return 'audio/mp4';
+    if (header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3) return 'audio/webm';
+    if (header[0] === 255 && (header[1]! & 0xf6) === 0xf0) return 'audio/aac';
+    if (ascii(0, 3) === 'ID3' || (header[0] === 255 && (header[1]! & 0xe0) === 0xe0)) return 'audio/mpeg';
+    throw error;
+  }
+}
+
 export async function cloudHash(blob: Blob): Promise<string> {
   if (!blob.size || blob.size > MAX_CLOUD_MEDIA_BYTES) throw new Error('cloud_media_size');
   const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
@@ -193,6 +211,10 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
   const cacheFiller = dependencies.cacheFiller ?? ((recording: FillerRecording, blob: Blob) => cacheFillerRecording(recording, blob));
   const uploaded = new Map<string, CloudAsset>();
   const knownRemoteAssets = new Set<string>();
+  // Assets already stored in the household library, keyed by content, so identical audio is linked instead of re-uploaded.
+  const contentAssets = new Map<string, CloudAsset>();
+  const contentKey = (asset: Pick<CloudAsset, 'sha256' | 'bytes' | 'contentType'>) => `${asset.sha256}:${asset.bytes}:${asset.contentType}`;
+  const rememberContent = (asset: CloudAsset) => { if (!contentAssets.has(contentKey(asset))) contentAssets.set(contentKey(asset), assetDescriptor(asset)); };
   const knownRecordings = new Map<string, FillerRecording>();
   const addedRecordings = new Map<string, FillerRecording>();
   const pendingRecordings = new Map<string, CloudAsset>();
@@ -205,7 +227,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     const user = client.getUser()!;
     const owner = JSON.stringify([user.id, user.authVersion, user.role]);
     if (owner !== uploadOwner) {
-      uploaded.clear(); attempts.clear(); knownRemoteAssets.clear(); knownRecordings.clear(); addedRecordings.clear(); pendingRecordings.clear(); uploadOwner = owner;
+      uploaded.clear(); attempts.clear(); knownRemoteAssets.clear(); contentAssets.clear(); knownRecordings.clear(); addedRecordings.clear(); pendingRecordings.clear(); uploadOwner = owner;
     }
     const assert = () => {
       assertIdentity();
@@ -215,7 +237,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     return assert;
   };
   const rememberRecording = (envelope: CloudRoutine) => {
-    for (const asset of Object.values(envelope.media)) knownRemoteAssets.add(asset.id);
+    for (const asset of Object.values(envelope.media)) { knownRemoteAssets.add(asset.id); rememberContent(asset); }
     for (const recording of routineRecordings(envelope.routine)) knownRecordings.set(recording.id, structuredClone(recording));
   };
   const listFillers = async (transfer: CloudTransfer = {}): Promise<FillerRecording[]> => {
@@ -411,7 +433,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
     progress: (bytes: number) => void): Promise<CloudAsset> => {
     const assertUploadIdentity = client.captureIdentity();
     if (blob.size < 44 || blob.size > MAX_CLOUD_MEDIA_BYTES) throw new Error('cloud_media_size');
-    const descriptor = { bytes: blob.size, sha256: await cloudHash(blob), contentType: canonicalAudioType(blob.type) };
+    const descriptor = { bytes: blob.size, sha256: await cloudHash(blob), contentType: await audioUploadType(blob) };
     assert();
     const key = `${uploadOwner}:${descriptor.sha256}:${descriptor.contentType}`;
     const previous = uploaded.get(key);
@@ -681,35 +703,61 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       const blob = await readBlob(track.id);
       assert();
       if (!blob) throw new Error('missing_audio');
-      let reusable = known && blob.size === known.bytes && canonicalAudioType(blob.type) === known.contentType
-        && await cloudHash(blob) === known.sha256;
-      const replacedBytes = !!known && !reusable;
+      let contentType: string;
+      try { contentType = await audioUploadType(blob); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'cloud_unsupported_media') throw new CloudTrackError('cloud_unsupported_media', track.title);
+        throw error;
+      }
+      const sha256 = await cloudHash(blob);
       assert();
-      if (reusable) {
+      const content = { sha256, bytes: blob.size, contentType };
+      let reusable = !!known && contentKey(known) === contentKey(content);
+      const replacedBytes = !!known && !reusable;
+      const verify = async (candidate: CloudAsset): Promise<boolean> => {
         try {
-          const manifest = await client.request<{ asset: CloudAsset }>(`/api/media/${encodeURIComponent(known.id)}`, { signal: transfer.signal });
-          assert(); reusable = sameAsset(assetDescriptor(manifest.asset), known);
-          if (!reusable) throw new Error('track_integrity_failed');
+          const manifest = await client.request<{ asset: CloudAsset }>(`/api/media/${encodeURIComponent(candidate.id)}`, { signal: transfer.signal });
+          assert();
+          if (!sameAsset(assetDescriptor(manifest.asset), candidate)) throw new Error('track_integrity_failed');
+          return true;
         } catch (error) {
           assert();
           if (!(error instanceof CloudRequestError && error.status === 404)) throw error;
+          if (candidate !== known) return false;
           if (known.id !== track.id || knownRemoteAssets.has(known.id)) throw error;
-          reusable = false;
+          return false;
+        }
+      };
+      let reused: CloudAsset | undefined;
+      if (reusable && known) reused = await verify(known) ? known : undefined;
+      if (!reused && !uploaded.has(`${uploadOwner}:${sha256}:${contentType}`)) {
+        // The routine may only carry a placeholder for this track; link identical audio already in the library.
+        const candidates = [...Object.values(reusableMedia), ...contentAssets.values()]
+          .filter(candidate => candidate !== known && contentKey(candidate) === contentKey(content) && candidate.id !== track.id);
+        for (const candidate of new Map(candidates.map(candidate => [candidate.id, candidate])).values()) {
+          if (await verify(candidate)) { reused = candidate; break; }
         }
       }
-      if (reusable) { media[track.id] = assetDescriptor(known); knownRemoteAssets.add(known.id); }
+      let asset: CloudAsset;
+      if (reused) { asset = assetDescriptor(reused); knownRemoteAssets.add(reused.id); }
       else {
         let bytes = 0;
-        const asset = await upload(blob, transfer, assert, increment => {
-          bytes += increment;
-          transfer.progress?.(completed + bytes / blob.size, total);
-        });
-        if (replacedBytes) {
-          track.id = crypto.randomUUID();
-          await cacheTrack(track.id, blob, asset.sha256); assert();
+        try {
+          asset = await upload(blob, transfer, assert, increment => {
+            bytes += increment;
+            transfer.progress?.(completed + bytes / blob.size, total);
+          });
+        } catch (error) {
+          if (error instanceof CloudRequestError && error.status === 415) throw new CloudTrackError('cloud_unsupported_media', track.title);
+          throw error;
         }
-        media[track.id] = asset;
       }
+      rememberContent(asset);
+      if (replacedBytes) {
+        track.id = crypto.randomUUID();
+        await cacheTrack(track.id, blob, asset.sha256); assert();
+      }
+      media[track.id] = asset;
       completed++;
       transfer.progress?.(completed, total);
     }
@@ -826,6 +874,7 @@ export function createCloudLibrary(dependencies: CloudLibraryDependencies = {}) 
       return { id: item.id, kind, asset, metadata, ...(recording ? { recording } : {}) };
     });
     if (new Set(items.map(item => item.id)).size !== items.length) throw new Error('cloud_invalid_response');
+    if (kind === 'song') for (const item of items) rememberContent(item.asset);
     return { items, ...(page.cursor ? { cursor: page.cursor } : {}) };
   };
   const libraryMetadata = async (kind: ManagedAudioItem['kind'], id: string, transfer: CloudTransfer = {}): Promise<LibraryMetadata> => {

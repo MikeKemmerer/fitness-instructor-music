@@ -22,7 +22,7 @@ these changes; it is historical, not the current operating guide.
 5. **Playlists:** Playlists > New music playlist > name > Add track > From audio library
    or Import audio > order and levels > Save. Return to
    Routines and explicitly choose it for walk-in or walk-out.
-6. **Close:** Close routine at the editor footer > Save, Discard changes or Cancel.
+6. **Close:** Close routine at the top of the editor > Save, Discard changes or Cancel. To start another routine, use **Open different routine > New routine**.
    Save uses the same local-first path; closing does not delete the library/audio.
 
 The standalone build uses the same **Save** button but saves only on this device.
@@ -181,7 +181,9 @@ or replace the sounds in saved routines.
    initially reads metadata pages, not every song's audio. Offline, it lists only
    known assets whose cached bytes match the descriptor's size and SHA-256; this
    is not a complete offline Cloud catalog. Uncached or mismatched audio is omitted.
-3. Use **Search loaded audio** and **Load more audio** for further pages. Check songs
+3. Remaining pages load automatically in the background (**Load more audio** only
+   appears if loading stops early). Identical audio stored more than once is shown
+   once, using any available title or the original filename. Check songs
    in the desired insertion order, then **Add selected audio**. Cancel adds no entries.
 4. Wait for selected audio to download/verify, or for the cached copy to be
    revalidated offline. Entries append with fresh IDs, empty cues and known BPM
@@ -359,7 +361,7 @@ PDF, select fields and a filename, then Download. These are local metadata expor
 not Cloud Save or Publish. Audio is not included; keep exported private notes private.
 Existing field-selection, Unicode/font, formula-safety and offline behavior remain.
 
-**Close:** at the Routines footer choose **Close routine**. Save commits locally
+**Close:** at the top of the editor choose **Close routine** (or **Open different routine > New routine**, which closes first). Save commits locally
 first and attempts Cloud; a durable pending Cloud save permits closing, but a local
 save failure keeps the editor open. Discard changes closes without committing the
 current unsaved buffer; existing saved/pending copies and media remain. Cancel

@@ -859,13 +859,14 @@ if (typeof ResizeObserver !== 'undefined') {
     document.documentElement.style.setProperty('--editor-actions-height', `${Math.ceil(editorActions.getBoundingClientRect().height)}px`);
   }).observe(editorActions);
 }
-const newDraft = iconButton(t('newRoutine'), Plus, () => {
-  if (routineOpen || editorBusy || transportOperation.pending || (hostedPilot && getCloudRole() === 'player')) return;
+const newDraft = iconButton(t('newRoutine'), Plus, () => startNewDraft(), true);
+function startNewDraft(): void {
+  if (routineOpen || editorBusy || transportOperation.pending || appDisposed || (hostedPilot && getCloudRole() === 'player')) return;
   if (dirty && !confirm(t('confirmSwitch', { name: draft.name }))) return;
   stopEditorAudio(); clearCloudSelection(); draft = newRoutine(); draft.name = t('newName'); draft.filler.sound = 'lofi';
   routineOpen = true; chooserOpen = false; selectedClass = null;
   persistedRevision = null; dirty = true; draftGeneration++; selectedCueId = ''; cueEditing = false; refreshDraft(true);
-}, true);
+}
 const save = iconButton(t('save'), Save, () => {
   void runEditor(() => saveWorkingRoutine());
 });
@@ -1021,7 +1022,11 @@ searchRoutines.placeholder = t('searchRoutines'); searchRoutines.setAttribute('a
 searchRoutines.addEventListener('input', () => renderRoutineLibrary());
 const chooserHeader = element('div', 'chooser-heading');
 const chooserClose = iconButton(t('closeChooser'), X, () => dismissChooser());
-chooserHeader.append(element('h2', '', t('openRoutineDialog')), chooserClose);
+const chooserNew = iconButton(t('newRoutine'), Plus, () => {
+  if (!routineOpen || editorBusy || transportOperation.pending) return;
+  dismissChooser(); closeRoutine(startNewDraft);
+}, true);
+chooserHeader.append(element('h2', '', t('openRoutineDialog')), chooserNew, chooserClose);
 chooserDialog.append(chooserHeader, chooserFeedback);
 chooserDialog.addEventListener('cancel', event => { event.preventDefault(); dismissChooser(); });
 chooserDialog.addEventListener('click', event => { if (event.target === chooserDialog) dismissChooser(); });
@@ -1300,14 +1305,14 @@ const openDifferent = iconButton(t('openDifferent'), ListMusic, () => {
   renderRoutineLibrary(); syncAvailability(); searchRoutines.focus({ preventScroll: true });
 }, true);
 editorRoutineTitle.tabIndex = -1;
-editorHeadingActions.append(openDifferent);
 const close = iconButton(t('closeRoutine'), X, () => closeRoutine(), true);
+editorHeadingActions.append(openDifferent, close);
 const deleteSelectedRoutine = iconButton(t('deleteRoutine'), Trash2, () => {
   if (!routineOpen || editorBusy || transportOperation.pending || !canEdit() || draft.locked) return;
   if (cloudSelection) deleteSelectedCloudRoutine(); else deleteSelectedLocalRoutine();
 }, true);
 deleteSelectedRoutine.classList.add('danger');
-const editorFooter = element('footer', 'editor-footer'); editorFooter.append(close, deleteSelectedRoutine); panels.edit.append(editorFooter);
+const editorFooter = element('footer', 'editor-footer'); editorFooter.append(deleteSelectedRoutine); panels.edit.append(editorFooter);
 
 function nameRoutine(label: string, initial: string, action: (name: string) => Promise<void>): void {
   cancelCueDrag();
@@ -1369,7 +1374,7 @@ async function openLegacyRoutine(selection: ClassSelection, confirmed = false): 
   persistedRevision = null; dirty = true; routineOpen = true; chooserOpen = false; draftGeneration++; refreshDraft(true); requestPreparation();
 }
 
-function closeRoutine(): void {
+function closeRoutine(after?: () => void): void {
   if (!routineOpen || editorBusy || transportOperation.pending || appDisposed) return;
   const id = draft.id;
   const dialog = element('dialog', 'library-dialog'); dialog.setAttribute('aria-label', t('closeRoutine'));
@@ -1393,7 +1398,10 @@ function closeRoutine(): void {
     } catch (reason) { error.show(errorMessage(reason)); }
     finally {
       editorBusy = false; syncAvailability();
-      if (completed && !appDisposed) (newDraft.hidden ? searchRoutines : newDraft).focus({ preventScroll: true });
+      if (completed && !appDisposed) {
+        if (after) after();
+        else (newDraft.hidden ? searchRoutines : newDraft).focus({ preventScroll: true });
+      }
     }
   };
   dialog.addEventListener('cancel', event => { event.preventDefault(); if (!editorBusy) dismiss(); });
@@ -2003,8 +2011,10 @@ function syncAvailability(): void {
   const busy = editorBusy || transportOperation.pending;
   openDifferent.hidden = !routineOpen; openDifferent.disabled = busy;
   chooserClose.disabled = busy;
-  editorFooter.hidden = !routineOpen; close.disabled = busy;
+  chooserNew.hidden = !routineOpen || (hostedPilot && getCloudRole() === 'player'); chooserNew.disabled = busy;
+  close.hidden = !routineOpen; close.disabled = busy;
   deleteSelectedRoutine.hidden = !routineOpen || !canEdit() || draft.locked;
+  editorFooter.hidden = deleteSelectedRoutine.hidden;
   deleteSelectedRoutine.disabled = busy || persistedRevision === null || (!!cloudSelection && (!cloudEnvelope || getCloudContext().access !== 'online'));
   fileInput.hidden = hostedPilot && getCloudRole() === 'player';
   fileInput.disabled = busy || draft.locked || !canEdit();

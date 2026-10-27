@@ -63,5 +63,8 @@ const runtimeMessages: Record<string, MessageKey> = {
 
 export function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const trackTitle = error instanceof Error ? (error as Error & { trackTitle?: unknown }).trackTitle : undefined;
+  if (message === 'cloud_unsupported_media' && typeof trackTitle === 'string') return t('cloudUnsupportedTrack', { title: trackTitle });
+  if (message === 'cloud_unsupported_media') return t('cloudUnsupported');
   return runtimeMessages[message] ? t(runtimeMessages[message]) : message || t('localFailure');
 }

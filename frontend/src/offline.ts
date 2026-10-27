@@ -2261,6 +2261,8 @@ function inspectWebm(bytes: Uint8Array): ContainerAudio {
   return audio[0];
 }
 
+const CLOUD_STORABLE_TYPES = new Set(['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/flac', 'audio/aac', 'audio/webm']);
+
 function canonicalAudioType(file: File, header: Uint8Array, container?: ContainerAudio): string {
   if (container) return container.contentType;
   if (hasSignature(header, 0, 'RIFF') && hasSignature(header, 8, 'WAVE')) return 'audio/wav';
@@ -2453,15 +2455,20 @@ async function prepareTrack(
     ({ blob, duration } = await convertTrack(file, session, signal, opusDuration, channels));
   } else {
     let sourceDuration: number | undefined;
+    let unstorable = false;
     try {
       duration = await decodeNative(file, session, undefined, value => { sourceDuration = value; }, channels);
-      blob = file.slice(0, file.size, preserveBytes ? file.type : canonicalAudioType(file, header, container));
+      const nativeType = canonicalAudioType(file, header, container);
+      // Formats the cloud can't store (AIFF, WMA, ...) are converted to M4A on import, like Opus.
+      unstorable = !preserveBytes && !CLOUD_STORABLE_TYPES.has(nativeType);
+      blob = file.slice(0, file.size, preserveBytes ? file.type : nativeType);
     } catch (error) {
       session?.assert();
       if (preserveBytes || !(error instanceof Error) ||
         (!error.message.startsWith('unsupported_audio:') && error.message !== 'audio_metadata_timeout')) throw error;
       ({ blob, duration } = await convertTrack(file, session, signal, sourceDuration, channels));
     }
+    if (unstorable) ({ blob, duration } = await convertTrack(file, session, signal, sourceDuration, channels));
   }
   session?.assert();
   const sha256 = await digest(blob);

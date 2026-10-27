@@ -19,7 +19,7 @@ import { CloudClasses, CloudPlaylists, type CloudClassSetup, type ResolvedClassS
 import { parseRoutineContent } from '../src/validation';
 import { LIBRARY_SCAN_LIMIT } from '../src/cloud/library';
 import { AssetAdmission, GATE_BYTES } from '../src/cloud/admission';
-import { MANAGED_PAGE_KEYS, metadataRevision } from '../src/cloud/library-management';
+import { MANAGED_PAGE_KEYS, MANAGED_PAGE_SCANS, metadataRevision } from '../src/cloud/library-management';
 import { LibraryReferences, REFERENCE_LIMITS } from '../src/cloud/library-references';
 
 vi.mock('@azure/functions', () => ({ app: { http: vi.fn() } }));
@@ -752,18 +752,27 @@ describe('uploaded audio management HTTP (synthetic Blob store)', () => {
   it('handles bounded chunks-only and empty-continuation pages without hiding unreferenced uploads', async () => {
     const { api, headers, asset, store } = await managementFixture();
     for (let index = 0; index < MANAGED_PAGE_KEYS; index++) await store.put(`assets/0000/chunks/${index}`, Buffer.alloc(1), null);
-    const first = await api.managed.list(headers, 'song');
-    expect(first.items).toEqual([]);
-    expect(first.cursor).toBeDefined();
-    expect((await api.managed.list(headers, 'song', first.cursor)).items.map(item => item.id)).toContain(asset.id);
     const list = vi.spyOn(store, 'list');
-    list.mockResolvedValueOnce({ keys: [], cursor: 'empty-page' });
+    const first = await api.managed.list(headers, 'song');
+    expect(first.items.map(item => item.id)).toContain(asset.id);
+    expect(first.cursor).toBeUndefined();
+    const assetScans = list.mock.calls.filter(([prefix]) => prefix === 'assets/');
+    expect(assetScans.length).toBeGreaterThan(1);
+    expect(assetScans.every(([, limit]) => limit === MANAGED_PAGE_KEYS)).toBe(true);
+    let empty = 0;
+    list.mockImplementation(async () => ({ keys: [], cursor: `empty-page-${++empty}` }));
     expect(await api.managed.list(headers, 'song')).toMatchObject({ items: [], cursor: expect.any(String) });
-    list.mockResolvedValueOnce({ keys: [`assets/${asset.id}/catalog`, `assets/${asset.id}/catalog`], cursor: undefined });
-    await expect(api.managed.list(headers, 'song')).rejects.toMatchObject({ status: 503 });
+    expect(empty).toBe(MANAGED_PAGE_SCANS);
     list.mockRestore();
+    const strict = vi.spyOn(store, 'list');
+    strict.mockResolvedValueOnce({ keys: [`assets/${asset.id}/catalog`, `assets/${asset.id}/catalog`], cursor: undefined });
+    await expect(api.managed.list(headers, 'song')).rejects.toMatchObject({ status: 503 });
+    strict.mockResolvedValueOnce({ keys: [`assets/${asset.id}/catalog`], cursor: 'next' })
+      .mockResolvedValueOnce({ keys: [`assets/${asset.id}/catalog`], cursor: undefined });
+    await expect(api.managed.list(headers, 'song')).rejects.toMatchObject({ status: 503 });
+    strict.mockRestore();
     await store.put(`library/metadata/song/${asset.id}`, encode({ revision: 1, title: 'Corrupt' }), null);
-    await expect(api.managed.list(headers, 'song', first.cursor)).rejects.toMatchObject({ status: 503 });
+    await expect(api.managed.list(headers, 'song')).rejects.toMatchObject({ status: 503 });
   });
 
   it('does not let the legacy archive endpoint bypass retained usage or metadata CAS', async () => {

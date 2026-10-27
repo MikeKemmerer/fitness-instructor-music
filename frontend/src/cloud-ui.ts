@@ -1,5 +1,5 @@
 import type { CloudContext, CloudIdentity } from './cloud-client';
-import { CloudRequestError } from './cloud-client';
+import { CloudRequestError, CloudTrackError } from './cloud-client';
 import { hostedCloudSelectionKey, hostedIdentityMarker, hostedResetKey } from './hosted-session';
 import type { RevisionReference } from '../../shared/class-plan';
 import type { ClassSelection } from './class-library';
@@ -16,6 +16,9 @@ export function cloudStatusMessage(context: CloudContext): string {
 }
 
 export function cloudErrorMessage(error: unknown): string {
+  if (error instanceof CloudTrackError && error.message === 'cloud_unsupported_media') {
+    return t('cloudUnsupportedTrack', { title: error.trackTitle });
+  }
   if (error instanceof CloudRequestError) {
     if (error.code === 'cancelled') return t('cloudCancelled');
     if (error.code === 'session_changed') return t('cloudIdentityChanged');

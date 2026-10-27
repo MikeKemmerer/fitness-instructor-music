@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CLOUD_CHUNK_BYTES, CLOUD_TIMEOUT_MS, CloudRequestError, createCloudClient } from '../frontend/src/cloud-client';
-import { canonicalAudioType, cloudHash, createCloudLibrary, MAX_CLOUD_MEDIA_BYTES, parseCloudRoutine } from '../frontend/src/cloud-library';
+import { CLOUD_CHUNK_BYTES, CLOUD_TIMEOUT_MS, CloudRequestError, CloudTrackError, createCloudClient } from '../frontend/src/cloud-client';
+import { audioUploadType, canonicalAudioType, cloudHash, createCloudLibrary, MAX_CLOUD_MEDIA_BYTES, parseCloudRoutine } from '../frontend/src/cloud-library';
 import { canEditCloudDraft, cloudErrorMessage, confirmCloudNavigation, recalledCloudSelection, rememberCloudSelection,
   classSelectionStorageKey, recalledClassSelection, rememberClassSelection } from '../frontend/src/cloud-ui';
 import { hostedCloudSelectionKey, hostedIdentityMarker, hostedUserKey } from '../frontend/src/hosted-session';
@@ -1019,6 +1019,34 @@ describe('cloud transfers and revision commands', () => {
     expect(harness.chunk).toHaveBeenCalledOnce();
     expect(harness.refresh).toHaveBeenCalledOnce();
     expect(harness.fetcher.mock.calls.some(([path]) => path === '/api/routines')).toBe(false);
+  });
+
+  it('links identical library audio instead of re-uploading a track that only carries a placeholder', async () => {
+    const harness = await uploadHarness();
+    const existing = { ...harness.asset, id: 'library-copy' };
+    const server = harness.fetcher.getMockImplementation()!;
+    const manifest = vi.fn(async () => json({ asset: existing }));
+    harness.fetcher.mockImplementation(async (input, options) => {
+      const path = String(input);
+      if (path === '/api/media/entry-a') return json({ error: 'not_found' }, 404);
+      if (path === '/api/media/library-copy') return manifest();
+      return server(input, options);
+    });
+    const staged = await harness.library.stage(harness.envelope.routine, { 'entry-a': { ...harness.asset, id: 'entry-a' }, other: existing });
+    expect(staged.media['entry-a']).toEqual(existing);
+    expect(manifest).toHaveBeenCalledOnce();
+    expect(harness.start).not.toHaveBeenCalled(); expect(harness.cacheTrack).not.toHaveBeenCalled();
+  });
+
+  it('detects stored audio by signature when the blob type is missing and names unsupported songs', async () => {
+    const harness = await uploadHarness();
+    harness.getTrackBlob.mockResolvedValue(new Blob([await harness.blob.arrayBuffer()]));
+    await expect(harness.library.stage(harness.envelope.routine, {})).rejects.toMatchObject({ message: 'cloud_unsupported_media', trackTitle: '<Song>' });
+    const riff = new Uint8Array(128); riff.set([...'RIFF'].map(c => c.charCodeAt(0)), 0); riff.set([...'WAVE'].map(c => c.charCodeAt(0)), 8);
+    expect(await audioUploadType(new Blob([riff]))).toBe('audio/wav');
+    const ftyp = new Uint8Array(32); ftyp.set([...'ftypM4A '].map(c => c.charCodeAt(0)), 4);
+    expect(await audioUploadType(new Blob([ftyp], { type: '' }))).toBe('audio/mp4');
+    expect(cloudErrorMessage(new CloudTrackError('cloud_unsupported_media', '<Song>'))).toBe(t('cloudUnsupportedTrack', { title: '<Song>' }));
   });
 
   it('reuses a completed asset after a failed routine write without any upload requests', async () => {

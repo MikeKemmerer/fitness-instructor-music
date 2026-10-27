@@ -53,6 +53,15 @@ export class CloudRequestError extends Error {
   }
 }
 
+/** A cloud failure attributable to one song, so the message can name it. */
+export class CloudTrackError extends Error {
+  readonly trackTitle: string;
+  constructor(code: string, trackTitle: string) {
+    super(code);
+    this.trackTitle = trackTitle;
+  }
+}
+
 export function parseCloudIdentity(value: unknown): CloudIdentity | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const { id, authVersion, role } = value as Record<string, unknown>;

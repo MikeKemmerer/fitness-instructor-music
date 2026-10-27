@@ -489,8 +489,8 @@ describe('unified audio picker', () => {
     });
     const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
     const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
-    const items = ['First', 'Second'].map(title => ({ title, duration: 30,
-      asset: { id: title.toLowerCase(), bytes: blob.size, contentType: blob.type, sha256 } }));
+    const items = ['First', 'Second'].map((title, index) => ({ title, duration: 30,
+      asset: { id: title.toLowerCase(), bytes: blob.size, contentType: blob.type, sha256: index ? 'b'.repeat(64) : sha256 } }));
     const cache = new Map<string, Blob>();
     mocks.getTrackBlob.mockImplementation(async id => cache.get(id));
     mocks.cacheCloudTrack.mockImplementation(async (id, value) => { cache.set(id, value); });
@@ -628,15 +628,20 @@ describe('unified audio picker', () => {
     vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', expiresAt: Date.now() + 3600_000, user: { id: 'author', username: 'author', role: 'editor', authVersion: 1 } });
     vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
     vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
-    const blob = new Blob([new Uint8Array(128)], { type: 'audio/wav' });
-    const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())).toString('hex');
-    const asset = (id: string) => ({ id, bytes: 128, contentType: 'audio/wav', sha256 });
+    const blobs: Record<string, Blob> = { first: new Blob([new Uint8Array(128)], { type: 'audio/wav' }),
+      second: new Blob([new Uint8Array(128).fill(2)], { type: 'audio/wav' }) };
+    const digest = async (value: Blob) => Buffer.from(await crypto.subtle.digest('SHA-256', await value.arrayBuffer())).toString('hex');
+    const hashes: Record<string, string> = { first: await digest(blobs.first!), second: await digest(blobs.second!) };
+    const asset = (id: string) => ({ id, bytes: 128, contentType: 'audio/wav', sha256: hashes[id]! });
+    const cache = new Map<string, Blob>();
     const library = { managedPage: vi.fn(async () => ({ items: [
       { id: 'first', kind: 'song', asset: asset('first'), metadata: { revision: 0, title: 'First', artist: '' } },
       { id: 'second', kind: 'song', asset: asset('second'), metadata: { revision: 3, title: 'Second', artist: '<Artist>', bpm: 120 } },
     ] })),
-      downloadTracks: vi.fn(async () => {}) };
-    mocks.getTrackBlob.mockResolvedValue(new Blob([new Uint8Array(128)], { type: 'audio/wav' }));
+      downloadTracks: vi.fn(async (tracks: Track[], media: CloudRoutine['media']) => {
+        for (const track of tracks) cache.set(track.id, blobs[media[track.id]!.id]!);
+      }) };
+    mocks.getTrackBlob.mockImplementation(async id => cache.get(id));
     const added = vi.fn();
     const picker = createAudioLibraryPicker({ library: library as unknown as ReturnType<typeof createCloudLibrary>, available: () => true,
       identity: () => 'routine:1', remaining: () => 10, added, duration: async () => 30 });
@@ -654,6 +659,31 @@ describe('unified audio picker', () => {
     expect(tracks.every(track => track.cues.length === 0)).toBe(true); expect(tracks[1]!.bpm).toBeUndefined();
     expect(tracks[0]!.bpm).toBe(120); expect(tracks[0]).not.toHaveProperty('artist');
     expect(library.downloadTracks).toHaveBeenCalledTimes(2); picker.dispose();
+  });
+
+  it('collapses identical audio stored under several assets, keeps a title, and loads remaining pages automatically', async () => {
+    const owner = stubDocument(); Object.assign(owner, { body: new TestElement('body') });
+    vi.spyOn(cloudState, 'getCloudContext').mockReturnValue({ access: 'online', expiresAt: Date.now() + 3600_000, user: { id: 'author', username: 'author', role: 'editor', authVersion: 1 } });
+    vi.spyOn(cloudState, 'getCloudRole').mockReturnValue('editor');
+    vi.spyOn(cloudState, 'captureCloudIdentity').mockReturnValue(() => {});
+    const asset = (id: string, sha: string) => ({ id, bytes: 128, contentType: 'audio/wav', sha256: sha.repeat(64) });
+    const item = (id: string, sha: string, title: string, filename?: string) => ({ id, kind: 'song' as const, asset: asset(id, sha),
+      metadata: { revision: title ? 1 : 0, title, artist: '', ...(filename ? { filename, duration: 30 } : {}) } });
+    const pages: Record<string, ManagedAudioPage> = {
+      start: { items: [item('copy-1', 'a', ''), item('other', 'c', '', 'Warm up.m4a')], cursor: 'p2' },
+      p2: { items: [item('copy-2', 'a', 'Plie series')], cursor: 'p3' },
+      p3: { items: [item('copy-3', 'a', ''), item('blank', 'd', '')] },
+    };
+    const library = { managedPage: vi.fn(async (_kind: string, cursor?: string) => structuredClone(pages[cursor ?? 'start']!)), downloadTracks: vi.fn() };
+    const picker = createAudioLibraryPicker({ library: library as unknown as ReturnType<typeof createCloudLibrary>, available: () => true,
+      identity: () => 'routine:1', remaining: () => 10, added: vi.fn(), duration: async () => 30 });
+    picker.element.click();
+    const root = (owner as unknown as { body: TestElement }).body;
+    await vi.waitFor(() => expect(library.managedPage).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(root.querySelectorAll('.audio-library-row').map(row => row.querySelector('label')!.textContent))
+      .toEqual(['Plie series', 'Warm up', t('untitledAudio')]));
+    expect(root.querySelectorAll('button').find(node => node.title === t('moreAudio'))!.hidden).toBe(true);
+    expect(library.downloadTracks).not.toHaveBeenCalled(); picker.dispose();
   });
 });
 

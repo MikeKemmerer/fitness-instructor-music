@@ -56,11 +56,26 @@ export function createAudioLibraryPicker(context: {
     const search = element('input'); search.type = 'search';
     const feedback = element('p'); const error = transientText(feedback);
     const rows = element('div', 'audio-library-rows');
-    type Item = CloudAudioItem & { cacheTrackId?: string };
+    type Item = CloudAudioItem & { cacheTrackId?: string; filename?: string };
+    // Keyed by content so identical audio stored under several asset ids (re-uploads) appears once.
     const items = new Map<string, Item>();
     const selected = new Map<string, Item>();
+    const contentKey = (asset: CloudAudioItem['asset']) => `${asset.sha256}:${asset.bytes}:${asset.contentType}`;
+    const merge = (item: Item) => {
+      const key = contentKey(item.asset);
+      const existing = items.get(key);
+      if (!existing) { items.set(key, item); return; }
+      if (!existing.title && item.title) existing.title = item.title;
+      if (!existing.filename && item.filename) existing.filename = item.filename;
+      if (existing.duration === undefined && item.duration !== undefined) existing.duration = item.duration;
+      if (existing.bpm === undefined && item.bpm !== undefined) existing.bpm = item.bpm;
+      if (!existing.cacheTrackId && item.cacheTrackId) existing.cacheTrackId = item.cacheTrackId;
+    };
+    const label = (item: Item) => item.title || item.filename?.replace(/\.[^.]+$/, '') || t('untitledAudio');
     let cursor: string | undefined;
     let busy = false;
+    let autoLoading = false;
+    let autoController: AbortController | null = null;
     let generation = 0;
     let previewGeneration = 0;
     let previewController: AbortController | null = null;
@@ -80,7 +95,7 @@ export function createAudioLibraryPicker(context: {
     let unsubscribeIdentity = () => {};
     dismiss = () => {
       if (dialog !== root) return;
-      generation++; controller?.abort(); controller = null; dialog = null;
+      generation++; controller?.abort(); controller = null; autoController?.abort(); autoController = null; dialog = null;
       unsubscribePreview(); unsubscribeIdentity(); cancelPreview(); checkCurrent = undefined;
       error.dispose(); root.close(); root.remove();
       if (!disposed) {
@@ -105,26 +120,48 @@ export function createAudioLibraryPicker(context: {
         for (const routine of [...envelopes.map(envelope => envelope.routine), ...local, ...cloud]) {
           for (const track of allRoutineTracks(routine)) {
             const asset = assets[track.id];
-            if (!asset || items.has(asset.id)) continue;
+            if (!asset || items.has(contentKey(asset))) continue;
             const blob = await getTrackBlob(track.id); current();
             if (!blob || blob.size !== asset.bytes) continue;
             const hash = await cloudHash(blob); current();
             if (hash !== asset.sha256) continue;
-            items.set(asset.id, { asset: structuredClone(asset), title: track.title, duration: track.duration,
+            merge({ asset: structuredClone(asset), title: track.title, duration: track.duration,
               ...(track.bpm === undefined ? {} : { bpm: track.bpm }), cacheTrackId: track.id });
           }
         }
         cursor = undefined; return;
       }
+      await loadPage(signal);
+    }).then(() => autoLoad());
+    const loadPage = async (signal: AbortSignal) => {
       const page = await context.library.managedPage('song', cursor, { signal }); current();
-      for (const item of page.items) items.set(item.asset.id, { asset: item.asset, title: item.metadata.title,
+      if (page.cursor && page.cursor === cursor) throw new Error('cloud_invalid_response');
+      for (const item of page.items) merge({ asset: item.asset, title: item.metadata.title,
+        ...(item.metadata.filename === undefined ? {} : { filename: item.metadata.filename }),
         ...(item.metadata.duration === undefined ? {} : { duration: item.metadata.duration }),
         ...(item.metadata.bpm === undefined ? {} : { bpm: item.metadata.bpm }) });
       cursor = page.cursor;
-    });
-    const more = iconButton(t('moreAudio'), RefreshCw, () => { if (cursor) void load(); }, true);
+    };
+    // Keep fetching the remaining pages in the background so the whole library becomes searchable
+    // without repeated "load more" clicks; selection stays usable while this runs.
+    const autoLoad = async () => {
+      if (autoLoading || busy || !cursor || dialog !== root) return;
+      autoLoading = true; const active = new AbortController(); autoController = active; render();
+      try {
+        for (let pages = 0; cursor && pages < 64 && dialog === root && !active.signal.aborted; pages++) {
+          await loadPage(active.signal);
+          if (dialog === root) render();
+        }
+      } catch (reason) {
+        if (dialog === root && !active.signal.aborted) error.show(cloudErrorMessage(reason));
+      } finally {
+        if (autoController === active) { autoController = null; autoLoading = false; if (dialog === root) render(); }
+      }
+    };
+    const more = iconButton(t('moreAudio'), RefreshCw, () => { if (cursor && !autoLoading) void load(); }, true);
+    const loadingMore = element('p', 'muted', t('loadingMoreAudio'));
     const prepareItem = async (item: Item, signal: AbortSignal, assert: () => void): Promise<Track> => {
-      const track: Track = { id: item.cacheTrackId ?? crypto.randomUUID(), title: item.title || item.asset.id,
+      const track: Track = { id: item.cacheTrackId ?? crypto.randomUUID(), title: label(item),
         duration: item.duration ?? 0, firstBeat: 0, bodyArea: '', cues: [] };
       if (item.bpm !== undefined) track.bpm = item.bpm;
       const check = () => { assert(); if (signal.aborted) throw new Error('cloud_cancelled'); };
@@ -180,7 +217,7 @@ export function createAudioLibraryPicker(context: {
       rows.replaceChildren();
       const query = search.value.trim().toLocaleLowerCase('en-US');
       for (const item of items.values()) {
-        if (query && !item.title.toLocaleLowerCase('en-US').includes(query)) continue;
+        if (query && !label(item).toLocaleLowerCase('en-US').includes(query)) continue;
         const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.asset.id); checkbox.disabled = busy;
         checkbox.addEventListener('change', () => {
           if (busy) return;
@@ -190,7 +227,7 @@ export function createAudioLibraryPicker(context: {
           render();
         });
         const row = element('div', 'audio-library-row');
-        row.append(field(item.title || item.asset.id, checkbox));
+        row.append(field(label(item), checkbox));
         row.append(element('span', 'muted', `${item.duration === undefined ? t('unknownDuration') : `${formatNumber(item.duration)} s`}${item.bpm === undefined ? '' : ` / ${formatNumber(item.bpm)} BPM`}`));
         if (context.preview) {
           const controls = element('div', 'action-row');
@@ -208,13 +245,14 @@ export function createAudioLibraryPicker(context: {
         rows.append(row);
       }
       if (!rows.children.length) rows.append(element('p', 'muted', t('noAudioMatches')));
-      more.hidden = !cursor; more.disabled = busy; search.disabled = busy;
+      more.hidden = !cursor || autoLoading; more.disabled = busy; search.disabled = busy;
+      loadingMore.hidden = !autoLoading;
       add.disabled = busy || !selected.size || selected.size > context.remaining();
     }
     search.addEventListener('input', render);
     root.addEventListener('cancel', event => { event.preventDefault(); dismiss?.(); });
     root.addEventListener('close', () => { if (dialog === root) dismiss?.(); });
-    root.append(element('h2', '', t('existingAudio')), field(t('searchAudio'), search), rows, feedback, more, add, iconButton(t('cancel'), X, () => dismiss?.(), true));
+    root.append(element('h2', '', t('existingAudio')), field(t('searchAudio'), search), rows, loadingMore, feedback, more, add, iconButton(t('cancel'), X, () => dismiss?.(), true));
     unsubscribePreview = context.preview?.subscribe(state => {
       if (!previewItem) return;
       if (previewPending || state.trackId !== previewItem.cacheTrackId) { cancelPreview(false, false); return; }
