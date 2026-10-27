@@ -62,7 +62,7 @@ export function checkedMusicPlaylist(value: MusicPlaylist): MusicPlaylist {
     safeId(playlist.id);
     if (!Array.isArray(playlist.tracks)) throw new Error('invalid_tracks');
     for (const track of playlist.tracks) {
-      fields(track, ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain']);
+      fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain']);
       safeId(track.id);
       if (!Array.isArray(track.cues) || track.cues.length) throw new Error('invalid_cues');
     }

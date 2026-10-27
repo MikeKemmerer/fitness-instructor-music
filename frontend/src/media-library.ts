@@ -339,11 +339,13 @@ export function createMediaLibrary(context: MediaLibraryContext) {
       assert(); status.textContent = t('audioBatchProgress', { current: index + 1, total: batch.length, name: entry.file.name });
       const filename = entry.file.name;
       const duration = () => entry.track?.duration ?? entry.recording!.duration;
-      const desired = { title: filename.replace(/\.[^.]+$/, ''), artist: '' };
+      const desired = () => entry.track
+        ? { title: entry.track.title === filename ? filename.replace(/\.[^.]+$/, '') : entry.track.title, artist: entry.track.artist ?? '' }
+        : { title: filename.replace(/\.[^.]+$/, ''), artist: '' };
       const intakeMatches = (metadata: ManagedAudioItem['metadata']) => metadata.revision >= 1
         && metadata.filename === filename && metadata.duration === duration();
-      const desiredMatches = (metadata: ManagedAudioItem['metadata']) => metadata.title === desired.title
-        && metadata.artist === desired.artist && metadata.bpm === undefined;
+      const desiredMatches = (metadata: ManagedAudioItem['metadata']) => metadata.title === desired().title
+        && metadata.artist === desired().artist && metadata.bpm === undefined;
       if (entry.phase === 'asset') {
         if (entry.kind === 'song') {
           if (!entry.track) {
@@ -417,7 +419,7 @@ export function createMediaLibrary(context: MediaLibraryContext) {
           }
           if (entry.phase === 'metadata') {
             entry.metadataAttempted = true;
-            item.metadata = await context.cloud.putLibraryMetadata(item.kind, item.id, entry.intakeRevision!, desired, transfer); assert();
+            item.metadata = await context.cloud.putLibraryMetadata(item.kind, item.id, entry.intakeRevision!, desired(), transfer); assert();
             entry.phase = 'done';
           }
         }

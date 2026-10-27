@@ -204,7 +204,7 @@ export const enUS = {
   appearance: 'Appearance', light: 'Light', dark: 'Dark', highContrast: 'High contrast', accent: 'Accent',
   red: 'Red', orange: 'Orange', amber: 'Amber', green: 'Green', teal: 'Teal', blue: 'Blue', violet: 'Violet',
   progressHeight: 'Progress height', pixels: '{count} px', percent: '{count}%',
-  title: 'Track title', bodyArea: 'Body area', bpm: 'BPM', firstBeat: 'First beat (seconds)', duration: 'Duration',
+  title: 'Track title', artist: 'Artist', bodyArea: 'Body area', bpm: 'BPM', firstBeat: 'First beat (seconds)', duration: 'Duration',
   moveUp: 'Move track up', moveDown: 'Move track down', deleteTrack: 'Remove track',
   reorderTrack: 'Reorder {name}', trackReordered: '{name} moved to position {position} of {count}.',
   loadTrack: 'Play {name}',

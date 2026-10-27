@@ -90,7 +90,7 @@ describe('export registry and snapshots', () => {
     expect(allIds()).toEqual([
       'routine.sequence',
       'routine.id', 'routine.name', 'routine.revision', 'routine.schemaVersion', 'routine.locked', 'routine.published',
-      'track.index', 'track.id', 'track.title', 'track.duration', 'track.durationTime', 'track.bpm', 'track.firstBeat', 'track.bodyArea', 'track.gain',
+      'track.index', 'track.id', 'track.title', 'track.artist', 'track.duration', 'track.durationTime', 'track.bpm', 'track.firstBeat', 'track.bodyArea', 'track.gain',
       'track.after.mode', 'track.after.crossfade', 'track.after.filler',
       'cue.id', 'cue.order', 'cue.anchor.kind', 'cue.anchor.value', 'cue.seconds', 'cue.time', 'cue.note', 'cue.beep', 'cue.flash',
       'filler.mode', 'filler.seconds', 'filler.bpm', 'filler.sound', 'filler.gain',

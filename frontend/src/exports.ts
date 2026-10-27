@@ -125,6 +125,7 @@ export const exportColumns: readonly ExportColumn[] = freezeTree([
   { id: 'track.index', label: 'exportTrackIndex', group: 'exportTrackFields', type: 'number', width: 12, default: true, value: row => row.trackIndex },
   { id: 'track.id', label: 'exportTrackId', group: 'exportTrackFields', type: 'string', width: 38, default: false, pdfHidden: true, value: row => row.track.id },
   { id: 'track.title', label: 'title', group: 'exportTrackFields', type: 'string', width: 32, default: true, value: row => row.track.title },
+  { id: 'track.artist', label: 'artist', group: 'exportTrackFields', type: 'string', width: 24, default: false, pdfHidden: true, value: row => row.track.artist ?? '' },
   { id: 'track.duration', label: 'exportDurationSeconds', group: 'exportTrackFields', type: 'number', width: 18, default: false, pdfHidden: true, value: row => round2(row.track.duration) },
   { id: 'track.durationTime', label: 'exportDurationTime', group: 'exportTrackFields', type: 'string', width: 16, default: true, value: row => exportTime(row.track.duration) },
   { id: 'track.bpm', label: 'bpm', group: 'exportTrackFields', type: 'number', width: 12, default: true, value: row => row.track.bpm },

@@ -3298,6 +3298,18 @@ describe('Azure SDK adapter contract (fake ContainerClient)', () => {
 });
 
 describe('duplicate audio storage', () => {
+  it('round-trips an optional track artist and rejects oversized or non-text artists', async () => {
+    const { api, headers } = await managementFixture();
+    const input = routine(await uploadAudio(api.media, headers, wav(4096)));
+    input.routine.tracks[0]!.artist = 'Embedded Artist';
+    expect((await api.routines.create(headers, input)).routine.tracks[0]!.artist).toBe('Embedded Artist');
+    for (const artist of ['x'.repeat(301), 7]) {
+      const bad = structuredClone(input);
+      bad.routine.id = randomUUID();
+      (bad.routine.tracks[0] as unknown as { artist: unknown }).artist = artist;
+      await expect(api.routines.create(headers, bad)).rejects.toMatchObject({ status: 400 });
+    }
+  });
   const quotaBytes = async (store: BlobStore) => (await readJson<{ bytes: number }>(store, 'control/quota'))!.value.bytes;
   const chunkKeys = (store: FakeBlobStore, id: string) => [...store.blobs.keys()].filter(key => key.startsWith(`assets/${id}/chunks/`));
 

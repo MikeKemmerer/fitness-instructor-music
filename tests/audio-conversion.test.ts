@@ -548,6 +548,18 @@ describe('worker stream and packet admission', () => {
     const encode = result.core.exec.mock.calls[1];
     expect(encode[encode.indexOf('-map_metadata') + 1]).toBe('-1');
     expect(encode[encode.indexOf('-map_chapters') + 1]).toBe('-1');
+    expect(encode).not.toContain('-metadata');
+  });
+
+  it('keeps only sanitized title and artist tags when converting and strips everything else', async () => {
+    const result = await workerProbe([{ ...audio, tags: { TITLE: ' Plié\u0001 series ', ARTIST: 'Barre Band', COMMENT: 'private note' } }]);
+    expect(result.reply).toMatchObject({ kind: 'complete' });
+    const probe = result.core.ffprobe.mock.calls[0];
+    expect(probe[probe.indexOf('-show_entries') + 1]).toContain(':format_tags=title,artist,album_artist:stream_tags=title,artist,album_artist');
+    const encode = result.core.exec.mock.calls[1];
+    expect(encode[encode.indexOf('-map_metadata') + 1]).toBe('-1');
+    const metadata = encode.flatMap((value, index) => value === '-metadata' ? [encode[index + 1]] : []);
+    expect(metadata).toEqual(['title=Plié series', 'artist=Barre Band']);
   });
 
   it('rejects excess streams, multiple audio and unexplained probe errors even with valid pictures', async () => {

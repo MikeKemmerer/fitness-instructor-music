@@ -603,6 +603,9 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
         trackFields.setAttribute('aria-label', value);
         auditionControls.setAttribute('aria-label', t('trackPreview', { name: value }));
       }))),
+      field(t('artist'), textInput(track.artist ?? '', 300, value => mutate(() => {
+        if (value.trim()) track.artist = value; else delete track.artist;
+      }))),
       field(t('bodyArea'), textInput(track.bodyArea, 160, value => mutate(() => { track.bodyArea = value; }))),
       field(t('bpm'), bpmInput), field(t('firstBeat'), firstBeatInput),
     );

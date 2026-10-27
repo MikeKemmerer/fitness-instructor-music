@@ -91,9 +91,12 @@ function parseTrack(value: unknown): Track {
   if (hasGain) fields.push('gain');
   const hasAfter = Object.prototype.hasOwnProperty.call(value, 'after');
   if (hasAfter) fields.push('after');
+  const hasArtist = Object.prototype.hasOwnProperty.call(value, 'artist');
+  if (hasArtist) fields.push('artist');
   const track = strictRecord(value, fields);
   return {
     id: text(track.id), title: text(track.title, 300), duration: number(track.duration),
+    ...(hasArtist ? { artist: text(track.artist, 300, true) } : {}),
     ...(hasBpm ? { bpm: number(track.bpm) } : {}), firstBeat: number(track.firstBeat),
     cues: array(track.cues, 1000).map(parseCue), bodyArea: text(track.bodyArea, 160, true),
     ...(hasGain ? { gain: number(track.gain) } : {}),

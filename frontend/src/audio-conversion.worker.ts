@@ -23,8 +23,8 @@ type Probe = {
   streams?: { codec_type?: string; codec_name?: string; codec_tag_string?: string; profile?: string;
     channels?: number; sample_rate?: string; duration?: string; start_time?: string;
     disposition?: { attached_pic?: unknown };
-    side_data_list?: { side_data_type?: string }[] }[];
-  format?: { format_name?: string; duration?: string };
+    side_data_list?: { side_data_type?: string }[]; tags?: Record<string, unknown> }[];
+  format?: { format_name?: string; duration?: string; tags?: Record<string, unknown> };
   packets?: { side_data_list?: { side_data_type?: string }[] }[];
 };
 
@@ -42,6 +42,21 @@ const scope = globalThis as unknown as {
 let started = false;
 
 function fail(code: string): never { throw new Error(code); }
+
+/** Only the song's title and artist survive conversion; every other source tag is still stripped. */
+function tagArguments(source: Probe, stream: NonNullable<Probe['streams']>[number]): string[] {
+  const lookup = (key: string) => {
+    for (const tags of [source.format?.tags, stream.tags]) {
+      const entry = Object.entries(tags ?? {}).find(([name]) => name.toLowerCase() === key);
+      const value = typeof entry?.[1] === 'string' ? entry[1].replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300) : '';
+      if (value) return value;
+    }
+    return '';
+  };
+  const title = lookup('title');
+  const artist = lookup('artist') || lookup('album_artist');
+  return [...(title ? ['-metadata', `title=${title}`] : []), ...(artist ? ['-metadata', `artist=${artist}`] : [])];
+}
 
 async function convert(blob: Blob, coreURL: string, wasmURL: string): Promise<{ bytes: ArrayBuffer; duration: number }> {
   if (!(blob instanceof Blob) || blob.size <= 0) fail('conversion_invalid_audio');
@@ -98,7 +113,8 @@ async function convert(blob: Blob, coreURL: string, wasmURL: string): Promise<{ 
     run('ffprobe', [...inputOptions, ...(packets ? ['-show_packets'] : []),
       ...(path === '/output.m4a' ? ['-read_intervals', '%+#1'] : []), '-show_entries',
       packets ? 'packet=stream_index:packet_side_data=side_data_type'
-        : 'stream=codec_type,codec_name,codec_tag_string,profile,channels,sample_rate,duration,start_time:stream_disposition=attached_pic:stream_side_data=side_data_type:format=format_name,duration',
+        : 'stream=codec_type,codec_name,codec_tag_string,profile,channels,sample_rate,duration,start_time:stream_disposition=attached_pic:stream_side_data=side_data_type:format=format_name,duration'
+          + (path === '/input.bin' ? ':format_tags=title,artist,album_artist:stream_tags=title,artist,album_artist' : ''),
       '-of', 'json=compact=1', '-o', '/probe.json', path], 'conversion_invalid_audio');
     const result = JSON.parse(new TextDecoder().decode(probeBytes.subarray(0, probeLength))) as Probe;
     if ((packets && !Array.isArray(result.packets)) || (!packets && (!Array.isArray(result.streams)
@@ -160,7 +176,7 @@ async function convert(blob: Blob, coreURL: string, wasmURL: string): Promise<{ 
     if (!Number.isFinite(duration) || duration <= 0
       || (Number.isFinite(declaredDuration) && Math.abs(duration - declaredDuration) > 0.1)) fail('conversion_invalid_audio');
     run('exec', ['-xerror', ...inputOptions, '-err_detect', 'explode', '-i', '/input.bin',
-      '-map', '0:a:0', '-map_metadata', '-1', '-map_chapters', '-1', '-vn', '-sn', '-dn',
+      '-map', '0:a:0', '-map_metadata', '-1', '-map_chapters', '-1', ...tagArguments(source, stream), '-vn', '-sn', '-dn',
       '-c:a', AAC_IMPORT.codec, '-profile:a', AAC_IMPORT.profile, '-b:a', String(AAC_IMPORT.bitRate),
       '-ar', String(AAC_IMPORT.sampleRate), '-threads', '1', '-movflags', '+faststart',
       '-use_editlist', '1', '-fs', String(AAC_IMPORT.maxOutputBytes), '-f', 'mp4', '/output.m4a'], 'conversion_failed');

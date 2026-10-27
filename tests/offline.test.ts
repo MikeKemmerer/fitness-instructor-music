@@ -4399,6 +4399,19 @@ describe('bounded file import', () => {
     expect(await stored.arrayBuffer()).toEqual(await output.arrayBuffer());
   });
 
+  it('names imported tracks from embedded title and artist tags, falling back to the filename', async () => {
+    browserAudio(1);
+    const source = new Uint8Array(execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=duration=1',
+      '-metadata', 'title=Tagged title', '-metadata', 'artist=Tagged artist', '-c:a', 'libmp3lame', '-f', 'mp3', 'pipe:1'],
+    { timeout: 15000, maxBuffer: MAX_TRACK_BYTES }));
+    const tagged = await storeTrack(new File([source], 'download (3).mp3', { type: 'audio/mpeg' }));
+    expect(tagged).toMatchObject({ title: 'Tagged title', artist: 'Tagged artist' });
+    browserAudio(1);
+    const plain = await storeTrack(new File(['synthetic audio'], 'plain.wav', { type: 'audio/wav' }));
+    expect(plain.title).toBe('plain.wav');
+    expect(plain).not.toHaveProperty('artist');
+  });
+
   it('accepts an intact application/ogg Vorbis source for bounded fallback', async () => {
     const source = new Uint8Array(execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i',
       'anullsrc=sample_rate=48000:channel_layout=stereo', '-t', '2', '-c:a', 'libvorbis', '-f', 'ogg', 'pipe:1'],

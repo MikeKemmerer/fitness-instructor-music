@@ -657,7 +657,7 @@ describe('unified audio picker', () => {
     expect(tracks.map(track => track.title)).toEqual(['Second', 'First']);
     expect(new Set(tracks.map(track => track.id)).size).toBe(2); expect(tracks.map(track => track.id)).not.toContain('first');
     expect(tracks.every(track => track.cues.length === 0)).toBe(true); expect(tracks[1]!.bpm).toBeUndefined();
-    expect(tracks[0]!.bpm).toBe(120); expect(tracks[0]).not.toHaveProperty('artist');
+    expect(tracks[0]!.bpm).toBe(120); expect(tracks[0]!.artist).toBe('<Artist>'); expect(tracks[1]).not.toHaveProperty('artist');
     expect(library.downloadTracks).toHaveBeenCalledTimes(2); picker.dispose();
   });
 

@@ -24,7 +24,7 @@ interface Position {
   records: number;
   last: string;
 }
-export interface Description { title: string; duration: number; bpm?: number }
+export interface Description { title: string; artist?: string; duration: number; bpm?: number }
 export interface ReferencePage extends LibraryUsagePage { description?: Description }
 class ScanLimit extends Error {}
 
@@ -124,7 +124,8 @@ export class LibraryReferences {
       for (const track of tracks) {
         const id = descriptors[track.id]?.id;
         if (!id) continue;
-        const value = { title: track.title, duration: track.duration, ...(track.bpm === undefined ? {} : { bpm: track.bpm }) };
+        const value = { title: track.title, ...(track.artist ? { artist: track.artist } : {}), duration: track.duration,
+          ...(track.bpm === undefined ? {} : { bpm: track.bpm }) };
         if (!description && id === assetId) description = value;
         if (descriptions?.has(id) && !descriptions.get(id)) descriptions.set(id, value);
       }

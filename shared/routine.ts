@@ -19,6 +19,7 @@ export interface Cue {
 export interface Track {
   id: string;
   title: string;
+  artist?: string;
   duration: number;
   bpm?: number;
   firstBeat: number;
@@ -140,7 +141,8 @@ export function validateRoutine(routine: Routine): string[] {
     if (!track || typeof track !== 'object' || Array.isArray(track)) { errors.push('Invalid track'); continue; }
     if (typeof track.id !== 'string' || !track.id || ids.has(track.id)) errors.push('Track entry IDs must be unique');
     ids.add(track.id);
-    if (typeof track.title !== 'string' || !track.title.trim() || track.title.length > 300 || typeof track.bodyArea !== 'string' || track.bodyArea.length > 160) errors.push('Invalid track text');
+    if (typeof track.title !== 'string' || !track.title.trim() || track.title.length > 300 || typeof track.bodyArea !== 'string' || track.bodyArea.length > 160
+      || (track.artist !== undefined && (typeof track.artist !== 'string' || track.artist.length > 300))) errors.push('Invalid track text');
     if (track.gain !== undefined && (!nonnegative(track.gain) || track.gain > 1.5)) errors.push('Invalid track gain');
     if (track.after !== undefined) {
       const after = track.after;

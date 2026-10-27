@@ -6,6 +6,7 @@ import { captureCloudIdentity, getCloudContext, getCloudRole, subscribeCloudSess
 import { cloudErrorMessage } from './cloud-ui';
 import { cloudHash, createCloudLibrary } from './cloud-library';
 import { cacheCloudTrack, getTrackBlob, listCloudRoutines, listRoutines, listRoutineWorkingCopies } from './offline';
+import { readAudioTags } from './audio-tags';
 import { formatNumber, formatTime, t } from './i18n';
 import { element, field, iconButton, transientText } from './ui';
 
@@ -56,7 +57,7 @@ export function createAudioLibraryPicker(context: {
     const search = element('input'); search.type = 'search';
     const feedback = element('p'); const error = transientText(feedback);
     const rows = element('div', 'audio-library-rows');
-    type Item = CloudAudioItem & { cacheTrackId?: string; filename?: string };
+    type Item = CloudAudioItem & { cacheTrackId?: string; filename?: string; artist?: string };
     // Keyed by content so identical audio stored under several asset ids (re-uploads) appears once.
     const items = new Map<string, Item>();
     const selected = new Map<string, Item>();
@@ -66,6 +67,7 @@ export function createAudioLibraryPicker(context: {
       const existing = items.get(key);
       if (!existing) { items.set(key, item); return; }
       if (!existing.title && item.title) existing.title = item.title;
+      if (!existing.artist && item.artist) existing.artist = item.artist;
       if (!existing.filename && item.filename) existing.filename = item.filename;
       if (existing.duration === undefined && item.duration !== undefined) existing.duration = item.duration;
       if (existing.bpm === undefined && item.bpm !== undefined) existing.bpm = item.bpm;
@@ -125,7 +127,7 @@ export function createAudioLibraryPicker(context: {
             if (!blob || blob.size !== asset.bytes) continue;
             const hash = await cloudHash(blob); current();
             if (hash !== asset.sha256) continue;
-            merge({ asset: structuredClone(asset), title: track.title, duration: track.duration,
+            merge({ asset: structuredClone(asset), title: track.title, duration: track.duration, ...(track.artist ? { artist: track.artist } : {}),
               ...(track.bpm === undefined ? {} : { bpm: track.bpm }), cacheTrackId: track.id });
           }
         }
@@ -137,6 +139,7 @@ export function createAudioLibraryPicker(context: {
       const page = await context.library.managedPage('song', cursor, { signal }); current();
       if (page.cursor && page.cursor === cursor) throw new Error('cloud_invalid_response');
       for (const item of page.items) merge({ asset: item.asset, title: item.metadata.title,
+        ...(item.metadata.artist ? { artist: item.metadata.artist } : {}),
         ...(item.metadata.filename === undefined ? {} : { filename: item.metadata.filename }),
         ...(item.metadata.duration === undefined ? {} : { duration: item.metadata.duration }),
         ...(item.metadata.bpm === undefined ? {} : { bpm: item.metadata.bpm }) });
@@ -164,6 +167,7 @@ export function createAudioLibraryPicker(context: {
       const track: Track = { id: item.cacheTrackId ?? crypto.randomUUID(), title: label(item),
         duration: item.duration ?? 0, firstBeat: 0, bodyArea: '', cues: [] };
       if (item.bpm !== undefined) track.bpm = item.bpm;
+      if (item.artist) track.artist = item.artist;
       const check = () => { assert(); if (signal.aborted) throw new Error('cloud_cancelled'); };
       check();
       if (!item.cacheTrackId) {
@@ -176,6 +180,11 @@ export function createAudioLibraryPicker(context: {
       if (hash !== item.asset.sha256) throw new Error('cloud_hash_mismatch');
       const duration = await (context.duration ?? audioDuration)(blob, signal); check();
       if (item.duration !== undefined && Math.abs(duration - item.duration) > 0.1) throw new Error('audio_duration_mismatch');
+      if (!item.title || !item.artist) {
+        const tags = await readAudioTags(blob); check();
+        if (!item.title && tags.title) track.title = tags.title;
+        if (!item.artist && tags.artist) track.artist = tags.artist;
+      }
       track.duration = duration; item.cacheTrackId = track.id;
       return track;
     };
@@ -226,7 +235,7 @@ export function createAudioLibraryPicker(context: {
       const query = search.value.trim().toLocaleLowerCase('en-US');
       let shown = 0;
       for (const item of items.values()) {
-        if (query && !label(item).toLocaleLowerCase('en-US').includes(query)) continue;
+        if (query && ![label(item), item.artist ?? ''].some(value => value.toLocaleLowerCase('en-US').includes(query))) continue;
         shown++;
         const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.asset.id); checkbox.disabled = busy;
         checkbox.addEventListener('change', () => {
@@ -237,7 +246,9 @@ export function createAudioLibraryPicker(context: {
           render();
         });
         const row = element('div', 'audio-library-row');
-        row.append(field(label(item), checkbox));
+        const pick = field(label(item), checkbox);
+        if (item.artist) pick.append(element('span', 'audio-library-artist', item.artist));
+        row.append(pick);
         row.append(element('span', 'audio-library-meta', [item.duration === undefined ? t('unknownDuration') : formatTime(item.duration),
           ...(item.bpm === undefined ? [] : [`${formatNumber(Math.round(item.bpm))} BPM`])].join(' · ')));
         if (context.preview) {

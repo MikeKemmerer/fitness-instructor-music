@@ -2,6 +2,7 @@ import { openDB, type DBSchema, type IDBPTransaction } from 'idb';
 import { allRoutineFillers, allRoutineTracks, DEFAULT_BEEP_VOLUME, newRoutine, validFillerRecording, validateRoutine, type AudioAsset, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { CloudRoutine } from '../../shared/cloud-contract';
 import { AAC_IMPORT } from '../../shared/audio-import';
+import { readAudioTags } from './audio-tags';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from './hosted-session';
 import type { ClassAudio, ClassSetup, CloudMusicPlaylist, MusicPlaylist, PreparedClass, RevisionReference } from '../../shared/class-plan';
 import { checkedClassSetup, checkedMusicPlaylist, classFillers, snapshotClassAudio } from './session-runtime';
@@ -235,7 +236,7 @@ export async function inspectLocalAudioReferences(asset: AudioAsset, recordingId
       fields(routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
         'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
       for (const track of allRoutineTracks(routine)) {
-        fields(track, ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
+        fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
         if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
         for (const cue of track.cues) {
           fields(cue, ['id', 'anchor', 'note', 'beep', 'flash']);
@@ -612,7 +613,7 @@ function checkedWorkingEnvelope(value: CloudRoutine): CloudRoutine {
     throw new Error('invalid_media');
   }
   for (const track of tracks) {
-    fields(track, ['id', 'title', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
+    fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
     if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
     for (const cue of track.cues) {
       fields(cue, ['id', 'anchor', 'note', 'beep', 'flash']);
@@ -2478,9 +2479,11 @@ async function prepareTrack(
 
 async function importTrack(file: File, session: MutationSession | undefined, signal: AbortSignal): Promise<Track> {
   const record = await prepareTrack(file, session, signal);
+  const tags = await readAudioTags(file);
+  session?.assert();
   const track: Track = {
-    id: crypto.randomUUID(), title: file.name.slice(0, 300), duration: record.duration,
-    firstBeat: 0, cues: [], bodyArea: '',
+    id: crypto.randomUUID(), title: tags.title ?? file.name.slice(0, 300), ...(tags.artist ? { artist: tags.artist } : {}),
+    duration: record.duration, firstBeat: 0, cues: [], bodyArea: '',
   };
   await mutate(session, ['tracks'], async transaction => {
     await transaction.objectStore('tracks').put(record, track.id);
