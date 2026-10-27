@@ -6,7 +6,7 @@ import { captureCloudIdentity, getCloudContext, getCloudRole, subscribeCloudSess
 import { cloudErrorMessage } from './cloud-ui';
 import { cloudHash, createCloudLibrary } from './cloud-library';
 import { cacheCloudTrack, getTrackBlob, listCloudRoutines, listRoutines, listRoutineWorkingCopies } from './offline';
-import { formatNumber, t } from './i18n';
+import { formatNumber, formatTime, t } from './i18n';
 import { element, field, iconButton, transientText } from './ui';
 
 export async function audioDuration(blob: Blob, signal: AbortSignal): Promise<number> {
@@ -213,11 +213,21 @@ export function createAudioLibraryPicker(context: {
       }
       current(); context.added(tracks, media); dismiss?.();
     }); }, true);
+    add.classList.add('primary');
+    const count = element('span', 'audio-library-count'); count.setAttribute('aria-live', 'polite');
+    const heading = element('div', 'audio-library-heading');
+    heading.append(element('h2', '', t('existingAudio')), count);
+    search.placeholder = t('searchAudio'); search.setAttribute('aria-label', t('searchAudio'));
+    const searchBox = element('div', 'audio-library-search'); searchBox.append(search);
+    const actions = element('div', 'audio-library-actions');
+    actions.append(iconButton(t('cancel'), X, () => dismiss?.(), true), add);
     function render() {
       rows.replaceChildren();
       const query = search.value.trim().toLocaleLowerCase('en-US');
+      let shown = 0;
       for (const item of items.values()) {
         if (query && !label(item).toLocaleLowerCase('en-US').includes(query)) continue;
+        shown++;
         const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(item.asset.id); checkbox.disabled = busy;
         checkbox.addEventListener('change', () => {
           if (busy) return;
@@ -228,7 +238,8 @@ export function createAudioLibraryPicker(context: {
         });
         const row = element('div', 'audio-library-row');
         row.append(field(label(item), checkbox));
-        row.append(element('span', 'muted', `${item.duration === undefined ? t('unknownDuration') : `${formatNumber(item.duration)} s`}${item.bpm === undefined ? '' : ` / ${formatNumber(item.bpm)} BPM`}`));
+        row.append(element('span', 'audio-library-meta', [item.duration === undefined ? t('unknownDuration') : formatTime(item.duration),
+          ...(item.bpm === undefined ? [] : [`${formatNumber(Math.round(item.bpm))} BPM`])].join(' · ')));
         if (context.preview) {
           const controls = element('div', 'action-row');
           const state = context.preview.getState();
@@ -244,7 +255,9 @@ export function createAudioLibraryPicker(context: {
         }
         rows.append(row);
       }
-      if (!rows.children.length) rows.append(element('p', 'muted', t('noAudioMatches')));
+      if (!rows.children.length) rows.append(element('p', 'audio-library-empty', t(items.size ? 'noAudioMatches' : busy || autoLoading ? 'loadingAudio' : 'noAudioYet')));
+      count.textContent = [t('audioLibraryCount', { count: query ? `${shown} / ${items.size}` : items.size }),
+        ...(selected.size ? [t('audioLibrarySelected', { count: selected.size })] : [])].join(' · ');
       more.hidden = !cursor || autoLoading; more.disabled = busy; search.disabled = busy;
       loadingMore.hidden = !autoLoading;
       add.disabled = busy || !selected.size || selected.size > context.remaining();
@@ -252,7 +265,7 @@ export function createAudioLibraryPicker(context: {
     search.addEventListener('input', render);
     root.addEventListener('cancel', event => { event.preventDefault(); dismiss?.(); });
     root.addEventListener('close', () => { if (dialog === root) dismiss?.(); });
-    root.append(element('h2', '', t('existingAudio')), field(t('searchAudio'), search), rows, loadingMore, feedback, more, add, iconButton(t('cancel'), X, () => dismiss?.(), true));
+    root.append(heading, searchBox, rows, loadingMore, feedback, more, actions);
     unsubscribePreview = context.preview?.subscribe(state => {
       if (!previewItem) return;
       if (previewPending || state.trackId !== previewItem.cacheTrackId) { cancelPreview(false, false); return; }
