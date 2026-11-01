@@ -26,6 +26,7 @@ import { createClassComposition } from './class-composition';
 import { createDraftProtection, createRecoveryPanel } from './draft-protection';
 import { createRoutineSave, sameSavedContent } from './routine-save';
 import { createAudioLibraryPicker } from './audio-library-picker';
+import { createPlexPicker } from './plex-picker';
 import { cacheCloudTrack, clearActiveRoutine, deleteRoutineAndWorkingCopy, deleteRoutineWorkingCopy, getActiveRoutineSelection, getRoutineWorkingCopy, listCachedClassSetups, listClassSetups, listCloudRoutines, listRoutinePublications, listRoutineWorkingCopies, reconcileRoutineWorkingCopy, saveRoutineWorkingCopy, setActiveRoutineSelection, type RoutineWorkingCopy } from './offline';
 import { routineClassAudio } from '../../shared/class-plan';
 import type { ClassAudio, ClassPhase } from '../../shared/class-plan';
@@ -1033,7 +1034,31 @@ const audioPicker = createAudioLibraryPicker({ library: cloudLibrary,
 const addTrackMenu = actionMenu(t('addTrack'), Plus, true);
 const addTrackChevron = element('span', 'menu-chevron'); setButtonIcon(addTrackChevron, ChevronDown);
 addTrackMenu.trigger.append(addTrackChevron);
-addTrackMenu.commands.append(audioPicker.element, importButton());
+const plexPicker = createPlexPicker({
+  owner: () => hostedPilot ? getCloudContext().user?.id ?? '' : 'local',
+  author: () => !hostedPilot || ['owner', 'editor'].includes(getCloudRole() ?? ''),
+  available: () => routineOpen && canEdit() && !draft.locked && !editorBusy && !transportOperation.pending && !appDisposed,
+  remaining: () => 100 - allRoutineTracks(draft).length,
+  store: (file, signal) => storeTrack(file, signal),
+  beforePreview: stopEditorAudio,
+  restoreFocus: () => { if (!appDisposed && routineOpen && activeTab === 'edit') addTrackMenu.trigger.focus({ preventScroll: true }); },
+  added: (tracks, failures, playlist) => {
+    if (tracks.length && routineOpen && canEdit() && !draft.locked) {
+      if (playlist && !draft.tracks.length && persistedRevision === null && draft.name === t('newName')) draft.name = playlist.slice(0, 160);
+      draft.tracks.push(...tracks); dirty = true; draftGeneration++; refreshDraft(true);
+    }
+    notify([t('plexAdded', { count: tracks.length }), ...failures].join('\n'), failures.length > 0);
+  },
+});
+addTrackMenu.commands.append(audioPicker.element, plexPicker.element, importButton());
+const plexPlaylistRoutine = () => {
+  if (editorBusy || transportOperation.pending || appDisposed) return;
+  const start = () => { startNewDraft(); if (routineOpen) plexPicker.openPlaylists(); };
+  if (!routineOpen) { start(); return; }
+  dismissChooser(); closeRoutine(start);
+};
+const newFromPlex = iconButton(t('plexFromPlaylist'), ListMusic, plexPlaylistRoutine, true);
+newDraft.after(newFromPlex);
 const validation = element('div', 'validation');
 let validationSignature = '';
 const validationTitle = element('h2');
@@ -1073,7 +1098,8 @@ const chooserNew = iconButton(t('newRoutine'), Plus, () => {
   if (!routineOpen || editorBusy || transportOperation.pending) return;
   dismissChooser(); closeRoutine(startNewDraft);
 }, true);
-chooserHeader.append(element('h2', '', t('openRoutineDialog')), chooserNew, chooserClose);
+const chooserPlex = iconButton(t('plexFromPlaylist'), ListMusic, plexPlaylistRoutine, true);
+chooserHeader.append(element('h2', '', t('openRoutineDialog')), chooserNew, chooserPlex, chooserClose);
 chooserDialog.append(chooserHeader, chooserFeedback);
 chooserDialog.addEventListener('cancel', event => { event.preventDefault(); dismissChooser(); });
 chooserDialog.addEventListener('click', event => { if (event.target === chooserDialog) dismissChooser(); });
@@ -1696,7 +1722,7 @@ mediaLibrary = createMediaLibrary({ hosted: hostedPilot, cloud: cloudLibrary, pr
 });
 if (hostedPilot) mediaLibrary.element.append(fillerLibrary.element);
 panels.settings.append(settingsHeading, appearance, demoSettings, mediaLibrary.element,
-  ...(hostedPilot ? [] : [fillerLibrary.element]), storage);
+  ...(hostedPilot ? [] : [fillerLibrary.element]), plexPicker.settings, storage);
 
 function updatePreferences(persist = true): void {
   applyTheme(preferences);
@@ -2056,6 +2082,8 @@ function syncAvailability(): void {
   openDifferent.hidden = !routineOpen; openDifferent.disabled = busy;
   chooserClose.disabled = busy;
   chooserNew.hidden = !routineOpen || (hostedPilot && getCloudRole() === 'player'); chooserNew.disabled = busy;
+  plexPicker.sync();
+  chooserPlex.hidden = chooserNew.hidden; chooserPlex.disabled = busy;
   close.hidden = !routineOpen; close.disabled = busy;
   deleteSelectedRoutine.hidden = !routineOpen || !canEdit() || draft.locked;
   editorFooter.hidden = deleteSelectedRoutine.hidden;
@@ -2082,6 +2110,7 @@ function syncAvailability(): void {
   for (const button of [save, lock, duplicate]) button.hidden = !author || !routineOpen;
   localSelection.hidden = true;
   newDraft.hidden = !author || routineOpen; newDraft.disabled = busy;
+  newFromPlex.hidden = newDraft.hidden; newFromPlex.disabled = busy;
   editorDemo.hidden ||= routineOpen;
   addTrackMenu.element.hidden = !author || !routineOpen;
   addTrackMenu.trigger.setAttribute('aria-disabled', String(busy || draft.locked || !canEdit()));
@@ -2652,6 +2681,7 @@ function disposeApp(): void {
   mediaLibrary?.dispose();
   fillerLibrary.dispose();
   audioPicker.dispose();
+  plexPicker.dispose();
   exportPanel.dispose();
   moreMenu.dispose(); addTrackMenu.dispose();
   chooserErrors.dispose();

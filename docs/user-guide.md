@@ -195,6 +195,28 @@ it. Preview downloads only that selection when needed and never inserts a song.
 Closing the picker stops its preview. Cancel before insertion adds no entries;
 role, lock, identity and missing/corrupt-cache checks still apply.
 
+### Add Music From Plex
+
+Owners and editors can add songs straight from the family Plex server. The
+browser talks to Plex directly, at home or away (Plex remote access must be on;
+the Plex relay is used as a slower fallback).
+
+1. Open an editable routine and choose **Add track > From Plex**. The first time,
+   choose **Sign in with Plex**, finish signing in on the Plex page, then pick the
+   Plex Home user. Protected users ask for their 4-digit Plex PIN.
+2. Search by artist or song title. Tap an artist to see all of their songs, or
+   switch to **Playlists**. Check songs (opening a playlist checks all of them),
+   use Play to audition, then **Add**. Songs keep the Plex title and artist.
+3. Added songs are imported like any local file (MP3/AAC/FLAC/Ogg/WAV up to
+   32 MiB are kept as-is; other formats are converted to MP3 by Plex) and upload
+   with the routine on Save.
+4. To start a routine from a Plex playlist, choose **From Plex playlist** in the
+   routine list. The new routine takes the playlist's name.
+5. **Settings > Plex** shows the connected user and server, and offers
+   **Switch Plex user** and **Disconnect Plex**. Plex sign-in is stored only in
+   this browser's app storage for the current app user and is erased by
+   Disconnect or app sign-out.
+
 ### Analysis And Levels
 
 Detect BPM and Analyze loudness provide suggestions, not verified choreography or

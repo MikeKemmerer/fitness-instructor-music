@@ -1,5 +1,27 @@
 # Initial Rehearsal Contract
 
+## Plex Music Source
+
+Plex is a browser-direct import source (no API or server changes). `frontend/src/plex-client.ts`
+signs in with the plex.tv PIN flow (`POST /api/v2/pins?strong=true`, `app.plex.tv/auth` popup, poll),
+lists Plex Home users (`/api/v2/home/users`) and switches with `POST /api/v2/home/users/{uuid}/switch[?pin=]`
+(the admin's own token is used when the admin profile is unprotected). Servers come from
+`/api/v2/resources?includeHttps=1&includeRelay=1`; only `https` connections are used, direct
+connections race first and relay is the fallback. A server qualifies when `/library/sections` has an
+`artist` (music) section; with several, the user picks one. PMS calls put `X-Plex-Token` in the query so
+they are CORS-simple. Search uses `/hubs/search` limited to artist/track hubs in music sections; artists
+drill into `/library/metadata/{key}/allLeaves`; playlists use `/playlists?playlistType=audio` and
+`/playlists/{key}/items`. Downloads take the original part when it is MP3/AAC/FLAC/Vorbis/Opus/PCM WAV and
+≤ 32 MiB, otherwise the universal transcoder's MP3 (320 kbps). The `File` goes through `storeTrack`
+(normal import pipeline and later Cloud upload); title/artist then come from Plex metadata
+(`originalTitle` over `grandparentTitle`).
+
+Credentials (`accountToken`, chosen user, `userToken`, server id/name) live only in IndexedDB
+`fitness-plex` keyed by the app user id (`local` without Cloud), never in localStorage. Disconnect deletes
+the record; app sign-out and hosted identity resets delete the database. Only the random
+`fitness-plex-client-id` is in localStorage. CSP allows `https://plex.tv` (connect) and
+`https://*.plex.direct:*` (connect, media, img). Only owners/editors see Plex.
+
 ## Playlist Workspace (September 17)
 
 Playlists is a dedicated workspace beside Routines, not a Settings expando. It

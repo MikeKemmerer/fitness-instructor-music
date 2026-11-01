@@ -1078,7 +1078,7 @@ describe('public hosted sign-out purge', () => {
     events.addEventListener(hostedInvalidationEvent, () => order.push('invalidate'));
     const retireWorkers = vi.fn(async () => { order.push('workers'); });
     harness.fetch.mockReset().mockImplementation(async path => {
-      expect(harness.database.deleteDatabase).toHaveBeenCalledOnce();
+      expect(harness.database.deleteDatabase.mock.calls.map(call => call[0])).toEqual([hostedDatabase, 'fitness-plex']);
       expect(harness.storage.getItem(hostedUserKey)).toBeNull();
       expect(harness.names).toEqual(new Set(['unrelated-app']));
       order.push(String(path));
@@ -1092,7 +1092,7 @@ describe('public hosted sign-out purge', () => {
     const harness = signoutHarness();
     harness.fetch.mockReset().mockResolvedValue(response(null, 401));
     await signout.purgeHostedSession(harness);
-    expect(harness.database.deleteDatabase).toHaveBeenCalledOnce();
+    expect(harness.database.deleteDatabase.mock.calls.map(call => call[0])).toEqual([hostedDatabase, 'fitness-plex']);
     expect(harness.fetch).toHaveBeenCalledOnce();
     expect(harness.replace).toHaveBeenCalledWith('/signin.html');
     expect(harness.storage.getItem(hostedUserKey)).toBeNull();
@@ -1103,7 +1103,7 @@ describe('public hosted sign-out purge', () => {
     const harness = signoutHarness();
     harness.fetch.mockReset().mockRejectedValue(new TypeError('offline'));
     await expect(signout.purgeHostedSession(harness)).rejects.toThrow('server_logout_failed');
-    expect(harness.database.deleteDatabase).toHaveBeenCalledOnce();
+    expect(harness.database.deleteDatabase.mock.calls.map(call => call[0])).toEqual([hostedDatabase, 'fitness-plex']);
     expect(harness.storage.getItem(hostedUserKey)).toBeNull();
     expect(harness.storage.getItem(hostedResetKey)).toBe('logout:signout-test');
     expect(harness.replace).not.toHaveBeenCalled();
@@ -1140,7 +1140,7 @@ describe('public hosted sign-out purge', () => {
       expect(url).toBe('/signin.html');
       expect(harness.storage.values).toEqual(new Map([['unrelated-preference', 'keep']]));
       expect(harness.names).toEqual(new Set(['unrelated-app']));
-      expect(harness.database.deleteDatabase).toHaveBeenCalledExactlyOnceWith(hostedDatabase);
+      expect(harness.database.deleteDatabase.mock.calls.map(call => call[0])).toEqual([hostedDatabase, 'fitness-plex']);
     });
     await signout.purgeHostedSession(harness);
     expect(harness.storage.setItem).toHaveBeenCalledExactlyOnceWith(hostedResetKey, 'logout:signout-test');

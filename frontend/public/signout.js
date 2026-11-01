@@ -58,6 +58,8 @@ export async function purgeHostedSession({ storage, cacheStorage, database, repl
     checkCurrent();
     if (remaining.some(name => name.startsWith('fitness-rehearsal'))) throw new Error('cleanup_failed');
     await deleteLocalDatabase(database);
+    // Plex sign-in tokens are per device and must not outlive the app session.
+    try { database.deleteDatabase('fitness-plex'); } catch {}
   };
   try { await Promise.race([purge(), timeout]); }
   finally { active = false; clearTimeout(timer); }

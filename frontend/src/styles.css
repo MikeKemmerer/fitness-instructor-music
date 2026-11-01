@@ -467,6 +467,51 @@ input:invalid, input[aria-invalid='true'] { border-color: var(--error); }
   .audio-library-meta { grid-column: 1; grid-row: 2; padding-inline-start: 32px; padding-block-end: 6px; }
   .audio-library-row .action-row { grid-column: 2; grid-row: 1 / span 2; }
 }
+.plex-dialog { block-size: min(720px, calc(100dvh - 32px)); }
+.plex-header { display: flex; align-items: center; gap: 8px; padding: 14px 14px 0 20px; }
+.plex-header h2 { flex: 1 1 auto; min-inline-size: 0; margin: 0; font-size: 1.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plex-header > .icon-button { min-block-size: 40px; min-inline-size: 40px; padding: 8px; border-color: transparent; background: transparent; }
+.plex-header > .icon-button:first-child { margin-inline-start: -10px; }
+.plex-user-chip { display: inline-flex; align-items: center; gap: 8px; max-inline-size: 45%; padding: 4px 12px 4px 4px; border: 1px solid var(--control-border); border-radius: 999px; background: transparent; color: var(--text); font: inherit; font-size: .88rem; cursor: pointer; }
+.plex-user-chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plex-user-chip:hover:not(:disabled) { background: var(--hover); }
+.plex-tabs { padding: 12px 20px 0; }
+.plex-tabs .button { min-block-size: 36px; padding-block: 4px; font-size: .9rem; }
+.plex-body { display: flex; flex-direction: column; gap: 2px; }
+.plex-section { margin: 10px 8px 4px; color: var(--muted); font-size: .75rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.plex-section:first-child { margin-block-start: 4px; }
+.plex-song { display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: center; gap: 4px; border-radius: 8px; }
+.plex-song:hover, .plex-nav:hover:not(:disabled), .plex-user:hover:not(:disabled) { background: var(--hover); }
+.plex-song:has(input:checked) { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.plex-song-pick { display: grid; grid-template-columns: 20px 40px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-block-size: 52px; padding: 6px 0 6px 8px; cursor: pointer; }
+.plex-song-pick > input { inline-size: 20px; block-size: 20px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.plex-thumb { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: 6px; background: var(--hover); color: var(--muted); overflow: hidden; flex: none; }
+.plex-thumb.round { border-radius: 50%; }
+.plex-thumb img { inline-size: 100%; block-size: 100%; object-fit: cover; }
+.plex-thumb svg { inline-size: 20px; block-size: 20px; }
+.plex-song-text { display: grid; min-inline-size: 0; gap: 1px; text-align: start; }
+.plex-song-title { overflow: hidden; color: var(--text); font-size: .95rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.plex-song-sub { overflow: hidden; color: var(--muted); font-size: .82rem; text-overflow: ellipsis; white-space: nowrap; }
+.plex-song-time { color: var(--muted); font-size: .82rem; font-variant-numeric: tabular-nums; }
+.plex-song .plex-preview { min-block-size: 40px; min-inline-size: 40px; padding: 8px; border-color: transparent; background: transparent; }
+.plex-nav, .plex-user { display: flex; align-items: center; gap: 12px; inline-size: 100%; min-block-size: 52px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; text-align: start; cursor: pointer; }
+.plex-nav .plex-song-text { flex: 1 1 auto; }
+.plex-chevron, .plex-lock { display: grid; color: var(--muted); }
+.plex-chevron svg, .plex-lock svg { inline-size: 18px; block-size: 18px; }
+.plex-users { display: grid; gap: 2px; }
+.plex-user[aria-current='true'] .plex-user-name { color: var(--accent); }
+.plex-user-name { flex: 1 1 auto; font-weight: 600; }
+.plex-avatar { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-weight: 700; flex: none; }
+.plex-avatar.small { inline-size: 26px; block-size: 26px; font-size: .8rem; }
+.plex-pin { display: flex; gap: 8px; padding: 4px 8px 10px 60px; }
+.plex-pin input { inline-size: 7.5em; letter-spacing: .3em; text-align: center; }
+.plex-connect { display: grid; justify-items: center; gap: 14px; margin: auto; padding: 32px 12px; max-inline-size: 360px; text-align: center; }
+.plex-connect p { margin: 0; }
+.plex-footer { align-items: center; }
+.plex-footer .audio-library-count { margin-inline-end: auto; }
+@media (max-width: 480px) {
+  .plex-song-pick { gap: 10px; }
+}
 .preview-status { min-inline-size: 0; min-block-size: 1.5em; font-size: .8rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
 .track-preview .preview-status { grid-column: 1 / -1; }
 .bpm-detection, .loudness-analysis, .filler-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-block-start: 18px; }

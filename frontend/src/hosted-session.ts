@@ -147,7 +147,10 @@ export function startHostedSession(): Promise<boolean> {
     return establishHostedSession({
       fetch: window.fetch.bind(window), storage: window.localStorage, events: window,
       replace: url => window.location.replace(url),
-      deleteDatabase: () => deleteHostedDatabase(window.indexedDB),
+      deleteDatabase: () => {
+        try { window.indexedDB.deleteDatabase('fitness-plex'); } catch {}
+        return deleteHostedDatabase(window.indexedDB);
+      },
       resetId: () => window.crypto.randomUUID(),
     });
   } catch { return Promise.reject(new HostedSessionError('hostedStorageFailed')); }

@@ -43,7 +43,7 @@ creates an independently named complete copy with fresh entry/cue IDs.
 The aligned editor toolbar contains Undo/Redo, save status, one Save button and
 More actions. Lock/unlock, publication and deletion are contextual commands in
 More actions. Cross-routine replacement has its own explicit dialog, not a second
-Save control. Track order > Add track offers From audio library and Import audio.
+Save control. Track order > Add track offers From audio library, From Plex and Import audio.
 Share beside the title opens the existing Excel/PDF exports. These layout changes
 await remote screenshot review; no local preview is started on this workstation.
 
