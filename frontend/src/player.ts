@@ -1,7 +1,8 @@
 import { cueSeconds, DEFAULT_BEEP_VOLUME, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
 import type { Player, PlayerState } from '../../shared/player-contract';
 import { routineClassAudio, type ClassAudio, type ClassPhase } from '../../shared/class-plan';
-import { getReadiness, getReadinessClass, getTrackBlob, MAX_DECODED_BYTES, MAX_TRACK_SECONDS } from './offline';
+import { getReadiness, getReadinessClass, getTrackBlob, getTrackFadeProfile, MAX_DECODED_BYTES, MAX_TRACK_SECONDS, saveTrackFadeProfile } from './offline';
+import { analyzeFadeProfile, sweetTransition, type FadeProfile, type SweetTransition } from './fade-profile';
 import { getFillerBuffer, LOFI_ASSET, releaseFillerCache } from './filler-audio';
 import { assertRuntimeDecoderAvailable, decodeRuntimeAudio, estimateRuntimePcm, MAX_RUNTIME_PCM_BYTES, registerRuntimePcm, runtimePcmBytes } from './native-audio';
 import { classFillers, classPhases, fillerKey, snapshotClassAudio } from './session-runtime';
@@ -57,6 +58,8 @@ interface Segment {
   duration: number;
   filler?: Filler;
   crossfade?: number;
+  /** Seconds before the end where this song starts fading out (sweet fades); otherwise the next start. */
+  fadeOut?: number;
   phase?: ClassPhase;
   phaseTrackIndex?: number;
   gainPoints?: GainPoint[];
@@ -107,6 +110,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
   const listeners = new Set<(state: PlayerState) => void>();
   const buffers = new Map<number, AudioBuffer>();
   const voices = new Map<Segment, Voice>();
+  const profiles = new Map<number, FadeProfile>();
   const unregisterPcm = registerRuntimePcm(() => [...buffers.values(), ...fillerBuffers.values(),
     ...[...voices.values()].flatMap(voice => voice.source.buffer ? [voice.source.buffer] : [])]);
   const alarms = new Map<OscillatorNode, { gain: GainNode; when: number }>();
@@ -126,11 +130,55 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     for (const listener of listeners) listener({ ...state });
   };
 
+  function sweetFor(outgoing: number, incoming: number): SweetTransition | null {
+    if (!routine || routine.crossfadeMode !== 'sweet') return null;
+    const after = routine.tracks[outgoing]?.after;
+    if (after?.mode === 'custom' && after.crossfade !== undefined) return null;
+    const first = profiles.get(outgoing);
+    const second = profiles.get(incoming);
+    if (!first || !second) return null;
+    const track = routine.tracks[outgoing]!;
+    const cues = track.cues.flatMap(cue => { try { return [cueSeconds(cue, track)]; } catch { return []; } }).filter(Number.isFinite);
+    return sweetTransition({ duration: track.duration, profile: first, ...(cues.length ? { lastCue: Math.max(...cues) } : {}) },
+      { duration: routine.tracks[incoming]!.duration, profile: second }, transitionAfter(routine, outgoing).crossfade);
+  }
+
+  async function loadFadeProfiles(token: number): Promise<void> {
+    profiles.clear();
+    if (!routine || routine.crossfadeMode !== 'sweet') return;
+    for (const [index, track] of routine.tracks.entries()) {
+      if (token !== generation) return;
+      try {
+        const cached = await getTrackFadeProfile(track.id);
+        if (cached) { profiles.set(index, cached); continue; }
+        const blob = await getTrackBlob(track.id);
+        if (!blob || token !== generation) continue;
+        await decodeRuntimeAudio(() => blob.arrayBuffer(), estimateRuntimePcm(track.duration), 44100, decoded => {
+          if (Math.abs(decoded.duration - track.duration) > 0.1) throw new Error('audio_duration_mismatch');
+        }, decoded => {
+          const channels = Array.from({ length: decoded.numberOfChannels }, (_, channel) => decoded.getChannelData(channel));
+          const profile = analyzeFadeProfile(channels, decoded.sampleRate);
+          profiles.set(index, profile);
+          void saveTrackFadeProfile(track.id, blob, profile).catch(() => undefined);
+        });
+      } catch {
+        // Without a profile this transition falls back to the fixed crossfade.
+      }
+    }
+  }
+
   function addTrackPlan(firstIndex: number, start: number): Segment[] {
     if (!routine) return [];
     const result: Segment[] = [];
     const append = (kind: Segment['kind'], trackIndex: number, duration: number, filler?: Filler) => {
       const previous = result.at(-1);
+      const sweet = kind === 'song' && previous?.kind === 'song' ? sweetFor(previous.trackIndex, trackIndex) : null;
+      if (previous && sweet) {
+        previous.duration = sweet.cut;
+        previous.fadeOut = sweet.fade;
+        result.push({ kind, trackIndex, duration, crossfade: sweet.fade, start: end(previous) - sweet.fade - sweet.lead });
+        return;
+      }
       const crossfade = transitionAfter(routine!, previous?.trackIndex ?? trackIndex).crossfade;
       const requested = kind === 'filler' || previous?.kind === 'filler' ? Math.max(0.01, crossfade) : crossfade;
       const overlap = previous ? transitionOverlap(requested, previous.duration, duration) : 0;
@@ -479,7 +527,8 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     const fadeInEnd = Math.max(segment.start + minimumFade, previous ? end(previous) : segment.start);
     const points = [{ seconds: segment.start, level: 0 }, { seconds: fadeInEnd, level: 1 }];
     if (Number.isFinite(segment.duration)) {
-      points.push({ seconds: Math.max(fadeInEnd, Math.min(end(segment) - minimumFade, next?.start ?? end(segment))), level: 1 });
+      points.push({ seconds: Math.max(fadeInEnd, Math.min(end(segment) - minimumFade,
+        segment.fadeOut !== undefined ? end(segment) - segment.fadeOut : next?.start ?? end(segment))), level: 1 });
       points.push({ seconds: end(segment), level: 0 });
     }
     return points;
@@ -1025,6 +1074,7 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
     classAudio = undefined;
     sourceTracks = [];
     segments = [];
+    profiles.clear();
     routineStart = routineEnd = null;
     checkpoint = alarmFloor = anchor = 0;
     if (context) {
@@ -1080,6 +1130,9 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
             `${recording.name} (${id})` : id);
           throw new Error(`missing_audio${missing.length ? `: ${missing.join(', ')}` : ''}`);
         }
+        segments = [];
+        await loadFadeProfiles(token);
+        if (token !== generation) return;
         segments = initialPlan();
         const recordings = new Map(classFillers(routine, classAudio)
           .filter(filler => filler.sound === 'lofi' || filler.sound === 'recording' && filler.mode !== 'none')

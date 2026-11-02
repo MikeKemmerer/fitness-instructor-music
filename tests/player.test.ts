@@ -16,6 +16,7 @@ const storage = vi.hoisted(() => ({
   requested: [] as string[],
   readinessMissing: [] as string[],
   deferred: new Map<string, Promise<Blob | undefined>>(),
+  profiles: new Map<string, import('../frontend/src/fade-profile').FadeProfile>(),
 }));
 const recording = vi.hoisted(() => ({ get: vi.fn(), blob: vi.fn(), requested: [] as Filler[] }));
 vi.mock('../frontend/src/filler-audio', async original => {
@@ -32,6 +33,8 @@ vi.mock('../frontend/src/offline', async importOriginal => {
     getReadiness: async () => ({ ready: storage.ready, missing: storage.ready ? [] : storage.readinessMissing.length ? storage.readinessMissing : ['missing'] }),
     getReadinessClass: async () => ({ ready: storage.ready, missing: storage.ready ? [] : ['missing'] }),
     getFillerRecordingBlob: recording.blob,
+    getTrackFadeProfile: async (id: string) => storage.profiles.get(id),
+    saveTrackFadeProfile: async () => {},
     getTrackBlob: async (id: string) => {
       storage.requested.push(id);
       return storage.deferred.get(id) ??
@@ -428,6 +431,7 @@ describe('local Web Audio player', () => {
     storage.requested = [];
     storage.missing.clear();
     storage.deferred.clear();
+    storage.profiles.clear();
     nextFrame = undefined;
     vi.stubGlobal('AudioContext', MockContext);
     vi.stubGlobal('OfflineAudioContext', class {
@@ -492,6 +496,28 @@ describe('local Web Audio player', () => {
     expect(state.phase).toBe('walk-out');
     await player.next();
     expect(state.status).toBe('finished');
+  });
+
+  it('sweet fades trim a quiet tail, blend the natural fade and overlap the next song lead-in', async () => {
+    const tail = [...Array(20).fill(-30), ...Array(20).fill(-10), ...Array(40).fill(0)];
+    const head = [...Array(5).fill(-60), ...Array(60).fill(0)];
+    for (const id of ['0', '1', '2']) storage.profiles.set(id, { v: 1, step: 0.1, start: head, end: tail });
+    const value = routine();
+    value.crossfadeMode = 'sweet';
+    value.crossfade = 8;
+    await player.load(value);
+    await player.play();
+    expect(state).toMatchObject({ trackIndex: 0, duration: 10 });
+    await advance(7.4);
+    expect(state.trackIndex).toBe(0);
+    await advance(7.6);
+    expect(state.trackIndex).toBe(1);
+    const fixed = routine();
+    storage.profiles.delete('1');
+    fixed.crossfadeMode = 'sweet';
+    await player.load(fixed);
+    await player.play();
+    expect(state.duration).toBe(12);
   });
 
   it('unified explicit class audio still overrides owned phase playback', async () => {

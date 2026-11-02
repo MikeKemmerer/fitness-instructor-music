@@ -77,6 +77,8 @@ export interface Routine {
   tracks: Track[];
   filler: Filler;
   crossfade: number;
+  /** 'sweet' picks each song-to-song fade from the songs' own loudness, up to `crossfade` seconds. */
+  crossfadeMode?: 'fixed' | 'sweet';
   beepEvery: number;
   beepRemaining: number;
   beepOnceRemaining?: number;
@@ -125,6 +127,7 @@ export function validateRoutine(routine: Routine): string[] {
   if (!Number.isInteger(routine.revision) || routine.revision < 1) errors.push('Invalid revision');
   if (typeof routine.locked !== 'boolean' || typeof routine.published !== 'boolean') errors.push('Invalid routine state');
   if (!nonnegative(routine.crossfade) || routine.crossfade > 12) errors.push('Crossfade must be 0-12 seconds');
+  if (routine.crossfadeMode !== undefined && routine.crossfadeMode !== 'fixed' && routine.crossfadeMode !== 'sweet') errors.push('Invalid crossfade mode');
   if (!nonnegative(routine.beepEvery) || !nonnegative(routine.beepRemaining)) errors.push('Invalid beep timing');
   if (routine.beepOnceRemaining !== undefined && (!nonnegative(routine.beepOnceRemaining) || routine.beepOnceRemaining > 1200)) errors.push('Invalid beep timing');
   if (routine.beepVolume !== undefined && (!nonnegative(routine.beepVolume) || routine.beepVolume > 1)) errors.push('Invalid beep volume');

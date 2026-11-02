@@ -51,7 +51,7 @@ export function duplicateDraft(routine: Routine): Routine {
 
 export function contentFingerprint(routine: Routine): string {
   return JSON.stringify({ name: routine.name, tracks: routine.tracks, filler: routine.filler,
-    crossfade: routine.crossfade, beepEvery: routine.beepEvery, beepRemaining: routine.beepRemaining,
+    crossfade: routine.crossfade, crossfadeMode: routine.crossfadeMode ?? 'fixed', beepEvery: routine.beepEvery, beepRemaining: routine.beepRemaining,
     beepOnceRemaining: routine.beepOnceRemaining ?? 0, beepVolume: routine.beepVolume ?? DEFAULT_BEEP_VOLUME,
     sequence: routine.sequence });
 }
@@ -823,11 +823,24 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     originalTempo.hidden = !['lofi', 'recording'].includes(routine.filler.sound);
   };
   refreshFillers();
+  const fadeSeconds = numberInput(routine.crossfade, 0, 12, value => mutate(() => { routine.crossfade = value; }));
+  const fadeField = field(t(routine.crossfadeMode === 'sweet' ? 'crossfadeLongest' : 'crossfade'), fadeSeconds);
+  const fadeMode = selectInput(routine.crossfadeMode ?? 'fixed', [
+    { value: 'fixed', label: t('crossfadeFixed') }, { value: 'sweet', label: t('crossfadeSweet') },
+  ] as const, value => mutate(() => {
+    if (value === 'sweet') {
+      routine.crossfadeMode = 'sweet';
+      // Sweet fades need room to adapt; a short manual fade would cap every transition.
+      if (routine.crossfade < 4) { routine.crossfade = 8; fadeSeconds.value = '8'; }
+    } else delete routine.crossfadeMode;
+    const label = fadeField.querySelector('.field-label');
+    if (label) label.textContent = t(value === 'sweet' ? 'crossfadeLongest' : 'crossfade');
+  }));
   fillerFields.append(
     field(t('fillerMode'), selectInput(routine.filler.mode, (['none', 'timed', 'hold'] as const).map(value => ({ value, label: t(value) })),
       value => mutate(() => { stopFiller(); routine.filler.mode = value; syncFiller(); }))),
     field(t('fillerDuration'), duration), bpmField, field(t('fillerSound'), sound),
-    field(t('crossfade'), numberInput(routine.crossfade, 0, 12, value => mutate(() => { routine.crossfade = value; }))),
+    field(t('crossfadeMode'), fadeMode), fadeField,
     gainControl(t('fillerGain'), () => routine.filler.gain ?? 1, value => { stopFiller(); routine.filler.gain = value; }).element,
   );
   syncFiller();

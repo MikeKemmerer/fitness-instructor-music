@@ -154,6 +154,15 @@ or replace the sounds in saved routines.
    and fade even when collapsed. It follows that song on reorder. Disabled gaps
    and a last-song custom rule are explicitly marked inactive; returning to the
    routine default removes the override summary.
+6. **Crossfade style** chooses how songs blend when there is no filler between them:
+   - **Manual (fixed length)** fades every song into the next over the same number of seconds.
+   - **Sweet fade (automatic)** listens to how each song ends and the next begins:
+     quiet or silent endings are skipped, natural fade-outs blend into the next song,
+     songs with a hard ending get a quick blend, and silence at the start of the next
+     song is overlapped. Each fade is at most **Longest sweet fade** seconds. It never
+     cuts before a song's last cue or more than 30 seconds early. Songs without a
+     custom fade on their **Filler** action use it. The first preparation of a class
+     measures each song once (this can take a little longer); results are kept on this device.
 6. Configure optional Class sequence phases using section 3 below. They belong to
    this Routine, not a separately saved setup. Enabled music phases need a valid
    playlist selection before Save or preparation.

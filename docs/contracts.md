@@ -1,5 +1,17 @@
 # Initial Rehearsal Contract
 
+## Sweet Fades
+
+`Routine.crossfadeMode?: 'fixed' | 'sweet'` (missing = fixed; API and local stores accept the field). In sweet
+mode `crossfade` is the longest fade. When a class is prepared, the player loads a `FadeProfile` per routine
+song (`frontend/src/fade-profile.ts`: 0.4 s RMS every 0.1 s, in dB relative to the song's 75th-percentile level,
+first 20 s and last 45 s), decoding and caching it on the local `tracks` record (`fadeProfile`) when missing.
+For each song-to-song transition without an explicit per-transition crossfade, `sweetTransition` cuts the outgoing
+song at its last moment louder than -18 dB (not earlier than the last cue + 0.5 s, half the song, or 30 s before the
+end), fades it over max(0.5 s, its natural fade from -4 dB, half of a quiet incoming intro) capped by the longest
+fade, and starts the incoming song early by its leading silence (≤ 8 s). Missing profiles, filler transitions,
+class phases and manual Next keep the fixed crossfade.
+
 ## Plex Music Source
 
 Plex is a browser-direct import source (no API or server changes). `frontend/src/plex-client.ts`

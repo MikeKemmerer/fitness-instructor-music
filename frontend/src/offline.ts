@@ -3,6 +3,7 @@ import { allRoutineFillers, allRoutineTracks, DEFAULT_BEEP_VOLUME, newRoutine, v
 import type { CloudRoutine } from '../../shared/cloud-contract';
 import { AAC_IMPORT } from '../../shared/audio-import';
 import { readAudioTags } from './audio-tags';
+import { validFadeProfile, type FadeProfile } from './fade-profile';
 import { hostedInvalidationEvent, hostedResetKey, hostedUserKey } from './hosted-session';
 import type { ClassAudio, ClassSetup, CloudMusicPlaylist, MusicPlaylist, PreparedClass, RevisionReference } from '../../shared/class-plan';
 import { checkedClassSetup, checkedMusicPlaylist, classFillers, snapshotClassAudio } from './session-runtime';
@@ -18,6 +19,7 @@ interface StoredTrack {
   duration: number;
   sha256?: string;
   filename?: string;
+  fadeProfile?: FadeProfile;
 }
 
 function sourceFilename(name: string): string | undefined {
@@ -240,7 +242,7 @@ export async function inspectLocalAudioReferences(asset: AudioAsset, recordingId
         if (Object.keys(record).some(field => !allowed.includes(field))) complete = false;
       };
       fields(routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
-        'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
+        'crossfade', 'crossfadeMode', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
       for (const track of allRoutineTracks(routine)) {
         fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
         if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
@@ -590,7 +592,7 @@ function checkedWorkingEnvelope(value: CloudRoutine): CloudRoutine {
     if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('invalid_cloud_routine');
   };
   fields(snapshot.routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
-    'crossfade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
+    'crossfade', 'crossfadeMode', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
   if (snapshot.routine.sequence) {
     fields(snapshot.routine.sequence, ['crossfade', 'walkIn', 'before', 'after', 'walkOut']);
     for (const playlist of [snapshot.routine.sequence.walkIn, snapshot.routine.sequence.walkOut]) {
@@ -1773,6 +1775,28 @@ export async function getTrackFilename(id: string): Promise<string | undefined> 
   session?.assert();
   const filename = record?.filename;
   return typeof filename === 'string' ? sourceFilename(filename) : undefined;
+}
+
+export async function getTrackFadeProfile(id: string): Promise<FadeProfile | undefined> {
+  const session = captureMutationSession();
+  const connection = await database(session);
+  let record: StoredTrack | undefined;
+  try { record = await connection.get('tracks', id); }
+  finally { connection.close(); }
+  session?.assert();
+  return validFadeProfile(record?.fadeProfile) ? structuredClone(record.fadeProfile) : undefined;
+}
+
+/** Stores the profile only while the record still holds the same audio bytes it was measured from. */
+export async function saveTrackFadeProfile(id: string, blob: Blob, profile: FadeProfile): Promise<void> {
+  if (!validFadeProfile(profile)) throw new Error('invalid_fade_profile');
+  const session = captureMutationSession();
+  await mutate(session, ['tracks'], async transaction => {
+    const tracks = transaction.objectStore('tracks');
+    const record = await tracks.get(id);
+    if (!record || record.bytes !== blob.size || record.blob.size !== blob.size) return;
+    await tracks.put({ ...record, fadeProfile: structuredClone(profile) }, id);
+  });
 }
 
 function fillerSnapshot(recording: FillerRecording): FillerRecording {

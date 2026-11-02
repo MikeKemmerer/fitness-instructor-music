@@ -252,6 +252,8 @@ export const enUS = {
   transitions: 'Between tracks', fillerMode: 'Filler mode', none: 'None', timed: 'Timed',
   fillerDuration: 'Filler duration (seconds)', fillerBpm: 'Filler BPM', fillerSound: 'Filler sound',
   soft: 'Synthetic soft', bright: 'Synthetic bright', drums: 'Synthetic drums', silence: 'Silence', crossfade: 'Crossfade (seconds)',
+  crossfadeMode: 'Crossfade style', crossfadeFixed: 'Manual (fixed length)', crossfadeSweet: 'Sweet fade (automatic)',
+  crossfadeLongest: 'Longest sweet fade (seconds)', invalidCrossfadeMode: 'Invalid crossfade style.',
   lofi: 'Lo-fi instrumental (CC0)', originalTempo: 'Original tempo',
   fillerLibrary: 'Filler library', localFillerLibrary: 'Library on this device',
   customFillers: 'Custom recordings', builtInFillers: 'Built-in', retainedFillers: 'Retained by this routine',
