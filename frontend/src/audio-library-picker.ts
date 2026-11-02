@@ -5,7 +5,7 @@ import { allRoutineTracks, type Track } from '../../shared/routine';
 import { captureCloudIdentity, getCloudContext, getCloudRole, subscribeCloudSession } from './cloud-client';
 import { cloudErrorMessage } from './cloud-ui';
 import { cloudHash, createCloudLibrary } from './cloud-library';
-import { cacheCloudTrack, getTrackBlob, listCloudRoutines, listRoutines, listRoutineWorkingCopies } from './offline';
+import { cacheCloudTrack, getTrackBlob, getTrackFadeProfile, listCloudRoutines, listRoutines, listRoutineWorkingCopies, saveTrackFadeProfile } from './offline';
 import { readAudioTags } from './audio-tags';
 import { formatNumber, formatTime, t } from './i18n';
 import { element, field, iconButton, transientText } from './ui';
@@ -216,8 +216,14 @@ export function createAudioLibraryPicker(context: {
       for (const item of selected.values()) {
         const track = await prepareItem(item, signal, current);
         const blob = await getTrackBlob(track.id); current(); if (!blob) throw new Error('missing_audio');
+        const source = track.id;
         track.id = crypto.randomUUID();
         await cacheCloudTrack(track.id, blob, item.asset.sha256); current();
+        try {
+          const profile = await getTrackFadeProfile(source);
+          if (profile) await saveTrackFadeProfile(track.id, blob, profile);
+        } catch {}
+        current();
         tracks.push(track); media[track.id] = structuredClone(item.asset);
       }
       current(); context.added(tracks, media); dismiss?.();

@@ -12,6 +12,14 @@ end), fades it over max(0.5 s, its natural fade from -4 dB, half of a quiet inco
 fade, and starts the incoming song early by its leading silence (≤ 8 s). Missing profiles, filler transitions,
 class phases and manual Next keep the fixed crossfade.
 
+Plex imports read the audio stream's `startRamp`/`endRamp` (`"dB seconds;..."`, seconds from the song edge, dB
+relative to Plex loudness) from `/library/metadata/{key}?includeLoudnessRamps=1`; well-formed ramps (≤ 45 s,
+non-decreasing times) are resampled to a `FadeProfile` and cached for the new track when its imported duration
+is within 1 s of Plex's. Reusing library audio copies a cached profile to the new track id.
+
+`Routine.skipFade?: number` (0-12 s) is the fade for manual Next in the routine phase. When missing it is the
+previous behavior (transition crossfade) in fixed mode and `DEFAULT_SWEET_SKIP_FADE` (2 s) in sweet mode.
+
 ## Plex Music Source
 
 Plex is a browser-direct import source (no API or server changes). `frontend/src/plex-client.ts`

@@ -242,7 +242,7 @@ export async function inspectLocalAudioReferences(asset: AudioAsset, recordingId
         if (Object.keys(record).some(field => !allowed.includes(field))) complete = false;
       };
       fields(routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
-        'crossfade', 'crossfadeMode', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
+        'crossfade', 'crossfadeMode', 'skipFade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
       for (const track of allRoutineTracks(routine)) {
         fields(track, ['id', 'title', 'artist', 'duration', 'bpm', 'firstBeat', 'cues', 'bodyArea', 'gain', 'after']);
         if (track.after) fields(track.after, track.after.mode === 'none' ? ['mode'] : ['mode', 'filler', 'crossfade']);
@@ -592,7 +592,7 @@ function checkedWorkingEnvelope(value: CloudRoutine): CloudRoutine {
     if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('invalid_cloud_routine');
   };
   fields(snapshot.routine, ['schemaVersion', 'id', 'name', 'revision', 'locked', 'published', 'tracks', 'filler',
-    'crossfade', 'crossfadeMode', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
+    'crossfade', 'crossfadeMode', 'skipFade', 'beepEvery', 'beepRemaining', 'beepOnceRemaining', 'beepVolume', 'sequence', 'savedAt']);
   if (snapshot.routine.sequence) {
     fields(snapshot.routine.sequence, ['crossfade', 'walkIn', 'before', 'after', 'walkOut']);
     for (const playlist of [snapshot.routine.sequence.walkIn, snapshot.routine.sequence.walkOut]) {

@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Check, GripVertical, Pause, Pencil, Play, Plus, ScanLine, Square, Trash2, ChevronsRight, Minus, Hand } from 'lucide';
-import { cueSeconds, DEFAULT_BEEP_VOLUME, reorderTrack, transitionAfter, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
+import { cueSeconds, DEFAULT_BEEP_VOLUME, DEFAULT_SWEET_SKIP_FADE, reorderTrack, transitionAfter, validateRoutine, type Cue, type Filler, type FillerRecording, type Routine, type Track } from '../../shared/routine';
 import type { AudioPreview, BpmEstimate, LoudnessEstimate, PreviewState } from '../../shared/preview-contract';
 import { formatCueTime, parseCueTime } from './cue-time';
 import { formatNumber, formatTime, t } from './i18n';
@@ -51,7 +51,7 @@ export function duplicateDraft(routine: Routine): Routine {
 
 export function contentFingerprint(routine: Routine): string {
   return JSON.stringify({ name: routine.name, tracks: routine.tracks, filler: routine.filler,
-    crossfade: routine.crossfade, crossfadeMode: routine.crossfadeMode ?? 'fixed', beepEvery: routine.beepEvery, beepRemaining: routine.beepRemaining,
+    crossfade: routine.crossfade, crossfadeMode: routine.crossfadeMode ?? 'fixed', skipFade: routine.skipFade, beepEvery: routine.beepEvery, beepRemaining: routine.beepRemaining,
     beepOnceRemaining: routine.beepOnceRemaining ?? 0, beepVolume: routine.beepVolume ?? DEFAULT_BEEP_VOLUME,
     sequence: routine.sequence });
 }
@@ -823,7 +823,10 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     originalTempo.hidden = !['lofi', 'recording'].includes(routine.filler.sound);
   };
   refreshFillers();
-  const fadeSeconds = numberInput(routine.crossfade, 0, 12, value => mutate(() => { routine.crossfade = value; }));
+  const skipDefault = () => routine.crossfadeMode === 'sweet' ? DEFAULT_SWEET_SKIP_FADE : routine.crossfade;
+  const skipSeconds = numberInput(routine.skipFade ?? skipDefault(), 0, 12, value => mutate(() => { routine.skipFade = value; }));
+  const syncSkipDefault = () => { if (routine.skipFade === undefined) skipSeconds.value = String(skipDefault()); };
+  const fadeSeconds = numberInput(routine.crossfade, 0, 12, value => mutate(() => { routine.crossfade = value; syncSkipDefault(); }));
   const fadeField = field(t(routine.crossfadeMode === 'sweet' ? 'crossfadeLongest' : 'crossfade'), fadeSeconds);
   const fadeMode = selectInput(routine.crossfadeMode ?? 'fixed', [
     { value: 'fixed', label: t('crossfadeFixed') }, { value: 'sweet', label: t('crossfadeSweet') },
@@ -833,6 +836,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
       // Sweet fades need room to adapt; a short manual fade would cap every transition.
       if (routine.crossfade < 4) { routine.crossfade = 8; fadeSeconds.value = '8'; }
     } else delete routine.crossfadeMode;
+    syncSkipDefault();
     const label = fadeField.querySelector('.field-label');
     if (label) label.textContent = t(value === 'sweet' ? 'crossfadeLongest' : 'crossfade');
   }));
@@ -840,7 +844,7 @@ export function renderEditor(host: HTMLElement, routine: Routine, changed: (stru
     field(t('fillerMode'), selectInput(routine.filler.mode, (['none', 'timed', 'hold'] as const).map(value => ({ value, label: t(value) })),
       value => mutate(() => { stopFiller(); routine.filler.mode = value; syncFiller(); }))),
     field(t('fillerDuration'), duration), bpmField, field(t('fillerSound'), sound),
-    field(t('crossfadeMode'), fadeMode), fadeField,
+    field(t('crossfadeMode'), fadeMode), fadeField, field(t('skipFade'), skipSeconds),
     gainControl(t('fillerGain'), () => routine.filler.gain ?? 1, value => { stopFiller(); routine.filler.gain = value; }).element,
   );
   syncFiller();

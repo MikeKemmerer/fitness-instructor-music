@@ -72,6 +72,7 @@ function fakeClient() {
     thumbUrl: vi.fn(() => 'https://thumb'),
     audioUrl: vi.fn(() => ({ url: `${link.uri}/library/parts/9/file.mp3?X-Plex-Token=server-token`, direct: true })),
     download: vi.fn(async () => new File([new Uint8Array([1])], 'Levitating.mp3', { type: 'audio/mpeg' })),
+    fadeProfile: vi.fn(async () => ({ v: 1 as const, step: 0.1, start: [-50, 0], end: [-50, 0] })),
   };
 }
 
@@ -122,7 +123,8 @@ describe('plex picker', () => {
     store.sessions.set('user-1', { owner: 'user-1', accountToken: 'account-token', user: { uuid: 'u2', title: 'Kid', admin: false, protected: false },
       userToken: 'token-u2', serverId: 'srv1', serverName: 'kfam00' });
     const client = fakeClient();
-    const { instance, added } = picker(client);
+    const keepFadeProfile = vi.fn(async () => {});
+    const { instance, added } = picker(client, { keepFadeProfile });
     instance.element.click();
     await vi.waitFor(() => expect(body.querySelector('input')).toBeDefined());
     const search = body.querySelectorAll('input').find(node => node.type === 'search')!;
@@ -138,6 +140,7 @@ describe('plex picker', () => {
     expect(added.mock.calls[0]![0][0]).toMatchObject({ title: 'Levitating', artist: 'Dua Lipa' });
     expect(added.mock.calls[0]![1]).toEqual([]);
     expect(client.audioUrl).not.toHaveBeenCalled();
+    expect(keepFadeProfile).toHaveBeenCalledWith(added.mock.calls[0]![0][0].id, { v: 1, step: 0.1, start: [-50, 0], end: [-50, 0] });
     instance.dispose();
   });
 

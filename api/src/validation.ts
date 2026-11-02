@@ -180,6 +180,7 @@ export function parseRoutineContent(input: unknown): RoutineContent {
     const fields = ['schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
     if (Object.prototype.hasOwnProperty.call(input, 'beepOnceRemaining')) fields.push('beepOnceRemaining');
     if (Object.prototype.hasOwnProperty.call(input, 'crossfadeMode')) fields.push('crossfadeMode');
+    if (Object.prototype.hasOwnProperty.call(input, 'skipFade')) fields.push('skipFade');
     if (Object.prototype.hasOwnProperty.call(input, 'beepVolume')) fields.push('beepVolume');
     if (Object.prototype.hasOwnProperty.call(input, 'sequence')) fields.push('sequence');
     if (Object.prototype.hasOwnProperty.call(input, 'savedAt')) fields.push('savedAt');
@@ -195,6 +196,7 @@ export function parseRoutineContent(input: unknown): RoutineContent {
       if (value.crossfadeMode !== 'fixed' && value.crossfadeMode !== 'sweet') invalid();
       content.crossfadeMode = value.crossfadeMode;
     }
+    if (fields.includes('skipFade')) content.skipFade = number(value.skipFade);
     if (fields.includes('beepVolume')) content.beepVolume = number(value.beepVolume);
     if (fields.includes('sequence')) content.sequence = parseSequence(value.sequence);
     if (fields.includes('savedAt')) content.savedAt = number(value.savedAt);

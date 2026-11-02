@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeFadeProfile, sweetTransition, validFadeProfile, type FadeProfile } from '../frontend/src/fade-profile';
+import { analyzeFadeProfile, plexFadeProfile, sweetTransition, validFadeProfile, type FadeProfile } from '../frontend/src/fade-profile';
 
 const rate = 8000;
 function song(seconds: number, level: (time: number) => number): Float32Array[] {
@@ -35,6 +35,31 @@ describe('fade profile analysis', () => {
 
 describe('sweet transitions', () => {
   const loudStart = profile([0, ...Array(100).fill(0)], [0]);
+
+  it('converts Plex loudness ramps into the same profile shape', () => {
+    const result = plexFadeProfile(
+      '-51.00 0.00;-33.65 0.70;-27.29 0.80;-22.95 0.90;-20.02 1.10;-17.85 4.20;-12.77 5.10;-8.76 5.20;-5.85 8.30;-2.19 9.50;0.61 9.80;',
+      '-51.00 0.11;-31.97 0.31;-29.96 0.61;-22.98 1.51;-15.36 1.61;-9.44 1.71;-5.77 1.81;-1.93 2.01;0.66 2.61;')!;
+    expect(validFadeProfile(result)).toBe(true);
+    expect(result.step).toBe(0.1);
+    expect(result.start[0]).toBe(-51);
+    expect(Math.abs(result.start[7]! + 33.65)).toBeLessThanOrEqual(0.06);
+    expect(result.start.at(-1)).toBe(0.6);
+    expect(result.end[0]).toBe(-51);
+    expect(result.end[16]).toBeCloseTo(-16.1, 1);
+    expect(result.end.at(-1)).toBe(0.7);
+    const transition = sweetTransition({ duration: 184.8, profile: result }, { duration: 200, profile: result }, 8);
+    expect(transition.cut).toBeCloseTo(184.8 - 1.6, 1);
+    expect(transition.lead).toBeGreaterThan(0);
+  });
+
+  it('ignores missing or incompatible Plex ramps', () => {
+    expect(plexFadeProfile('', '0 1')).toBeUndefined();
+    expect(plexFadeProfile('0 1', undefined)).toBeUndefined();
+    expect(plexFadeProfile('0 2;0 1', '0 1')).toBeUndefined();
+    expect(plexFadeProfile('x 1', '0 1')).toBeUndefined();
+    expect(plexFadeProfile('0 1', '0 120')).toBeUndefined();
+  });
 
   it('cuts a quiet tail and overlaps the natural fade-out up to the longest fade', () => {
     const tail = [...Array(60).fill(-30), ...Array(60).fill(-10), ...Array(100).fill(0)];

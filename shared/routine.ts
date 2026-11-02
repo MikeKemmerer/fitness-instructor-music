@@ -2,6 +2,7 @@ export type Role = 'owner' | 'editor' | 'player';
 
 // Routines saved before beepVolume existed play at this gain.
 export const DEFAULT_BEEP_VOLUME = 0.8;
+export const DEFAULT_SWEET_SKIP_FADE = 2;
 
 export type CueAnchor =
   | { kind: 'timestamp'; seconds: number }
@@ -79,6 +80,8 @@ export interface Routine {
   crossfade: number;
   /** 'sweet' picks each song-to-song fade from the songs' own loudness, up to `crossfade` seconds. */
   crossfadeMode?: 'fixed' | 'sweet';
+  /** Fade used when the instructor skips to the next song; defaults to the crossfade (fixed) or 2 s (sweet). */
+  skipFade?: number;
   beepEvery: number;
   beepRemaining: number;
   beepOnceRemaining?: number;
@@ -128,6 +131,7 @@ export function validateRoutine(routine: Routine): string[] {
   if (typeof routine.locked !== 'boolean' || typeof routine.published !== 'boolean') errors.push('Invalid routine state');
   if (!nonnegative(routine.crossfade) || routine.crossfade > 12) errors.push('Crossfade must be 0-12 seconds');
   if (routine.crossfadeMode !== undefined && routine.crossfadeMode !== 'fixed' && routine.crossfadeMode !== 'sweet') errors.push('Invalid crossfade mode');
+  if (routine.skipFade !== undefined && (!nonnegative(routine.skipFade) || routine.skipFade > 12)) errors.push('Invalid skip fade');
   if (!nonnegative(routine.beepEvery) || !nonnegative(routine.beepRemaining)) errors.push('Invalid beep timing');
   if (routine.beepOnceRemaining !== undefined && (!nonnegative(routine.beepOnceRemaining) || routine.beepOnceRemaining > 1200)) errors.push('Invalid beep timing');
   if (routine.beepVolume !== undefined && (!nonnegative(routine.beepVolume) || routine.beepVolume > 1)) errors.push('Invalid beep volume');

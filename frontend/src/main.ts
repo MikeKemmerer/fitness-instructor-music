@@ -14,7 +14,7 @@ import { createPlayer } from './player';
 import { createAudioPreview } from './audio-preview';
 import { detectTrackBpm } from './bpm';
 import { analyzeTrackLoudness } from './loudness';
-import { cacheCloudRoutine, createDemoRoutine, deleteRoutine, getCachedClassSetup, getPreparedClass, getCloudRoutine, getFillerRecordingBlob, getReadiness, getRoutine, listRoutines, publishRoutine, saveRoutine, setActiveRoutine, storeTrack } from './offline';
+import { cacheCloudRoutine, createDemoRoutine, deleteRoutine, getCachedClassSetup, getPreparedClass, getCloudRoutine, getFillerRecordingBlob, getReadiness, getRoutine, listRoutines, publishRoutine, saveRoutine, saveTrackFadeProfile, setActiveRoutine, storeTrack, getTrackBlob } from './offline';
 import { getFillerBuffer } from './filler-audio';
 import type { CloudRoutine, CloudRoutineSummary } from '../../shared/cloud-contract';
 import { captureCloudIdentity, getCloudContext, getCloudRole, refreshCloudSession, subscribeCloudSession, CloudRequestError } from './cloud-client';
@@ -1040,6 +1040,10 @@ const plexPicker = createPlexPicker({
   available: () => routineOpen && canEdit() && !draft.locked && !editorBusy && !transportOperation.pending && !appDisposed,
   remaining: () => 100 - allRoutineTracks(draft).length,
   store: (file, signal) => storeTrack(file, signal),
+  keepFadeProfile: async (id, profile) => {
+    const blob = await getTrackBlob(id);
+    if (blob) await saveTrackFadeProfile(id, blob, profile);
+  },
   beforePreview: stopEditorAudio,
   restoreFocus: () => { if (!appDisposed && routineOpen && activeTab === 'edit') addTrackMenu.trigger.focus({ preventScroll: true }); },
   added: (tracks, failures, playlist) => {

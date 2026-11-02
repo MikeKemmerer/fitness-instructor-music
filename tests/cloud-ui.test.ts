@@ -20,6 +20,7 @@ const appMocks = vi.hoisted(() => ({
   saveDraftRecovery: vi.fn(), removeDraftRecovery: vi.fn(), listDraftRecoveries: vi.fn(async () => []),
   getRoutine: vi.fn(), listRoutines: vi.fn(), getCloudRoutine: vi.fn(), getTrackBlob: vi.fn(),
   cacheCloudRoutine: vi.fn(), cacheCloudTrack: vi.fn(), saveRoutine: vi.fn(), setActiveRoutine: vi.fn(),
+  getTrackFadeProfile: vi.fn(async () => undefined), saveTrackFadeProfile: vi.fn(async () => undefined),
   getActiveRoutineSelection: vi.fn(async () => null), setActiveRoutineSelection: vi.fn(), listCachedClassSetups: vi.fn(async (): Promise<ClassSetup[]> => []),
   storeTrack: vi.fn(), createDemoRoutine: vi.fn(), getReadiness: vi.fn(), filler: vi.fn(),
   listFillerRecordings: vi.fn(), addFillerRecording: vi.fn(), removeFillerRecording: vi.fn(),

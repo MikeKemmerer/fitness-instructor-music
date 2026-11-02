@@ -122,6 +122,21 @@ describe('plex client', () => {
     expect(client.audioUrl(link, large).direct).toBe(false);
   });
 
+  it('reads Plex loudness ramps from the track details when present', async () => {
+    const detail = (stream: Record<string, unknown>) => json({ MediaContainer: { Metadata: [{ ...trackItem(),
+      Media: [{ Part: [{ key: '/library/parts/9/file.mp3', Stream: [{ streamType: 2, ...stream }] }] }] }] } });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(detail({ startRamp: '-51.00 0.00;0.61 1.00;', endRamp: '-51.00 0.11;0.66 2.61;' }))
+      .mockResolvedValueOnce(detail({}));
+    const client = createPlexClient({ fetch, clientId: 'client-0000000000000001' });
+    const track = toTrack(trackItem())!;
+    const profile = await client.fadeProfile(link, track);
+    expect(fetch.mock.calls[0]![0]).toBe(`${link.uri}/library/metadata/42?includeLoudnessRamps=1&X-Plex-Token=server-token`);
+    expect(profile).toMatchObject({ v: 1, step: 0.1 });
+    expect(profile!.end.at(-1)).toBe(0.7);
+    await expect(client.fadeProfile(link, track)).resolves.toBeUndefined();
+  });
+
   it('reports an expired Plex token as a sign-in requirement', async () => {
     const fetch = vi.fn().mockResolvedValueOnce(new Response('', { status: 401 }));
     const client = createPlexClient({ fetch, clientId: 'client-0000000000000001' });

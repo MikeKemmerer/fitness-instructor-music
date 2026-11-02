@@ -1,4 +1,4 @@
-import { cueSeconds, DEFAULT_BEEP_VOLUME, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
+import { cueSeconds, DEFAULT_BEEP_VOLUME, DEFAULT_SWEET_SKIP_FADE, transitionAfter, validateRoutine, type Cue, type Filler, type Routine, type Track } from '../../shared/routine';
 import type { Player, PlayerState } from '../../shared/player-contract';
 import { routineClassAudio, type ClassAudio, type ClassPhase } from '../../shared/class-plan';
 import { getReadiness, getReadinessClass, getTrackBlob, getTrackFadeProfile, MAX_DECODED_BYTES, MAX_TRACK_SECONDS, saveTrackFadeProfile } from './offline';
@@ -836,7 +836,8 @@ export function createPlayer(): Player & { advance(): Promise<void>; previous():
       if (ownerAt(handoff) !== current) return;
       const voice = wasRunning ? voices.get(current) : undefined;
       const fade = targetPhase !== phase || phase !== 'routine' ? classAudio?.crossfade ?? 0 :
-        current.filler ? current.crossfade ?? routine.crossfade : transitionAfter(routine, current.trackIndex).crossfade;
+        routine.skipFade ?? (routine.crossfadeMode === 'sweet' ? DEFAULT_SWEET_SKIP_FADE :
+          current.filler ? current.crossfade ?? routine.crossfade : transitionAfter(routine, current.trackIndex).crossfade);
       const overlap = voice ? Math.min(
         Math.max(0.01, transitionOverlap(fade, current.duration, upcoming[0].duration)),
         Math.max(0, end(current) - handoff),

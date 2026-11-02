@@ -2,6 +2,7 @@ import { ArrowLeft, Check, ChevronRight, ListMusic, LockKeyhole, LogIn, Play, Pl
 import type { Track } from '../../shared/routine';
 import { createPlexClient, type PlexArtist, type PlexClient, type PlexHomeUser, type PlexLink, type PlexPlaylist, type PlexServer, type PlexTrack } from './plex-client';
 import { clearPlexSession, loadPlexSession, savePlexSession, type PlexSession } from './plex-session';
+import type { FadeProfile } from './fade-profile';
 import { formatTime, t, type MessageKey } from './i18n';
 import { element, iconButton, setButtonIcon, transientText } from './ui';
 
@@ -30,6 +31,7 @@ export function createPlexPicker(context: {
   remaining(): number;
   store(file: File, signal: AbortSignal): Promise<Track>;
   added(tracks: Track[], failures: string[], playlist?: string): void;
+  keepFadeProfile?(trackId: string, profile: FadeProfile): Promise<void>;
   beforePreview?(): void;
   restoreFocus?(): void;
   client?: PlexClient;
@@ -468,9 +470,14 @@ export function createPlexPicker(context: {
           progress = t('plexAdding', { current: index + 1, total: items.length }); render();
           try {
             const file = await client.download(active, item, signal); current();
+            const profile = await client.fadeProfile(active, item, signal).catch(() => undefined); current();
             const track = await context.store(file, signal); current();
             if (item.title) track.title = item.title.slice(0, 160);
             if (item.artist) track.artist = item.artist.slice(0, 300);
+            // Plex's ramps are timed against its copy; only trust them when our import has the same length.
+            if (profile && Math.abs(track.duration - item.duration) <= 1) {
+              await context.keepFadeProfile?.(track.id, profile).catch(() => undefined); current();
+            }
             tracks.push(track);
           } catch (reason) {
             current(); if (signal.aborted) throw reason;

@@ -73,6 +73,49 @@ export function validFadeProfile(value: unknown): value is FadeProfile {
   return profile.v === 1 && profile.step > 0 && profile.step <= 1 && levels(profile.start) && levels(profile.end);
 }
 
+/** Parses a Plex loudness ramp ("dB seconds;dB seconds;..."), where seconds count from the song edge. */
+function parsePlexRamp(value: unknown): [number, number][] | null {
+  if (typeof value !== 'string' || !value.trim() || value.length > 8000) return null;
+  const points = value.split(';').map(part => part.trim()).filter(Boolean).map(part => part.split(/\s+/).map(Number));
+  if (!points.length || points.length > 400) return null;
+  let previous = -Infinity;
+  for (const point of points) {
+    if (point.length !== 2 || !point.every(Number.isFinite)) return null;
+    const [level, seconds] = point as [number, number];
+    if (level < -120 || level > 30 || seconds < 0 || seconds > TAIL_SECONDS || seconds < previous) return null;
+    previous = seconds;
+  }
+  return points as [number, number][];
+}
+
+function sampleRamp(points: [number, number][]): number[] {
+  const last = points.at(-1)!;
+  const levels: number[] = [];
+  for (let index = 0; index * STEP <= last[1] + 1 + 1e-9; index++) {
+    const seconds = index * STEP;
+    const after = points.findIndex(([, time]) => time >= seconds);
+    let level: number;
+    if (after < 0) level = last[0];
+    else if (after === 0) level = points[0]![0];
+    else {
+      const [fromLevel, fromTime] = points[after - 1]!;
+      const [toLevel, toTime] = points[after]!;
+      level = toTime === fromTime ? toLevel : fromLevel + (toLevel - fromLevel) * (seconds - fromTime) / (toTime - fromTime);
+    }
+    levels.push(Math.round(Math.max(-90, Math.min(12, level)) * 10) / 10);
+  }
+  return levels;
+}
+
+/** Converts Plex's start/end loudness ramps (dB relative to the song's loudness) when both are well formed. */
+export function plexFadeProfile(startRamp: unknown, endRamp: unknown): FadeProfile | undefined {
+  const start = parsePlexRamp(startRamp);
+  const end = parsePlexRamp(endRamp);
+  if (!start || !end) return undefined;
+  const profile: FadeProfile = { v: 1, step: STEP, start: sampleRamp(start), end: sampleRamp(end) };
+  return validFadeProfile(profile) ? profile : undefined;
+}
+
 /**
  * Picks where the outgoing song stops and how long it fades, from both songs' loudness:
  * quiet or silent endings are cut, natural fade-outs overlap the next song, abrupt endings get a short blend,

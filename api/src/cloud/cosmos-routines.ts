@@ -47,6 +47,7 @@ export class CosmosRoutines extends CloudDocumentsCosmos<CloudRoutine, Routine, 
     const fields = ['id', 'revision', 'locked', 'published', 'schemaVersion', 'name', 'tracks', 'filler', 'crossfade', 'beepEvery', 'beepRemaining'];
     if (Object.hasOwn(value.routine, 'beepOnceRemaining')) fields.push('beepOnceRemaining');
     if (Object.hasOwn(value.routine, 'crossfadeMode')) fields.push('crossfadeMode');
+    if (Object.hasOwn(value.routine, 'skipFade')) fields.push('skipFade');
     if (Object.hasOwn(value.routine, 'beepVolume')) fields.push('beepVolume');
     if (Object.hasOwn(value.routine, 'sequence')) fields.push('sequence');
     if (Object.hasOwn(value.routine, 'savedAt')) fields.push('savedAt');

@@ -520,6 +520,22 @@ describe('local Web Audio player', () => {
     expect(state.duration).toBe(12);
   });
 
+  it.each([
+    [{ crossfadeMode: 'sweet' as const }, 2],
+    [{ crossfadeMode: 'sweet' as const, skipFade: 0.5 }, 0.5],
+    [{ skipFade: 1 }, 1],
+    [{}, 5],
+  ])('fades a manual skip with the skip fade setting %j', async (settings, expected) => {
+    const value = Object.assign(routine(), { crossfade: 8 }, settings);
+    await player.load(value);
+    await player.play();
+    await advance(1);
+    const outgoing = MockContext.latest.sources.find(source => source.started)!;
+    await player.next();
+    expect(state.trackIndex).toBe(1);
+    expect(outgoing.stop.mock.calls.at(-1)![0]).toBeCloseTo(MockContext.latest.currentTime + expected, 3);
+  });
+
   it('unified explicit class audio still overrides owned phase playback', async () => {
     const value = routine();
     value.sequence = { crossfade: 0, before: { mode: 'hold', seconds: 0, bpm: 100, sound: 'soft' } };

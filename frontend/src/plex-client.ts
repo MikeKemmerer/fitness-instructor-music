@@ -1,4 +1,5 @@
 /** Browser-direct Plex client: plex.tv sign-in, Plex Home users, server discovery, music search and audio download. */
+import { plexFadeProfile, type FadeProfile } from './fade-profile';
 export const PLEX_PRODUCT = 'Fitness Music Player';
 const PLEX_TV = 'https://plex.tv/api/v2';
 const CLIENT_KEY = 'fitness-plex-client-id';
@@ -154,6 +155,16 @@ export function createPlexClient(options: { fetch?: Fetch; clientId?: string } =
     async playlistTracks(link: PlexLink, playlistKey: string, signal?: AbortSignal): Promise<PlexTrack[]> {
       return metadata(await server(link, `/playlists/${encodeURIComponent(playlistKey)}/items`, signal))
         .map(toTrack).filter((track): track is PlexTrack => track !== null);
+    },
+
+    /** Plex's own loudness analysis of the song's start and end, when the server has it. */
+    async fadeProfile(link: PlexLink, track: PlexTrack, signal?: AbortSignal): Promise<FadeProfile | undefined> {
+      const item = metadata(await server(link, `/library/metadata/${encodeURIComponent(track.key)}?includeLoudnessRamps=1`, signal))[0];
+      const media = Array.isArray(item?.Media) ? item.Media[0] as Record<string, unknown> : undefined;
+      const part = media && Array.isArray(media.Part) ? media.Part[0] as Record<string, unknown> : undefined;
+      const streams = part && Array.isArray(part.Stream) ? part.Stream as Record<string, unknown>[] : [];
+      const audio = streams.find(stream => stream.streamType === 2);
+      return audio ? plexFadeProfile(audio.startRamp, audio.endRamp) : undefined;
     },
 
     thumbUrl(link: PlexLink, thumb: string, size = 96): string {

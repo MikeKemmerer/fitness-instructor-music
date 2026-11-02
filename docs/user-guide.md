@@ -163,6 +163,9 @@ or replace the sounds in saved routines.
      cuts before a song's last cue or more than 30 seconds early. Songs without a
      custom fade on their **Filler** action use it. The first preparation of a class
      measures each song once (this can take a little longer); results are kept on this device.
+     Songs added from Plex reuse Plex's own loudness analysis when it matches the imported song.
+   - **Skip fade (seconds)** is the fade used when you press **Next** during the routine.
+     If you never change it, it follows the crossfade in Manual mode and is 2 seconds in Sweet fade mode.
 6. Configure optional Class sequence phases using section 3 below. They belong to
    this Routine, not a separately saved setup. Enabled music phases need a valid
    playlist selection before Save or preparation.

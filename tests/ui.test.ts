@@ -145,6 +145,7 @@ const mocks = vi.hoisted(() => ({
   publishRoutine: vi.fn(), deleteRoutine: vi.fn(), deleteRoutineAndWorkingCopy: vi.fn(),
   getCachedClassSetup: vi.fn(), getPreparedClass: vi.fn(),
   getTrackBlob: vi.fn(), cacheCloudTrack: vi.fn(),
+  getTrackFadeProfile: vi.fn(async () => undefined), saveTrackFadeProfile: vi.fn(async () => undefined),
   inspectLocalAudioReferences: vi.fn(async (): Promise<LocalAudioUsage> => ({ references: [], complete: true })),
   createAudioPreview: vi.fn(), detectBpm: vi.fn(), analyzeLoudness: vi.fn(),
   exportExcel: vi.fn(), exportPdf: vi.fn(), downloadExport: vi.fn(),
